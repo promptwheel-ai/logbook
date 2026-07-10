@@ -158,3 +158,9 @@ test("--since scopes the era", () => {
   const events = collectEvents(repo, opts);
   assert.equal(events.length, 2); // revert + epilogue only
 });
+
+test("-n cap is surfaced, not silent", () => {
+  const out = execFileSync(process.execPath, [CLI, repo, "-n", "5"], { encoding: "utf8" });
+  assert.match(out, /capped — use -n for more/);
+  assert.match(readFileSync(join(repo, "LOGBOOK.md"), "utf8"), /Analysis capped at 5 commits/);
+});

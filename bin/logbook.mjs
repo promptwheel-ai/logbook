@@ -20,8 +20,8 @@ import { resolve, join, basename } from "node:path";
 export const TEST_PAT =
   /(^|\/)(tests?|__tests__|spec|specs|fixtures?|snapshots?|__snapshots__|golden)\/|\.(test|spec)\.[jt]sx?$|_test\.(go|py|rb)$|conftest\.py$|(^|\/)(jest|vitest|playwright|cypress|karma)\.config/i;
 export const CONFIG_PAT =
-  /(^|\/)(\.eslintrc|eslint\.config|tsconfig[^/]*\.json|pytest\.ini|setup\.cfg|tox\.ini|\.rubocop|\.github\/|Dockerfile|docker-compose|vercel\.json|package\.json|.*\.ya?ml)$/i;
-export const DOC_PAT = /\.(md|txt|rst|adoc)$|^LICENSE|^docs\//i;
+  /(^|\/)(\.eslintrc|eslint\.config|tsconfig[^/]*\.json|pytest\.ini|setup\.cfg|setup\.py|tox\.ini|\.rubocop|\.github\/|Dockerfile|docker-compose|vercel\.json|package\.json|Cargo\.toml|pyproject\.toml|go\.(mod|sum)|Gemfile|Rakefile|mix\.exs|composer\.json|CMakeLists\.txt|Makefile|\.pre-commit-config[^/]*|.*\.ya?ml)$/i;
+export const DOC_PAT = /\.(md|txt|rst|adoc)$|(^|\/)(LICENSE|CHANGELOG|CHANGES|NEWS|AUTHORS|CONTRIBUTORS|HISTORY|COPYING)([^/]*)?$|^docs\//i;
 export const GEN_PAT =
   /node_modules\/|\.map$|\.lock$|lock\.json$|\.gen\.|generated|dist\/|build\/|vendor\/|-?snapshot\.json$|\.snap$/i;
 export const SUPPRESS_PAT =
@@ -158,7 +158,10 @@ export function analyze(events, touched) {
   for (const e of events) {
     if (!e.fix) continue;
     const key = e.subject.toLowerCase().replace(/[^a-z ]/g, "").slice(0, 40).trim();
-    if (key.length > 14 && !/^fix (typo|typos|lint|format|formatting|ci)\b/.test(key))
+    const docOnly = e.shape.doc && !e.shape.src && !e.shape.test;
+    if (key.length > 14 && !docOnly &&
+        !/^fix (typo|typos|lint|format|formatting|ci)\b/.test(key) &&
+        !/typo|changelog|readme|\bdocs?\b|spelling|grammar/.test(key))
       refix.set(key, (refix.get(key) || 0) + 1);
   }
   const fragile = [...refix.entries()].sort((a, b) => b[1] - a[1]).filter(([, c]) => c >= 2).slice(0, 20);
@@ -202,12 +205,13 @@ function spanHuman(days) {
 }
 const fmt = (x) => x.toLocaleString("en-US");
 
-export function renderLogbookMd(name, A, shallow) {
+export function renderLogbookMd(name, A, shallow, capped) {
   const L = [];
   L.push(`# The Logbook of ${name}`);
   L.push(``);
   L.push(`_${fmt(A.n)} commits (${A.first?.date} → ${A.last?.date}), ${fmt(A.filesTouched)} files touched, ${A.authors} authors._`);
   if (shallow) L.push(`\n> ⚠️ Shallow clone — history is truncated. Run \`git fetch --unshallow\` for the full record.`);
+  if (capped) L.push(`\n> ⚠️ Analysis capped at ${fmt(A.n)} commits (the repo has more). Re-run with \`-n <bigger>\` for the full record.`);
   L.push(``);
   L.push(`## What a fresh session should know`);
   if (A.srcHot.length)
@@ -373,6 +377,7 @@ async function main() {
     console.error("  no commits found (empty repo, or --since/--until excluded everything)");
     process.exit(1);
   }
+  const capped = events.length >= o.max;
   diffScan(repo, events, o);
   const touched = hotspots(repo, o);
   const A = analyze(events, touched);
@@ -384,12 +389,12 @@ async function main() {
   if (o.cmd === "journey") return console.log(renderJourneyAnsi(name, A));
 
   const outDir = o.out ? resolve(o.out) : repo;
-  writeFileSync(join(outDir, "LOGBOOK.md"), renderLogbookMd(name, A, shallow));
+  writeFileSync(join(outDir, "LOGBOOK.md"), renderLogbookMd(name, A, shallow, capped));
   writeFileSync(join(outDir, "events.jsonl"), events.map((e) => JSON.stringify(e)).join("\n") + "\n");
   writeFileSync(join(outDir, "JOURNEY.md"), renderJourneyMd(name, A));
 
   if (!o.quiet) {
-    console.log(`  ${fmt(A.n)} commits · ${fmt(A.filesTouched)} files · ${spanHuman(A.spanDays)} · ${A.authors} authors\n`);
+    console.log(`  ${fmt(A.n)} commits${capped ? ` (capped — use -n for more)` : ""} · ${fmt(A.filesTouched)} files · ${spanHuman(A.spanDays)} · ${A.authors} authors\n`);
     console.log(`  ${C.good}✓${C.r} wrote ${C.bold}LOGBOOK.md${C.r}   ${C.dim}hotspots · do-not-retry · suppression ledger${C.r}`);
     console.log(`  ${C.good}✓${C.r} wrote ${C.bold}events.jsonl${C.r}   ${C.dim}${fmt(A.n)} structured events${C.r}`);
     console.log(`  ${C.good}✓${C.r} wrote ${C.bold}JOURNEY.md${C.r}     ${C.dim}the repo's story, told back to you${C.r}\n`);
