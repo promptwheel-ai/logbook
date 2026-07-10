@@ -164,3 +164,19 @@ test("-n cap is surfaced, not silent", () => {
   assert.match(out, /capped — use -n for more/);
   assert.match(readFileSync(join(repo, "LOGBOOK.md"), "utf8"), /Analysis capped at 5 commits/);
 });
+
+test("epoch-1970 commit dates do not poison the winter", () => {
+  const d = mkdtempSync(join(tmpdir(), "logbook-epoch-"));
+  const g = (args, date) => execFileSync("git", ["-C", d, ...args], { env: { ...process.env,
+    GIT_AUTHOR_NAME: "H", GIT_AUTHOR_EMAIL: "h@x.io", GIT_COMMITTER_NAME: "H",
+    GIT_COMMITTER_EMAIL: "h@x.io", ...(date && { GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date }) } });
+  g(["init", "-q"]);
+  g(["commit", "-q", "--allow-empty", "-m", "one"], "2024-01-01T12:00:00");
+  g(["commit", "-q", "--allow-empty", "-m", "broken clock"], "1970-01-01T00:00:01");
+  g(["commit", "-q", "--allow-empty", "-m", "three"], "2024-03-01T12:00:00");
+  execFileSync(process.execPath, [CLI, d, "-q"], { encoding: "utf8" });
+  const j = readFileSync(join(d, "JOURNEY.md"), "utf8");
+  assert.ok(!/1[0-9],\d{3} days|19,501/.test(j), "no multi-decade winter");
+  const m = /(\d[\d,]*) days of silence/.exec(j);
+  if (m) assert.ok(Number(m[1].replace(/,/g, "")) < 400, `winter is ${m[1]} days`);
+});

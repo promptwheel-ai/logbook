@@ -173,8 +173,14 @@ export function analyze(events, touched) {
     oldest.find((e) => e.shape.test || GATE_PAT.test(e.subject)) || null;
   const mentor = oldest.find((e) => MENTOR_PAT.test(e.subject)) || null;
   const abyss = events.length ? events.reduce((a, e) => (e.dels > a.dels ? e : a)) : null;
+  // Date sanity: repos in the wild contain epoch-1970 and future-dated commits
+  // (broken committer clocks). Ignore them for any date arithmetic.
+  const MIN_T = Date.parse("1995-01-01");
+  const MAX_T = Date.now() + 86400000;
+  const validDate = (d) => { const t = Date.parse(d); return t > MIN_T && t < MAX_T; };
   let winter = { days: 0, from: null, to: null };
   for (let i = 1; i < oldest.length; i++) {
+    if (!validDate(oldest[i].date) || !validDate(oldest[i - 1].date)) continue;
     const gap = Math.round(
       (new Date(oldest[i].date) - new Date(oldest[i - 1].date)) / 86400000
     );
@@ -182,8 +188,9 @@ export function analyze(events, touched) {
   }
   const trials = fragile.slice(0, 3);
 
-  const spanDays = first && last
-    ? Math.max(1, Math.round((new Date(last.date) - new Date(first.date)) / 86400000))
+  const dated = oldest.filter((e) => validDate(e.date));
+  const spanDays = dated.length
+    ? Math.max(1, Math.round((new Date(dated[dated.length - 1].date) - new Date(dated[0].date)) / 86400000))
     : 0;
 
   return {
