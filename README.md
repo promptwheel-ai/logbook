@@ -19,6 +19,8 @@ npx @promptwheel/logbook
   ✓ wrote JOURNEY.md     the repo's story, told back to you
 ```
 
+![logbook running on zustand: files written, then the colorized journey and Almanac](https://raw.githubusercontent.com/promptwheel-ai/logbook/master/logbook-journey.gif)
+
 Single file. Zero dependencies. Read-only — it never mutates your repo.
 
 ## Why "logbook"

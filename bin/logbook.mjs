@@ -12,7 +12,8 @@
 // Classifier lineage: the wild-rate-study scan (calibrated 12/12).
 
 import { spawnSync } from "node:child_process";
-import { writeFileSync, existsSync } from "node:fs";
+import { writeFileSync, existsSync, realpathSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 import { resolve, join, basename } from "node:path";
 
 // ---------- file / subject classifiers ----------
@@ -397,6 +398,16 @@ async function main() {
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith("/logbook")) {
+// Entry-point gate that survives npm bin symlinks (Unix) and .cmd shims +
+// backslash paths (Windows): resolve argv[1] to a real path, compare as URL.
+const invokedDirectly = (() => {
+  if (!process.argv[1]) return false;
+  try {
+    return import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href;
+  } catch {
+    return false;
+  }
+})();
+if (invokedDirectly) {
   main().catch((e) => { console.error(`  logbook: ${e.message}`); process.exit(1); });
 }
