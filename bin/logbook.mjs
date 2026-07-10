@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-// @promptwheel/historian — turn git history into memory an agent can use.
+// @promptwheel/logbook — turn git history into memory an agent can use.
 //
-// Graphify maps where the code is; the historian maps what happened and why.
+// Graphify maps where the code is; the logbook records what happened and why.
 // Reads a repo's git history (read-only) and writes three artifacts:
-//   HISTORIAN.md  — the digest a fresh agent session needs: hotspots,
+//   LOGBOOK.md  — the digest a fresh agent session needs: hotspots,
 //                   do-not-retry (reverts), suppression ledger, fragile areas
 //   events.jsonl  — one structured event per commit (the data layer)
 //   JOURNEY.md    — the repo's story, told as a hero's journey
@@ -201,9 +201,9 @@ function spanHuman(days) {
 }
 const fmt = (x) => x.toLocaleString("en-US");
 
-export function renderHistorianMd(name, A, shallow) {
+export function renderLogbookMd(name, A, shallow) {
   const L = [];
-  L.push(`# The Historian: ${name}`);
+  L.push(`# The Logbook of ${name}`);
   L.push(``);
   L.push(`_${fmt(A.n)} commits (${A.first?.date} → ${A.last?.date}), ${fmt(A.filesTouched)} files touched, ${A.authors} authors._`);
   if (shallow) L.push(`\n> ⚠️ Shallow clone — history is truncated. Run \`git fetch --unshallow\` for the full record.`);
@@ -243,7 +243,7 @@ export function renderHistorianMd(name, A, shallow) {
   for (const [k, c] of A.fragile) L.push(`- ×${c}: ${k.trim()}`);
   L.push(``);
   L.push(`---`);
-  L.push(`_Findings are leads, not verdicts — a suppression means "a human should look here," not misconduct. Generated read-only by [@promptwheel/historian](https://github.com/promptwheel-ai/historian); the historian records, [the referee](https://github.com/promptwheel-ai/promptwheel) judges._`);
+  L.push(`_Findings are leads, not verdicts — a suppression means "a human should look here," not misconduct. Generated read-only by [@promptwheel/logbook](https://github.com/promptwheel-ai/logbook); the logbook records, [the referee](https://github.com/promptwheel-ai/promptwheel) judges._`);
   return L.join("\n") + "\n";
 }
 
@@ -263,7 +263,7 @@ export function journeyBeats(name, A) {
   if (A.winter.days >= 14)
     B.push(["VI", "The Long Winter", `${A.winter.days} days of silence, ${A.winter.from} → ${A.winter.to}. the repo waited.`, "info"]);
   if (A.suspEvents.length)
-    B.push(["VII", "Whispered Bargains", `${A.suspEvents.length}× a test was skipped or a warning hushed. the historian records; the referee judges.`, "bad"]);
+    B.push(["VII", "Whispered Bargains", `${A.suspEvents.length}× a test was skipped or a warning hushed. the logbook records; the referee judges.`, "bad"]);
   if (A.reverts.length)
     B.push(["VIII", "Paths Unwalked", `${A.reverts.length} roads taken then untaken — first: "${A.reverts[0].subject.slice(0, 64)}"`, "info"]);
   if (A.last)
@@ -279,10 +279,10 @@ export function almanacStats(A) {
 }
 
 export function renderJourneyMd(name, A) {
-  const L = [`# ⚔️ The Journey of ${name}`, ``, `_An epic in ${fmt(A.n)} commits, as recorded by the historian._`, ``];
+  const L = [`# ⚔️ The Journey of ${name}`, ``, `_An epic in ${fmt(A.n)} commits, as entered in the logbook._`, ``];
   for (const [num, title, body] of journeyBeats(name, A)) L.push(`**${num}. ${title}.** ${body}`, ``);
   L.push(`---`);
-  L.push(`_The Historian's Almanac_ — ` + almanacStats(A).map(([k, v]) => `${k} ${v}`).join(" · "));
+  L.push(`_The Logbook Almanac_ — ` + almanacStats(A).map(([k, v]) => `${k} ${v}`).join(" · "));
   return L.join("\n") + "\n";
 }
 
@@ -293,7 +293,7 @@ const C = process.stdout.isTTY || process.env.FORCE_COLOR
 export function renderJourneyAnsi(name, A) {
   const L = [];
   L.push(`\n  ${C.gold}${C.bold}⚔  The Journey of ${name}${C.r}`);
-  L.push(`  ${C.dim}an epic in ${fmt(A.n)} commits, as recorded by the historian${C.r}`);
+  L.push(`  ${C.dim}an epic in ${fmt(A.n)} commits, as entered in the logbook${C.r}`);
   for (const [num, title, body, tone] of journeyBeats(name, A))
     L.push(`\n  ${C[tone]}${C.bold}${num}. ${title}${C.r}\n  ${C.dim}${body}${C.r}`);
   const stats = almanacStats(A);
@@ -301,7 +301,8 @@ export function renderJourneyAnsi(name, A) {
   const plain = stats.map(([k, v]) => `${v} ${k}`).join(" · ");
   const w = Math.max(plain.length + 4, 42);
   L.push(`\n  ${C.gold}╭${"─".repeat(w)}╮${C.r}`);
-  L.push(`  ${C.gold}│${C.r}  ${C.bold}THE HISTORIAN'S ALMANAC${C.r}${" ".repeat(w - 25)}${C.gold}│${C.r}`);
+  const title = "THE LOGBOOK ALMANAC";
+  L.push(`  ${C.gold}│${C.r}  ${C.bold}${title}${C.r}${" ".repeat(w - title.length - 2)}${C.gold}│${C.r}`);
   L.push(`  ${C.gold}│${C.r}  ${line}${" ".repeat(w - plain.length - 2)}${C.gold}│${C.r}`);
   L.push(`  ${C.gold}╰${"─".repeat(w)}╯${C.r}\n`);
   return L.join("\n");
@@ -310,12 +311,12 @@ export function renderJourneyAnsi(name, A) {
 // ---------- CLI ----------
 function usage() {
   console.log(`
-  ${C.bold}historian${C.r} — turn git history into memory an agent can use
+  ${C.bold}logbook${C.r} — turn git history into memory an agent can use
 
   usage:
-    historian [path]              analyze repo → HISTORIAN.md, events.jsonl, JOURNEY.md
-    historian journey [path]      the repo's story, in color (writes nothing)
-    historian [path] --json       structured events to stdout (writes nothing)
+    logbook [path]                analyze repo → LOGBOOK.md, events.jsonl, JOURNEY.md
+    logbook journey [path]        the repo's story, in color (writes nothing)
+    logbook [path] --json         structured events to stdout (writes nothing)
 
   options:
     -n, --max N        commits to analyze (default 5000)
@@ -324,7 +325,7 @@ function usage() {
     -q, --quiet        suppress the summary
     -v, --version      print version
 
-  The historian records; the referee (promptwheel) judges.
+  The logbook records; the referee (promptwheel) judges.
 `);
 }
 
@@ -382,20 +383,20 @@ async function main() {
   if (o.cmd === "journey") return console.log(renderJourneyAnsi(name, A));
 
   const outDir = o.out ? resolve(o.out) : repo;
-  writeFileSync(join(outDir, "HISTORIAN.md"), renderHistorianMd(name, A, shallow));
+  writeFileSync(join(outDir, "LOGBOOK.md"), renderLogbookMd(name, A, shallow));
   writeFileSync(join(outDir, "events.jsonl"), events.map((e) => JSON.stringify(e)).join("\n") + "\n");
   writeFileSync(join(outDir, "JOURNEY.md"), renderJourneyMd(name, A));
 
   if (!o.quiet) {
     console.log(`  ${fmt(A.n)} commits · ${fmt(A.filesTouched)} files · ${spanHuman(A.spanDays)} · ${A.authors} authors\n`);
-    console.log(`  ${C.good}✓${C.r} wrote ${C.bold}HISTORIAN.md${C.r}   ${C.dim}hotspots · do-not-retry · suppression ledger${C.r}`);
+    console.log(`  ${C.good}✓${C.r} wrote ${C.bold}LOGBOOK.md${C.r}   ${C.dim}hotspots · do-not-retry · suppression ledger${C.r}`);
     console.log(`  ${C.good}✓${C.r} wrote ${C.bold}events.jsonl${C.r}   ${C.dim}${fmt(A.n)} structured events${C.r}`);
     console.log(`  ${C.good}✓${C.r} wrote ${C.bold}JOURNEY.md${C.r}     ${C.dim}the repo's story, told back to you${C.r}\n`);
     if (shallow) console.log(`  ${C.bad}⚠${C.r} ${C.dim}shallow clone — run git fetch --unshallow for the full record${C.r}\n`);
-    console.log(`  ${C.dim}next:${C.r} historian journey   ${C.dim}(see it in color)${C.r}\n`);
+    console.log(`  ${C.dim}next:${C.r} logbook journey   ${C.dim}(see it in color)${C.r}\n`);
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith("/historian")) {
-  main().catch((e) => { console.error(`  historian: ${e.message}`); process.exit(1); });
+if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith("/logbook")) {
+  main().catch((e) => { console.error(`  logbook: ${e.message}`); process.exit(1); });
 }

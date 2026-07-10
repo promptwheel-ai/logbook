@@ -8,10 +8,10 @@ import { tmpdir } from "node:os";
 
 import {
   classifyFile, parseArgs, collectEvents, diffScan, hotspots, analyze,
-  renderHistorianMd, renderJourneyMd, journeyBeats, almanacStats,
-} from "../bin/historian.mjs";
+  renderLogbookMd, renderJourneyMd, journeyBeats, almanacStats,
+} from "../bin/logbook.mjs";
 
-const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "bin", "historian.mjs");
+const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "bin", "logbook.mjs");
 
 // ---------- fixture repo: a scripted history containing every event type ----------
 let repo;
@@ -24,7 +24,7 @@ function git(args, date) {
 function commit(msg, date) { git(["add", "-A"]); git(["commit", "-q", "-m", msg], date); }
 
 before(() => {
-  repo = mkdtempSync(join(tmpdir(), "historian-fixture-"));
+  repo = mkdtempSync(join(tmpdir(), "logbook-fixture-"));
   git(["init", "-q"]);
   // I. The Call
   writeFileSync(join(repo, "core.js"), "export const add = (a, b) => a + b;\n");
@@ -109,14 +109,14 @@ test("renderers include the planted story", () => {
   diffScan(repo, events, opts);
   const A = analyze(events, hotspots(repo, opts));
 
-  const hist = renderHistorianMd("fixture", A, false);
+  const hist = renderLogbookMd("fixture", A, false);
   for (const s of ["Do-not-retry", "Suppression ledger", "Assertion-weakening",
     "Fragile areas", "What a fresh session should know", "eslint-disable"])
-    assert.ok(hist.includes(s), `HISTORIAN.md has "${s}"`);
+    assert.ok(hist.includes(s), `LOGBOOK.md has "${s}"`);
 
   const j = renderJourneyMd("fixture", A);
   for (const s of ["The Call", "The Threshold", "The Abyss", "The Long Winter",
-    "Whispered Bargains", "Paths Unwalked", "Historian's Almanac"])
+    "Whispered Bargains", "Paths Unwalked", "Logbook Almanac"])
     assert.ok(j.includes(s), `JOURNEY.md has "${s}"`);
   assert.ok(journeyBeats("fixture", A).length >= 7);
   assert.ok(almanacStats(A).some(([k]) => k === "winter"));
@@ -125,9 +125,9 @@ test("renderers include the planted story", () => {
 // ---------- integration: the CLI end-to-end ----------
 test("CLI writes the three artifacts and summary", () => {
   const out = execFileSync(process.execPath, [CLI, repo], { encoding: "utf8" });
-  for (const f of ["HISTORIAN.md", "events.jsonl", "JOURNEY.md"])
+  for (const f of ["LOGBOOK.md", "events.jsonl", "JOURNEY.md"])
     assert.ok(existsSync(join(repo, f)), `${f} written`);
-  assert.match(out, /✓ wrote HISTORIAN\.md/);
+  assert.match(out, /✓ wrote LOGBOOK\.md/);
   assert.match(out, /10 commits/);
   const lines = readFileSync(join(repo, "events.jsonl"), "utf8").trim().split("\n");
   assert.equal(lines.length, 10);
