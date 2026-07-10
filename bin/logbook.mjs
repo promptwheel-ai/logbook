@@ -283,6 +283,31 @@ export function journeyBeats(name, A) {
   return B;
 }
 
+// Fleet percentile tables — top 1,000 GitHub repos, 2026-07 (n=999).
+// reverts/bargains are per 1,000 commits (size-fair); winter in days.
+// Regenerate from a fleet run per release; no network calls, ever.
+export const FLEET = {
+  reverts_per_1k: [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0.47,0.8,1.01,1.22,1.44,1.6,1.73,1.86,2.06,2.2,2.36,2.46,2.6,2.73,2.88,3,3.2,3.4,3.56,3.73,3.95,4.08,4.24,4.35,4.41,4.6,4.73,4.85,4.98,5.06,5.17,5.21,5.4,5.55,5.66,5.75,5.8,6,6.07,6.16,6.33,6.4,6.6,6.72,6.83,7,7.18,7.32,7.52,7.61,7.81,8,8.13,8.31,8.6,8.77,8.98,9.2,9.4,9.6,9.76,9.8,9.99,10.08,10.2,10.4,10.74,11,11.44,11.82,12.36,12.6,13.2,13.51,13.92,14.44,14.8,15.75,16.41,17.54,18.78,21,25.44,49.31],
+  bargains_per_1k: [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0.2,0.31,0.41,0.6,0.96,1.22,1.4,1.68,1.99,2.39,2.59,2.91,3.57,3.71,4,4.37,4.67,5,5.46,6,6.31,6.86,7.62,8,8.61,9.13,9.72,10.8,11.34,12.2,13.03,14.06,15.11,15.74,17.4,18.78,19.46,20.15,20.6,21.6,23,24.11,26,27.09,28.23,30.41,33.32,35.87,38.37,40.82,43.1,47,52.8,57.23,62.98,69,76,83.33,90.28,111.2,222.42],
+  winter_days: [0,0,0,0,0,0,0,0,15,16,19,20,22,23,24,27,30,33,35,37,42,46,48,51,57,58,61,64,66,69,72,74,79,82,85,87,92,97,102,107,110,116,119,123,127,138,143,149,157,165,171,176,181,190,194,201,211,215,221,230,239,247,264,276,301,314,331,347,361,373,382,393,416,429,453,473,490,509,533,553,581,611,646,687,723,754,773,817,859,908,948,1004,1084,1138,1234,1305,1613,1802,2157,2872,19501],
+};
+
+export function fleetPct(key, val) {
+  const a = FLEET[key];
+  if (!a || !a.length) return null;
+  let c = 0;
+  for (const v of a) if (v < val) c++;
+  return Math.round((100 * c) / a.length);
+}
+
+export function almanacPcts(A) {
+  return {
+    reverts: fleetPct("reverts_per_1k", (A.reverts.length / Math.max(A.n, 1)) * 1000),
+    bargains: fleetPct("bargains_per_1k", (A.suspEvents.length / Math.max(A.n, 1)) * 1000),
+    winter: A.winter.days ? fleetPct("winter_days", A.winter.days) : null,
+  };
+}
+
 export function almanacStats(A) {
   const s = [["commits", fmt(A.n)], ["reverts", A.reverts.length], ["bargains", A.suspEvents.length]];
   if (A.abyss && A.abyss.dels > 100) s.push(["abyss", `−${fmt(A.abyss.dels)}`]);
@@ -290,11 +315,14 @@ export function almanacStats(A) {
   return s;
 }
 
-export function renderJourneyMd(name, A) {
+export function renderJourneyMd(name, A, compare) {
   const L = [`# ⚔️ The Journey of ${name}`, ``, `_An epic in ${fmt(A.n)} commits, as entered in the logbook._`, ``];
   for (const [num, title, body] of journeyBeats(name, A)) L.push(`**${num}. ${title}.** ${body}`, ``);
   L.push(`---`);
-  L.push(`_The Logbook Almanac_ — ` + almanacStats(A).map(([k, v]) => `${k} ${v}`).join(" · "));
+  const pcts = compare ? almanacPcts(A) : {};
+  L.push(`_The Logbook Almanac_ — ` + almanacStats(A).map(([k, v]) =>
+    `${k} ${v}${pcts[k] != null ? ` (p${pcts[k]})` : ""}`).join(" · "));
+  if (compare) L.push(`_Percentiles vs the top 1,000 repos on GitHub (size-fair, per 1k commits)._`);
   return L.join("\n") + "\n";
 }
 
@@ -302,21 +330,25 @@ const C = process.stdout.isTTY || process.env.FORCE_COLOR
   ? { gold: "\x1b[38;5;220m", dim: "\x1b[38;5;245m", good: "\x1b[38;5;114m", info: "\x1b[38;5;44m", bad: "\x1b[38;5;203m", odd: "\x1b[38;5;177m", bold: "\x1b[1m", r: "\x1b[0m" }
   : { gold: "", dim: "", good: "", info: "", bad: "", odd: "", bold: "", r: "" };
 
-export function renderJourneyAnsi(name, A) {
+export function renderJourneyAnsi(name, A, compare) {
   const L = [];
   L.push(`\n  ${C.gold}${C.bold}⚔  The Journey of ${name}${C.r}`);
   L.push(`  ${C.dim}an epic in ${fmt(A.n)} commits, as entered in the logbook${C.r}`);
   for (const [num, title, body, tone] of journeyBeats(name, A))
     L.push(`\n  ${C[tone]}${C.bold}${num}. ${title}${C.r}\n  ${C.dim}${body}${C.r}`);
   const stats = almanacStats(A);
-  const line = stats.map(([k, v]) => `${C.gold}${v}${C.r} ${C.dim}${k}${C.r}`).join(" · ");
-  const plain = stats.map(([k, v]) => `${v} ${k}`).join(" · ");
+  const pcts = compare ? almanacPcts(A) : {};
+  const sfx = (k) => (pcts[k] != null ? ` p${pcts[k]}` : "");
+  const line = stats.map(([k, v]) => `${C.gold}${v}${C.r} ${C.dim}${k}${sfx(k)}${C.r}`).join(" · ");
+  const plain = stats.map(([k, v]) => `${v} ${k}${sfx(k)}`).join(" · ");
   const w = Math.max(plain.length + 4, 42);
   L.push(`\n  ${C.gold}╭${"─".repeat(w)}╮${C.r}`);
   const title = "THE LOGBOOK ALMANAC";
   L.push(`  ${C.gold}│${C.r}  ${C.bold}${title}${C.r}${" ".repeat(w - title.length - 2)}${C.gold}│${C.r}`);
   L.push(`  ${C.gold}│${C.r}  ${line}${" ".repeat(w - plain.length - 2)}${C.gold}│${C.r}`);
-  L.push(`  ${C.gold}╰${"─".repeat(w)}╯${C.r}\n`);
+  L.push(`  ${C.gold}╰${"─".repeat(w)}╯${C.r}`);
+  if (compare) L.push(`  ${C.dim}percentiles vs the top 1,000 repos on GitHub${C.r}\n`);
+  else L.push("");
   return L.join("\n");
 }
 
@@ -331,7 +363,8 @@ function usage() {
     logbook [path] --json         structured events to stdout (writes nothing)
 
   options:
-    -n, --max N        commits to analyze (default 5000)
+    -n, --max N        commits to analyze (default 20000)
+    --compare          rank your almanac against the top 1,000 GitHub repos
     --since / --until  era-scoped archaeology (git date formats)
     --out DIR          write artifacts somewhere other than the repo root
     -q, --quiet        suppress the summary
@@ -342,7 +375,7 @@ function usage() {
 }
 
 export function parseArgs(argv) {
-  const o = { cmd: "run", repo: ".", max: 5000, since: null, until: null, json: false, quiet: false, out: null };
+  const o = { cmd: "run", repo: ".", max: 20000, since: null, until: null, json: false, quiet: false, out: null };
   const rest = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -353,6 +386,7 @@ export function parseArgs(argv) {
     else if (a === "--json") o.json = true;
     else if (a === "-q" || a === "--quiet") o.quiet = true;
     else if (a === "--out") o.out = argv[++i];
+    else if (a === "--compare") o.compare = true;
     else if (a === "-h" || a === "--help") o.cmd = "help";
     else if (a === "-v" || a === "--version") o.cmd = "version";
     else if (!a.startsWith("-")) rest.push(a);
@@ -393,12 +427,12 @@ async function main() {
     for (const e of events) console.log(JSON.stringify(e));
     return;
   }
-  if (o.cmd === "journey") return console.log(renderJourneyAnsi(name, A));
+  if (o.cmd === "journey") return console.log(renderJourneyAnsi(name, A, o.compare));
 
   const outDir = o.out ? resolve(o.out) : repo;
   writeFileSync(join(outDir, "LOGBOOK.md"), renderLogbookMd(name, A, shallow, capped));
   writeFileSync(join(outDir, "events.jsonl"), events.map((e) => JSON.stringify(e)).join("\n") + "\n");
-  writeFileSync(join(outDir, "JOURNEY.md"), renderJourneyMd(name, A));
+  writeFileSync(join(outDir, "JOURNEY.md"), renderJourneyMd(name, A, o.compare));
 
   if (!o.quiet) {
     console.log(`  ${fmt(A.n)} commits${capped ? ` (capped — use -n for more)` : ""} · ${fmt(A.filesTouched)} files · ${spanHuman(A.spanDays)} · ${A.authors} authors\n`);

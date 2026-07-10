@@ -180,3 +180,15 @@ test("epoch-1970 commit dates do not poison the winter", () => {
   const m = /(\d[\d,]*) days of silence/.exec(j);
   if (m) assert.ok(Number(m[1].replace(/,/g, "")) < 400, `winter is ${m[1]} days`);
 });
+
+test("fleetPct bounds and --compare renders percentiles", async () => {
+  const { fleetPct } = await import("../bin/logbook.mjs");
+  assert.equal(fleetPct("reverts_per_1k", 0), 0);
+  assert.equal(fleetPct("reverts_per_1k", 99999), 100);
+  const mid = fleetPct("bargains_per_1k", 2.6);
+  assert.ok(mid > 20 && mid < 80, `median-ish input lands mid-range (got p${mid})`);
+  const out = execFileSync(process.execPath, [CLI, "journey", repo, "--compare"],
+    { encoding: "utf8", env: { ...process.env, FORCE_COLOR: "1" } });
+  assert.match(out, /p\d+/);
+  assert.match(out, /percentiles vs the top 1,000 repos/);
+});

@@ -44,13 +44,17 @@ logs. Your repo has been keeping one for years. This reads it back.
 npx @promptwheel/logbook              # analyze the current repo
 npx @promptwheel/logbook path/to/repo # or any repo
 npx @promptwheel/logbook journey      # the story, in color (writes nothing)
+npx @promptwheel/logbook journey --compare  # rank your almanac vs the top 1,000 GitHub repos
 npx @promptwheel/logbook --json       # events to stdout (writes nothing)
 
 # era-scoped archaeology
 npx @promptwheel/logbook --since 2024-01-01 --until 2025-01-01
 ```
 
-Options: `-n/--max N` (commit cap, default 5000) · `--out DIR` · `-q/--quiet`
+Options: `-n/--max N` (commit cap, default 20000) · `--compare` · `--out DIR` · `-q/--quiet`
+
+`--compare` uses a percentile table baked into the CLI from a 1,000-repo fleet
+run — still zero dependencies and zero network calls.
 
 ## Honest scope
 
