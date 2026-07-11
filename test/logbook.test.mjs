@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import {
   classifyFile, parseArgs, collectEvents, diffScan, hotspots, analyze,
   renderLogbookMd, renderJourneyMd, journeyBeats, almanacStats,
+  loadAnnotations, saveAnnotation,
 } from "../bin/logbook.mjs";
 
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "bin", "logbook.mjs");
@@ -367,4 +368,39 @@ test("chunked diff scan is equivalent to single-pass", () => {
   const out2 = execFileSync(process.execPath, [CLI, "query", repo, "--suppress"],
     { encoding: "utf8", env: { ...process.env, LOGBOOK_NO_CACHE: "1", LOGBOOK_WINDOW: "100000" } });
   assert.equal(out1, out2, "window size must not change results");
+});
+
+test("annotate: persists a why, merges into LOGBOOK.md with provenance, last write wins", () => {
+  const o = parseArgs(["annotate", "abc123", "because reasons", repo, "--by", "tester"]);
+  assert.equal(o.cmd, "annotate");
+  assert.equal(o.sha, "abc123");
+  assert.equal(o.why, "because reasons");
+  assert.equal(o.repo, repo);
+  assert.equal(o.by, "tester");
+
+  const revertSha = git(["log", "--format=%H", "--grep=Revert"]).trim();
+  execFileSync(process.execPath,
+    [CLI, "annotate", revertSha.slice(0, 8), "the header tidy silenced a real lint error", repo, "--by", "tester"],
+    { encoding: "utf8" });
+  const out = execFileSync(process.execPath, [CLI, repo], { encoding: "utf8" });
+  assert.match(out, /1 why/);
+  const lb = readFileSync(join(repo, "LOGBOOK.md"), "utf8");
+  assert.match(lb, /why \(inferred by tester, \d{4}-\d{2}-\d{2}\): the header tidy silenced a real lint error/);
+  assert.match(lb, /agent-inferred judgments/, "disclaimer rendered when whys present");
+
+  // last write per sha wins; annotating by prefix resolves to the same full sha
+  saveAnnotation(repo, repo, { sha: revertSha.slice(0, 8), why: "updated verdict", by: "tester2" });
+  const notes = loadAnnotations(repo);
+  assert.equal(notes.length, 1, "same commit annotated twice → one note");
+  assert.equal(notes[0].why, "updated verdict");
+  assert.equal(notes[0].sha, revertSha);
+
+  // unknown sha is rejected, exit 1
+  assert.throws(() =>
+    execFileSync(process.execPath, [CLI, "annotate", "deadbeef1234", "nope", repo], { encoding: "utf8", stdio: "pipe" }));
+
+  // malformed lines are skipped, not fatal
+  writeFileSync(join(repo, "annotations.jsonl"), "not json\n", { flag: "a" });
+  assert.equal(loadAnnotations(repo).length, 1);
+  rmSync(join(repo, "annotations.jsonl"));
 });

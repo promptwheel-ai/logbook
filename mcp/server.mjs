@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 // @promptwheel/logbook-mcp — the logbook over MCP, for clients without a shell.
-// Three tools wrapping the zero-dep core: digest, audit, query.
+// Four tools wrapping the zero-dep core: digest, annotate, audit, query.
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { execFileSync } from "node:child_process";
 import {
   collectEvents, diffScan, hotspots, analyze, renderLogbookMd,
-  auditHead, queryEvents, loadEvents,
+  auditHead, queryEvents, loadEvents, loadAnnotations, saveAnnotation,
 } from "@promptwheel/logbook";
 
 const DEFAULTS = { max: 20000, since: null, until: null };
@@ -43,7 +43,7 @@ function progressFor(extra) {
   }).catch(() => {});
 }
 
-const server = new McpServer({ name: "logbook", version: "0.1.0" });
+const server = new McpServer({ name: "logbook", version: "0.2.0" });
 
 server.tool(
   "logbook_digest",
@@ -51,7 +51,25 @@ server.tool(
   { repo: z.string().describe("absolute path to the git repository") },
   async ({ repo }, extra) => {
     const { A } = pipeline(repo, progressFor(extra));
-    return { content: [{ type: "text", text: renderLogbookMd(repo.split("/").pop(), A, false, A.n >= DEFAULTS.max) }] };
+    // annotations load per-call (cheap file read) so fresh whys appear without
+    // invalidating the HEAD-keyed event cache
+    return { content: [{ type: "text", text: renderLogbookMd(repo.split("/").pop(), A, false, A.n >= DEFAULTS.max, loadAnnotations(repo)) }] };
+  }
+);
+
+server.tool(
+  "logbook_annotate",
+  "Persist WHY a commit happened (lazy enrichment). When you investigate a do-not-retry revert or a suppression — its failure mode, its cause — save the finding so the next session gets it for free instead of re-investigating. Judgments, not records: attributed and dated.",
+  {
+    repo: z.string().describe("absolute path to the git repository"),
+    sha: z.string().describe("the commit being explained (any unique prefix)"),
+    why: z.string().describe("the inferred cause, one sentence, specific (max 400 chars)"),
+    by: z.string().optional().describe("who inferred it (model/agent name)"),
+  },
+  async ({ repo, sha, why, by }) => {
+    const a = saveAnnotation(repo, repo, { sha, why, by });
+    if (!a) return { content: [{ type: "text", text: `not a commit in this repo: ${sha}` }], isError: true };
+    return { content: [{ type: "text", text: `annotated ${a.sha.slice(0, 8)} (by ${a.by}, ${a.date}) — merged into future digests` }] };
   }
 );
 

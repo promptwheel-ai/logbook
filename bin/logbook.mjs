@@ -365,7 +365,11 @@ function spanHuman(days) {
 }
 const fmt = (x) => x.toLocaleString("en-US");
 
-export function renderLogbookMd(name, A, shallow, capped) {
+export function renderLogbookMd(name, A, shallow, capped, notes = []) {
+  const why = (e) => {
+    const a = noteFor(notes, e);
+    return a ? [`  - why (inferred by ${a.by}, ${a.date}): ${a.why}`] : [];
+  };
   const L = [];
   L.push(`# The Logbook of ${name}`);
   L.push(``);
@@ -405,7 +409,7 @@ export function renderLogbookMd(name, A, shallow, capped) {
           e.downgrades >= 2 ? `${e.downgrades} assert downgrades` :
           e.suppressions.length ? e.suppressions.slice(0, 2).join(" + ") :
           `-${e.del_asserts} asserts`;
-        L.push(`- ${e.date} ${e.sha} [${tag}] ${e.subject}`);
+        L.push(`- ${e.date} ${e.sha} [${tag}] ${e.subject}`, ...why(e));
       }
       if (pf.more) L.push(`- …and ${pf.more} more — full record in events.jsonl`);
     }
@@ -418,12 +422,14 @@ export function renderLogbookMd(name, A, shallow, capped) {
   for (const [f, c] of A.allHot) L.push(`- ${f} — ${c} commits`);
   L.push(``);
   L.push(`## Do-not-retry: reverts / rollbacks (${A.reverts.length})`);
-  for (const e of A.reverts.slice(0, 20)) L.push(`- ${e.date} ${e.sha} ${e.subject}`);
+  if (notes.length)
+    L.push(`_"why" lines are agent-inferred judgments persisted via \`logbook annotate\` — dated, attributed, and worth re-verifying: the fact never changes, but its force can age._`);
+  for (const e of A.reverts.slice(0, 20)) L.push(`- ${e.date} ${e.sha} ${e.subject}`, ...why(e));
   if (A.reverts.length > 20) L.push(`- …and ${A.reverts.length - 20} more — full record in events.jsonl`);
   L.push(``);
   L.push(`## Suppression ledger (${A.suspEvents.length} commits)`);
   for (const e of A.suspEvents.slice(0, 20))
-    L.push(`- ${e.date} ${e.sha} [${e.suppressions.slice(0, 3).join(" + ")}] ${e.subject}`);
+    L.push(`- ${e.date} ${e.sha} [${e.suppressions.slice(0, 3).join(" + ")}] ${e.subject}`, ...why(e));
   if (A.suspEvents.length > 20) L.push(`- …and ${A.suspEvents.length - 20} more — full record in events.jsonl`);
   L.push(``);
   L.push(`## Assertion-weakening events (${A.weaken.length})`);
@@ -645,6 +651,40 @@ export function queryEvents(events, f) {
   );
 }
 
+// ---------- annotations: persisted agent judgments, layered on the record ----------
+// Lazy enrichment: when an agent investigates WHY a commit happened (a revert's
+// failure mode, a suppression's cause), it persists the finding here instead of
+// discarding it at session end. annotations.jsonl is append-only, keyed by full
+// sha (immutable — never invalidates), last write per sha wins. Judgments, not
+// records: rendered with provenance and an age stamp, never mixed into events.
+export function loadAnnotations(dir) {
+  const p = join(dir, "annotations.jsonl");
+  if (!existsSync(p)) return [];
+  const bySha = new Map();
+  for (const line of readFileSync(p, "utf8").split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const a = JSON.parse(line);
+      if (a.sha && a.why) bySha.set(a.sha, a);
+    } catch { /* skip malformed lines rather than fail the render */ }
+  }
+  return [...bySha.values()];
+}
+
+export function saveAnnotation(repo, dir, { sha, why, by }) {
+  const r = spawnSync("git", ["-C", repo, "rev-parse", "--verify", "--quiet", `${sha}^{commit}`], { encoding: "utf8" });
+  const full = (r.stdout || "").trim();
+  if (r.status !== 0 || !full) return null;
+  const a = { sha: full, why: String(why).slice(0, 400), by: by || "agent", date: new Date().toISOString().slice(0, 10) };
+  writeFileSync(join(dir, "annotations.jsonl"), JSON.stringify(a) + "\n", { flag: "a" });
+  return a;
+}
+
+export function noteFor(notes, e) {
+  if (!notes.length) return null;
+  return notes.find((a) => (e.fullSha && a.sha === e.fullSha) || a.sha.startsWith(e.sha)) || null;
+}
+
 // ---------- CLI ----------
 function usage() {
   console.log(`
@@ -657,6 +697,9 @@ function usage() {
     logbook query [path] [--file S] [--revert] [--suppress] [--weaken N]
                   [--downgrade N] [--grep S] [--since D] [--until D] [--limit N]
                                   filter the full event record (JSONL out)
+    logbook annotate SHA "WHY" [path] [--by WHO]
+                                  persist WHY a commit happened (lazy enrichment:
+                                  when your agent investigates a revert, keep it)
     logbook [path] --json         structured events to stdout (writes nothing)
 
   options:
@@ -679,6 +722,8 @@ export function parseArgs(argv) {
     if (a === "journey") o.cmd = "journey";
     else if (a === "audit") o.cmd = "audit";
     else if (a === "query") o.cmd = "query";
+    else if (a === "annotate") o.cmd = "annotate";
+    else if (a === "--by") o.by = argv[++i];
     else if (a === "--file") o.file = argv[++i];
     else if (a === "--revert") o.revert = true;
     else if (a === "--suppress") o.suppress = true;
@@ -697,7 +742,11 @@ export function parseArgs(argv) {
     else if (a === "-v" || a === "--version") o.cmd = "version";
     else if (!a.startsWith("-")) rest.push(a);
   }
-  if (rest.length) o.repo = rest[0];
+  if (o.cmd === "annotate") {
+    // annotate <sha> "<why>" [repo] — sha and why are positional
+    o.sha = rest[0]; o.why = rest[1];
+    if (rest[2]) o.repo = rest[2];
+  } else if (rest.length) o.repo = rest[0];
   return o;
 }
 
@@ -717,6 +766,24 @@ async function main() {
   }
   const name = basename(repo);
   const shallow = existsSync(join(repo, ".git", "shallow"));
+
+  if (o.cmd === "annotate") {
+    if (!o.sha || !o.why) {
+      console.error(`  usage: logbook annotate <sha> "<why it happened>" [repo] [--by <who>]`);
+      process.exit(1);
+    }
+    const dir = o.out ? resolve(o.out) : repo;
+    const a = saveAnnotation(repo, dir, { sha: o.sha, why: o.why, by: o.by });
+    if (!a) {
+      console.error(`  not a commit in this repo: ${o.sha}`);
+      process.exit(1);
+    }
+    if (!o.quiet) {
+      console.log(`  ${C.good}✓${C.r} annotated ${C.bold}${a.sha.slice(0, 8)}${C.r} ${C.dim}(by ${a.by}, ${a.date})${C.r}`);
+      console.log(`  ${C.dim}merged into LOGBOOK.md on the next run${C.r}\n`);
+    }
+    return;
+  }
 
   if (!o.quiet && !o.json) console.error(`\n  ${C.dim}reading git history…${C.r}`);
   const reused = loadEvents(repo, o);
@@ -750,13 +817,14 @@ async function main() {
   }
 
   const outDir = o.out ? resolve(o.out) : repo;
-  writeFileSync(join(outDir, "LOGBOOK.md"), renderLogbookMd(name, A, shallow, capped));
+  const notes = loadAnnotations(outDir);
+  writeFileSync(join(outDir, "LOGBOOK.md"), renderLogbookMd(name, A, shallow, capped, notes));
   writeFileSync(join(outDir, "events.jsonl"), events.map((e) => JSON.stringify(e)).join("\n") + "\n");
   writeFileSync(join(outDir, "JOURNEY.md"), renderJourneyMd(name, A, o.compare));
 
   if (!o.quiet) {
     console.log(`  ${fmt(A.n)} commits${capped ? ` (capped — use -n for more)` : ""} · ${fmt(A.filesTouched)} files · ${spanHuman(A.spanDays)} · ${A.authors} authors\n`);
-    console.log(`  ${C.good}✓${C.r} wrote ${C.bold}LOGBOOK.md${C.r}   ${C.dim}hotspots · do-not-retry · suppression ledger${C.r}`);
+    console.log(`  ${C.good}✓${C.r} wrote ${C.bold}LOGBOOK.md${C.r}   ${C.dim}hotspots · do-not-retry · suppression ledger${notes.length ? ` · ${notes.length} why${notes.length === 1 ? "" : "s"}` : ""}${C.r}`);
     console.log(`  ${C.good}✓${C.r} wrote ${C.bold}events.jsonl${C.r}   ${C.dim}${fmt(A.n)} structured events${C.r}`);
     console.log(`  ${C.good}✓${C.r} wrote ${C.bold}JOURNEY.md${C.r}     ${C.dim}the repo's story, told back to you${C.r}\n`);
     if (shallow) console.log(`  ${C.bad}⚠${C.r} ${C.dim}shallow clone — run git fetch --unshallow for the full record${C.r}\n`);

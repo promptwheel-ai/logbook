@@ -31,6 +31,20 @@ the skip/ignore near the flagged location). Present the triage as YOUR
 judgment layered on the deterministic record — never edit the logbook files
 to match your conclusions; the record and the reading stay separate.
 
+PERSIST what you learn (lazy enrichment): when an investigation establishes
+WHY something happened — a revert's failure mode, a suppression's cause —
+save it so the next session gets it free instead of re-investigating:
+
+```bash
+npx @promptwheel/logbook annotate <sha> "<one specific sentence>" --by <your-model-name>
+```
+
+Annotations are sha-keyed, attributed, dated, and merged into LOGBOOK.md as
+"why (inferred)" lines on future runs. Judgments, not records: only annotate
+causes you verified in the actual diffs, and treat old annotations as aged
+testimony — the fact never changes, but its force can (a "reverted because
+webpack4 broke" constraint stops binding once webpack4 is dead).
+
 ## Querying the full record (events.jsonl)
 
 The digest truncates with "…and N more — full record in events.jsonl". When

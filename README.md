@@ -48,6 +48,7 @@ npx @promptwheel/logbook path/to/repo # or any repo
 npx @promptwheel/logbook journey      # the story, in color (writes nothing)
 npx @promptwheel/logbook journey --compare  # rank your almanac vs the top 1,000 GitHub repos
 npx @promptwheel/logbook audit        # what is STILL suppressed in HEAD, and since when
+npx @promptwheel/logbook annotate <sha> "<why>" --by <who>   # persist WHY a commit happened
 npx @promptwheel/logbook --json       # events to stdout (writes nothing)
 
 # era-scoped archaeology
@@ -79,10 +80,42 @@ Commit LOGBOOK.md, then add this to your CLAUDE.md (or AGENTS.md /
 Read LOGBOOK.md before proposing changes — especially the do-not-retry
 list and fragile areas. Refresh with: npx -y @promptwheel/logbook
 Check what is still silenced: npx -y @promptwheel/logbook audit
+When you investigate WHY a listed commit happened, persist the finding:
+npx -y @promptwheel/logbook annotate <sha> "<why>" --by <model>
 ```
 
 Passive beats invoked: the agent doesn't have to decide to look — the
 history is simply in front of it.
+
+## Lazy enrichment: the record says WHAT, your agent persists WHY
+
+The ledger can tell you a refactor was reverted; it can't tell you it was
+reverted because webpack4 broke. Your agent figures that out anyway the
+first time a task collides with the revert — `annotate` keeps the finding
+instead of discarding it at session end:
+
+```bash
+logbook annotate c08adc2 "WeakMap cache added to dodge a React-Compiler lint warning; reverted to direct ref mutation" --by claude
+```
+
+On the next run, LOGBOOK.md's do-not-retry entry carries the why:
+
+```
+- 2024-09-15 c08adc2 revert useShallow refactor in #2701 (#2703)
+  - why (inferred by claude, 2026-07-11): WeakMap cache added to dodge a React-Compiler lint warning; reverted to direct ref mutation
+```
+
+Annotations live in `annotations.jsonl` — sha-keyed (immutable, so they
+never go stale as facts), attributed, dated, last write per commit wins.
+They are **judgments layered on the record, never mixed into it**: the
+deterministic ledger stays untouched, the whys render with provenance and
+a disclaimer. Measured on the A/B benchmark: an agent whose logbook carried
+the whys stated real failure causes as design constraints at plan time
+(+2% read tokens), where the un-enriched agent planned an investigation —
+and, on zustand, guessed the cause wrong. One caution: annotations age as
+constraints even though they never invalidate as facts — a "broke webpack4"
+reason stops binding once webpack4 is dead, so the date is always shown.
+Commit the file for a shared team memory, or gitignore it for a private one.
 
 ## The audit: archaeology becomes a to-do list
 

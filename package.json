@@ -1,7 +1,7 @@
 {
   "name": "@promptwheel/logbook",
-  "version": "0.5.0",
-  "description": "Turn git history into memory an agent can use: hotspots, do-not-retry, suppression ledger — and your repo's story, told back to you.",
+  "version": "0.6.0",
+  "description": "Turn git history into memory an agent can use: hotspots, do-not-retry, suppression ledger \u2014 and your repo's story, told back to you.",
   "type": "module",
   "bin": {
     "logbook": "bin/logbook.mjs"

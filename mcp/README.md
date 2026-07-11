@@ -12,6 +12,10 @@ Cursor, and any MCP client).
   (blame-dated), with re-silencing fight logs.
 - **logbook_query** — precision filters over the full commit-event record
   (file / revert / suppress / weaken / downgrade / grep / since / until).
+- **logbook_annotate** — persist WHY a commit happened (lazy enrichment):
+  when the agent investigates a revert or suppression, the finding is kept —
+  sha-keyed, attributed, dated — and merged into future digests as
+  "why (inferred)" lines instead of being re-derived every session.
 
 ## Setup (Claude Desktop / any MCP client)
 
