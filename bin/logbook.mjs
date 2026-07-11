@@ -178,9 +178,18 @@ export function analyze(events, touched) {
   const MIN_T = Date.parse("1995-01-01");
   const MAX_T = Date.now() + 86400000;
   const validDate = (d) => { const t = Date.parse(d); return t > MIN_T && t < MAX_T; };
+  // Era detection: a lone wrong-but-plausible date (one 2001 commit in a 2022
+  // repo) poisons winter/span past the epoch floor. Skip isolated leading
+  // dates that sit >3 years before the next, up to max(1, 0.5%) of commits.
+  const times = oldest.filter((e) => validDate(e.date)).map((e) => Date.parse(e.date)).sort((a, b) => a - b);
+  let sk = 0;
+  const maxSkip = Math.max(1, Math.floor(times.length * 0.005));
+  while (sk < maxSkip && sk + 1 < times.length && times[sk + 1] - times[sk] > 3 * 365.25 * 86400000) sk++;
+  const eraStart = times.length ? times[sk] : 0;
+  const inEra = (d) => { const t = Date.parse(d); return t >= eraStart && validDate(d); };
   let winter = { days: 0, from: null, to: null };
   for (let i = 1; i < oldest.length; i++) {
-    if (!validDate(oldest[i].date) || !validDate(oldest[i - 1].date)) continue;
+    if (!inEra(oldest[i].date) || !inEra(oldest[i - 1].date)) continue;
     const gap = Math.round(
       (new Date(oldest[i].date) - new Date(oldest[i - 1].date)) / 86400000
     );
@@ -188,13 +197,15 @@ export function analyze(events, touched) {
   }
   const trials = fragile.slice(0, 3);
 
-  const dated = oldest.filter((e) => validDate(e.date));
-  const spanDays = dated.length
-    ? Math.max(1, Math.round((new Date(dated[dated.length - 1].date) - new Date(dated[0].date)) / 86400000))
+  const spanDays = times.length
+    ? Math.max(1, Math.round((times[times.length - 1] - eraStart) / 86400000))
     : 0;
 
+  const iso = (t) => new Date(t).toISOString().slice(0, 10);
   return {
     n: events.length, first, last, spanDays,
+    spanStart: times.length ? iso(eraStart) : first?.date,
+    spanEnd: times.length ? iso(times[times.length - 1]) : last?.date,
     filesTouched: touched.length,
     authors: authors.size, topAuthor,
     reverts, suspEvents, weaken, fragile,
@@ -216,7 +227,7 @@ export function renderLogbookMd(name, A, shallow, capped) {
   const L = [];
   L.push(`# The Logbook of ${name}`);
   L.push(``);
-  L.push(`_${fmt(A.n)} commits (${A.first?.date} → ${A.last?.date}), ${fmt(A.filesTouched)} files touched, ${A.authors} authors._`);
+  L.push(`_${fmt(A.n)} commits (${A.spanStart} → ${A.spanEnd}), ${fmt(A.filesTouched)} files touched, ${A.authors} authors._`);
   if (shallow) L.push(`\n> ⚠️ Shallow clone — history is truncated. Run \`git fetch --unshallow\` for the full record.`);
   if (capped) L.push(`\n> ⚠️ Analysis capped at ${fmt(A.n)} commits (the repo has more). Re-run with \`-n <bigger>\` for the full record.`);
   L.push(``);
@@ -283,13 +294,13 @@ export function journeyBeats(name, A) {
   return B;
 }
 
-// Fleet percentile tables — top 1,000 GitHub repos, 2026-07 (n=999).
+// Fleet percentile tables — top 2,500 GitHub repos, 2026-07 (n=2498, 20k-commit windows).
 // reverts/bargains are per 1,000 commits (size-fair); winter in days.
 // Regenerate from a fleet run per release; no network calls, ever.
 export const FLEET = {
-  reverts_per_1k: [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0.47,0.8,1.01,1.22,1.44,1.6,1.73,1.86,2.06,2.2,2.36,2.46,2.6,2.73,2.88,3,3.2,3.4,3.56,3.73,3.95,4.08,4.24,4.35,4.41,4.6,4.73,4.85,4.98,5.06,5.17,5.21,5.4,5.55,5.66,5.75,5.8,6,6.07,6.16,6.33,6.4,6.6,6.72,6.83,7,7.18,7.32,7.52,7.61,7.81,8,8.13,8.31,8.6,8.77,8.98,9.2,9.4,9.6,9.76,9.8,9.99,10.08,10.2,10.4,10.74,11,11.44,11.82,12.36,12.6,13.2,13.51,13.92,14.44,14.8,15.75,16.41,17.54,18.78,21,25.44,49.31],
-  bargains_per_1k: [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0.2,0.31,0.41,0.6,0.96,1.22,1.4,1.68,1.99,2.39,2.59,2.91,3.57,3.71,4,4.37,4.67,5,5.46,6,6.31,6.86,7.62,8,8.61,9.13,9.72,10.8,11.34,12.2,13.03,14.06,15.11,15.74,17.4,18.78,19.46,20.15,20.6,21.6,23,24.11,26,27.09,28.23,30.41,33.32,35.87,38.37,40.82,43.1,47,52.8,57.23,62.98,69,76,83.33,90.28,111.2,222.42],
-  winter_days: [0,0,0,0,0,0,0,0,15,16,19,20,22,23,24,27,30,33,35,37,42,46,48,51,57,58,61,64,66,69,72,74,79,82,85,87,92,97,102,107,110,116,119,123,127,138,143,149,157,165,171,176,181,190,194,201,211,215,221,230,239,247,264,276,301,314,331,347,361,373,382,393,416,429,453,473,490,509,533,553,581,611,646,687,723,754,773,817,859,908,948,1004,1084,1138,1234,1305,1613,1802,2157,2872,19501],
+  reverts_per_1k: [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0.42,0.91,1.22,1.38,1.57,1.75,1.9,2.07,2.21,2.37,2.54,2.72,2.84,2.99,3.14,3.25,3.4,3.58,3.73,3.91,4.03,4.17,4.29,4.4,4.49,4.68,4.76,4.86,5,5.09,5.22,5.37,5.54,5.67,5.76,5.92,6.09,6.18,6.33,6.41,6.56,6.67,6.83,6.99,7.1,7.27,7.41,7.56,7.73,7.93,8.15,8.3,8.47,8.7,8.89,9.09,9.31,9.55,9.81,10.02,10.26,10.6,10.87,11.19,11.49,12.09,12.5,12.99,13.42,14,14.52,15.37,16.05,17.07,18.49,20.46,24.27,57.37],
+  bargains_per_1k: [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0.17,0.32,0.45,0.7,0.94,1.13,1.37,1.66,1.95,2.29,2.59,3.08,3.57,3.88,4.36,4.85,5.46,5.82,6.31,7.02,7.7,8.15,8.98,9.66,10.37,11.2,12.07,12.84,13.74,15.04,16.17,17.31,18.76,19.61,20.49,21.75,23.26,25.05,26.32,28.01,29.92,32.99,35.38,38.5,41.33,44.53,50.49,56.08,62.14,69.46,82.19,96.49,125.8,1000],
+  winter_days: [0,0,0,0,14,16,20,22,24,27,31,34,37,41,44,46,50,55,58,61,65,69,71,76,79,85,88,94,98,101,107,111,116,122,126,135,141,148,152,158,164,170,176,183,190,196,205,212,218,226,232,239,247,255,265,274,287,301,312,324,335,347,361,373,381,391,404,416,431,445,464,479,493,508,525,544,562,581,595,625,654,683,716,747,770,792,821,861,913,953,1015,1077,1131,1206,1286,1425,1613,1880,2157,2649,8744],
 };
 
 export function fleetPct(key, val) {
@@ -322,7 +333,7 @@ export function renderJourneyMd(name, A, compare) {
   const pcts = compare ? almanacPcts(A) : {};
   L.push(`_The Logbook Almanac_ — ` + almanacStats(A).map(([k, v]) =>
     `${k} ${v}${pcts[k] != null ? ` (p${pcts[k]})` : ""}`).join(" · "));
-  if (compare) L.push(`_Percentiles vs the top 1,000 repos on GitHub (size-fair, per 1k commits)._`);
+  if (compare) L.push(`_Percentiles vs the top 2,500 repos on GitHub (size-fair, per 1k commits)._`);
   return L.join("\n") + "\n";
 }
 
@@ -347,7 +358,7 @@ export function renderJourneyAnsi(name, A, compare) {
   L.push(`  ${C.gold}│${C.r}  ${C.bold}${title}${C.r}${" ".repeat(w - title.length - 2)}${C.gold}│${C.r}`);
   L.push(`  ${C.gold}│${C.r}  ${line}${" ".repeat(w - plain.length - 2)}${C.gold}│${C.r}`);
   L.push(`  ${C.gold}╰${"─".repeat(w)}╯${C.r}`);
-  if (compare) L.push(`  ${C.dim}percentiles vs the top 1,000 repos on GitHub${C.r}\n`);
+  if (compare) L.push(`  ${C.dim}percentiles vs the top 2,500 repos on GitHub${C.r}\n`);
   else L.push("");
   return L.join("\n");
 }
@@ -364,7 +375,7 @@ function usage() {
 
   options:
     -n, --max N        commits to analyze (default 20000)
-    --compare          rank your almanac against the top 1,000 GitHub repos
+    --compare          rank your almanac against the top 2,500 GitHub repos
     --since / --until  era-scoped archaeology (git date formats)
     --out DIR          write artifacts somewhere other than the repo root
     -q, --quiet        suppress the summary

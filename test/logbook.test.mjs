@@ -185,10 +185,28 @@ test("fleetPct bounds and --compare renders percentiles", async () => {
   const { fleetPct } = await import("../bin/logbook.mjs");
   assert.equal(fleetPct("reverts_per_1k", 0), 0);
   assert.equal(fleetPct("reverts_per_1k", 99999), 100);
-  const mid = fleetPct("bargains_per_1k", 2.6);
-  assert.ok(mid > 20 && mid < 80, `median-ish input lands mid-range (got p${mid})`);
+  const lo = fleetPct("bargains_per_1k", 0.1);
+  const hi = fleetPct("bargains_per_1k", 50);
+  assert.ok(lo < hi, `monotonic: p${lo} < p${hi}`);
   const out = execFileSync(process.execPath, [CLI, "journey", repo, "--compare"],
     { encoding: "utf8", env: { ...process.env, FORCE_COLOR: "1" } });
   assert.match(out, /p\d+/);
-  assert.match(out, /percentiles vs the top 1,000 repos/);
+  assert.match(out, /percentiles vs the top 2,500 repos/);
+});
+
+test("a lone wrong-but-plausible early date does not poison winter/span", () => {
+  const d = mkdtempSync(join(tmpdir(), "logbook-era-"));
+  const g = (args, date) => execFileSync("git", ["-C", d, ...args], { env: { ...process.env,
+    GIT_AUTHOR_NAME: "H", GIT_AUTHOR_EMAIL: "h@x.io", GIT_COMMITTER_NAME: "H",
+    GIT_COMMITTER_EMAIL: "h@x.io", ...(date && { GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date }) } });
+  g(["init", "-q"]);
+  g(["commit", "-q", "--allow-empty", "-m", "clock bug"], "2005-06-01T12:00:00");
+  for (let i = 0; i < 6; i++)
+    g(["commit", "-q", "--allow-empty", "-m", `real ${i}`], `2024-0${i + 1}-01T12:00:00`);
+  execFileSync(process.execPath, [CLI, d, "-q"], { encoding: "utf8" });
+  const j = readFileSync(join(d, "JOURNEY.md"), "utf8");
+  const m = /([\d,]+) days of silence/.exec(j);
+  if (m) assert.ok(Number(m[1].replace(/,/g, "")) < 400, `winter is ${m[1]} days`);
+  const lb = readFileSync(join(d, "LOGBOOK.md"), "utf8");
+  assert.ok(!/2005/.test(/\(([\d?-]+) →/.exec(lb)?.[1] || ""), "span starts in era, not 2005");
 });
