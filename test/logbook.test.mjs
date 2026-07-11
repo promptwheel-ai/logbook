@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 
 import {
-  classifyFile, parseArgs, collectEvents, diffScan, hotspots, analyze,
+  SUPPRESS_PAT, classifyFile, parseArgs, collectEvents, diffScan, hotspots, analyze,
   renderLogbookMd, renderJourneyMd, journeyBeats, almanacStats,
   loadAnnotations, saveAnnotation, loadEvents,
 } from "../bin/logbook.mjs";
@@ -69,6 +69,16 @@ test("classifyFile buckets correctly", () => {
   assert.equal(classifyFile("README.md"), "doc");
   assert.equal(classifyFile("dist/bundle.js"), "gen");
   assert.equal(classifyFile("package-lock.json"), "gen");
+});
+
+test("suppression idioms across languages match directives, not lookalikes", () => {
+  const yes = ['@Disabled("flaky")', '@Ignore("ci")', '[Ignore("db")]',
+    '[Fact(Skip = "unstable")]', '#[ignore]', '$this->markTestSkipped("x");',
+    't.Skip("go")', '@pytest.mark.skip', '@unittest.skip'];
+  const no = ['@pytest.mark.skipif(c, reason="r")', '@unittest.skipIf(c, "r")',
+    'input.Skip(3)', '[IgnoreAntiforgeryToken]', 'skipWaiting()', 'disabled=true'];
+  for (const s of yes) { SUPPRESS_PAT.lastIndex = 0; assert.ok(SUPPRESS_PAT.test(s), `matches: ${s}`); }
+  for (const s of no) { SUPPRESS_PAT.lastIndex = 0; assert.ok(!SUPPRESS_PAT.test(s), `clean: ${s}`); }
 });
 
 test("parseArgs handles command, path, and flags", () => {

@@ -25,7 +25,7 @@ export const DOC_PAT = /\.(md|txt|rst|adoc)$|(^|\/)(LICENSE|CHANGELOG|CHANGES|NE
 export const GEN_PAT =
   /node_modules\/|\.map$|\.lock$|lock\.json$|\.gen\.|generated|dist\/|build\/|vendor\/|-?snapshot\.json$|\.snap$/i;
 export const SUPPRESS_PAT =
-  /@ts-nocheck|@ts-ignore|eslint-disable|# *noqa|# *type: *ignore|\bit\.skip\b|\btest\.skip\b|\bxit\(|\bxdescribe\(|describe\.skip\b|@pytest\.mark\.skip\b|@unittest\.skip\b|\bt\.Skip\(|except[^:]*: *pass/g;
+  /@ts-nocheck|@ts-ignore|eslint-disable|# *noqa|# *type: *ignore|\bit\.skip\b|\btest\.skip\b|\bxit\(|\bxdescribe\(|describe\.skip\b|@pytest\.mark\.skip\b|@unittest\.skip\b|\bt\.Skip\(|@Disabled\b|@Ignore\b|\[Ignore\b|Skip\s*=\s*"|#\[ignore|markTestSkipped\(|markTestIncomplete\(|except[^:]*: *pass/g;
 export const ASSERT_PAT = /assert|expect\(|\.toBe|\.toEqual|t\.Error|t\.Fatal/;
 // Assertion strength (for downgrade detection): exact/behavioral vs existence/truthy.
 export const STRONG_ASSERT_PAT = /\.toStrictEqual\(|\.toEqual\(|\.toBe\(|\.toMatchObject\(|\.toThrow\([^)]|assertEqual\(|assertIs\(|assertRaises\([^)]/;
@@ -654,10 +654,25 @@ export function auditHead(repo, events) {
     }
     return triple || tickOpen;
   };
+  // PHPUnit's markTestSkipped/-Incomplete is almost always a conditional
+  // environment guard (`if (!extension_loaded(...))`) — gating, not debt.
+  // The annotation forms (@Disabled, [Ignore], Skip=, #[ignore]) are
+  // unconditional by construction and need no such check.
+  const isGuarded = (item) => {
+    if (!item.kind.startsWith("markTest")) return false;
+    let text = fileCache.get(item.file);
+    if (text === undefined) {
+      try { text = git(repo, ["show", `HEAD:${item.file}`]); } catch { text = null; }
+      fileCache.set(item.file, text);
+    }
+    if (text == null) return false;
+    const ctx = text.split("\n").slice(Math.max(0, item.line - 4), item.line).join("\n");
+    return /\b(if|unless)\s*\(/.test(ctx);
+  };
   const refined = [];
   for (const item of live) {
     if (refined.length >= 40) break;
-    if (inMultilineString(item)) { item.drop = true; continue; }
+    if (inMultilineString(item) || isGuarded(item)) { item.drop = true; continue; }
     blame(item);
     refined.push(item);
   }
