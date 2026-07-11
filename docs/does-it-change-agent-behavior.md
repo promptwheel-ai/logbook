@@ -48,3 +48,51 @@ the tool's core claim (do-not-retry), not at random. Reproduce it: run
 `npx @promptwheel/logbook` on any repo with a meaningful revert history
 (the median top-2,500 repo has 10 reverts) and ask an agent to plan a change
 adjacent to a reverted one, with and without LOGBOOK.md in context.
+
+---
+
+# Round 2: generic tasks, no revert priming (same day)
+
+Four more runs — onboarding brief on flask, modernization risk assessment on
+express. Tasks never mention history. These are famous repos, which makes
+them the HARDEST test: the control agent has deep training knowledge.
+
+## What the controls got right
+
+Both controls were genuinely strong — training data covers famous repos
+(flask's sansio split and Werkzeug coupling; express's path-to-regexp CVE
+history and prototype monkey-patching). On world-famous code, a fresh agent
+is not blind.
+
+## What only the logbook added (verbatim excerpts)
+
+flask treatment:
+> Two reverts are directly load-bearing for helpers.py work: the 2015 revert
+> of "Add safe_join root check" (helpers.py owns path-safety logic) and the
+> 2019 revert of "move app context push to before request matching" [...]
+> both were "obviously correct" changes that shipped and got rolled back.
+> [...] 82 suppression commits and 47 assertion-weakening events mean
+> existing green tests around helpers.py can't be trusted as proof of
+> correctness [...] I'd audit which suppressions touch helpers.py before
+> treating current passing tests as a real safety net.
+
+express treatment:
+> Response.js carries a security scar: the open-redirect allow-list fix
+> needed a second pass [...] it already fooled one round of review. [...]
+> the 2017 Buffer.from-when-available swap [was] already tried and rolled
+> back — so before touching buffer handling, confirm the new approach
+> differs materially from what was already reverted. [...] re-enable/tighten
+> [the weakened assertions] first so you have a real regression net.
+
+A modernization pass on express would try `Buffer.from` — it is the textbook
+modernization — and the do-not-retry list is the only thing standing between
+the agent and a re-attempt of a known rollback.
+
+## The honest reading
+
+On famous repos, the logbook's value is a LAYER (commit-level facts training
+can't hold: which reverts bite this module, whether the test net is
+trustworthy, where security fixes needed two passes) on top of strong priors.
+On PRIVATE repos — the actual target user — the control has no priors at all:
+training data has never seen your company's history. Famous-repo tests
+understate the private-repo value.

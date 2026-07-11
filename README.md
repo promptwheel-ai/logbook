@@ -56,6 +56,13 @@ Options: `-n/--max N` (commit cap, default 20000) · `--compare` · `--out DIR` 
 `--compare` uses a percentile table baked into the CLI from a 1,000-repo fleet
 run — still zero dependencies and zero network calls.
 
+## Context economics
+
+The median top-2,500 repo's LOGBOOK.md is **798 tokens**. Its raw `git log`
+is 104× that — and for a third of repos the full log doesn't fit in a 150k
+context window at all. Measured across 400 repos:
+[docs/context-economics.md](docs/context-economics.md).
+
 ## Does it actually change agent behavior?
 
 Yes — measurably. In an A/B test, an agent asked to plan a `useShallow`
