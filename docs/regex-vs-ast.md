@@ -1,10 +1,28 @@
 # Regex vs AST: measured, not argued (2026-07-10)
 
 We parsed the pre- and post-commit versions of changed files with REAL
-parsers (Babel for JS/TS, Python stdlib `ast`) for 1,587 assert-touching
-commits sampled across the top-2,500-repo corpus, and compared AST
-ground-truth assertion deltas against this tool's regex extractor on the
-same commits.
+parsers (Babel for JS/TS, Python stdlib `ast`) for assert-touching commits
+sampled across the top-2,500-repo corpus, and compared AST ground-truth
+assertion deltas against this tool's regex extractor on the same commits.
+The study ran FOUR times with successively corrected ground-truth rulers
+(wrapper-aware strength, statement-unit counting, chai/ava/node-assert
+dialects, rename-following, Flow fallback) and scaled from 1,587 to 3,993
+commits, stratified by era.
+
+## Final stratified table (n=3,993, corrected ruler)
+
+| stratum | n | direction agreement | median error | p90 |
+|---|---|---|---|---|
+| AI/bot-authored (entire corpus population) | 932 | **94%** | **0** | 17 |
+| 2025+ human (agent era) | 1,736 | **94%** | 1 | 31 |
+| pre-2025 control | 1,325 | 92% | 1 | 14 |
+| ALL | 3,993 | **93%** | 1 | 22 |
+
+**Direction agreement was IDENTICAL across all four ruler versions** — the
+number is stable when the instrument improves, which is what a real
+measurement looks like. And calibration is BEST exactly where the tool's
+users live: on machine-authored commits the median error is zero —
+machine-formatted code is what pattern-matching reads most reliably.
 
 | metric | result |
 |---|---|

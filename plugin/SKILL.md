@@ -20,3 +20,13 @@ the current task, and verify any lead you act on with `git show <sha>` before
 asserting what happened. Findings are leads, not verdicts — a suppression
 event means "a human should look here," not misconduct. If the repo is
 shallow, offer `git fetch --unshallow` first.
+
+## Investigation mode (when the user asks to dig into findings)
+
+For each Notable event or flagged lead worth pursuing: `git show <sha>` the
+commit, read the actual diff, and classify it — real weakening / sanctioned
+maintenance / classifier artifact — with one line of evidence each. Check
+whether flagged suppressions are STILL in the current tree (grep HEAD for
+the skip/ignore near the flagged location). Present the triage as YOUR
+judgment layered on the deterministic record — never edit the logbook files
+to match your conclusions; the record and the reading stay separate.
