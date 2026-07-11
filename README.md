@@ -69,7 +69,9 @@ run — still zero dependencies and zero network calls.
 
 That is express, today: its static-file test suite has been skipped for
 seven years. The ledger tells you when it happened; the audit tells you it
-is still happening. Instant on normal repos; up to ~a minute on 20k-commit
+is still happening. And when a suppression has been removed and RE-added,
+the audit shows the fight log: `re-silenced ×3 (+-++--+)` — a test someone
+keeps trying to fix, and keeps losing to. Instant on normal repos; up to ~a minute on 20k-commit
 monsters (the ledger build, not the scan).
 
 ## Context economics

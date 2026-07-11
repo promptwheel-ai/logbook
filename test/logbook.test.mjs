@@ -283,3 +283,21 @@ test("audit reports live suppressions with since-dates, ignores removed ones", (
   assert.ok(!/it\.skip/.test(out), "removed skip is not reported live");
   assert.match(out, /1 live suppression/);
 });
+
+test("audit tags re-silenced suppressions with the fight log", () => {
+  const d = mkdtempSync(join(tmpdir(), "logbook-fight-"));
+  const g = (args, date) => execFileSync("git", ["-C", d, ...args], { env: { ...process.env,
+    GIT_AUTHOR_NAME: "H", GIT_AUTHOR_EMAIL: "h@x.io", GIT_COMMITTER_NAME: "H",
+    GIT_COMMITTER_EMAIL: "h@x.io", ...(date && { GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date }) } });
+  g(["init", "-q"]);
+  writeFileSync(join(d, "a.test.js"), "it.skip('flaky', () => {});\n");
+  g(["add", "-A"]); g(["commit", "-q", "-m", "skip flaky"], "2023-01-01T12:00:00");
+  writeFileSync(join(d, "a.test.js"), "it('flaky', () => {});\n");
+  g(["add", "-A"]); g(["commit", "-q", "-m", "fixed it"], "2023-06-01T12:00:00");
+  writeFileSync(join(d, "a.test.js"), "it.skip('flaky', () => {});\n");
+  g(["add", "-A"]); g(["commit", "-q", "-m", "skip again, still flaky"], "2024-01-01T12:00:00");
+  const out = execFileSync(process.execPath, [CLI, "audit", d],
+    { encoding: "utf8", env: { ...process.env, FORCE_COLOR: "0" } });
+  assert.match(out, /it\.skip.*a\.test\.js/);
+  assert.match(out, /re-silenced ×1 \(\+-\+\)/);
+});

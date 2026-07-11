@@ -502,6 +502,29 @@ export function auditHead(repo, events) {
     } catch { heuristic(item); }
   }
   live.sort((a, b) => (a.since || "9999") < (b.since || "9999") ? -1 : 1);
+  // Fight log (pickaxe): for displayed findings, how many times was this
+  // suppression removed and RE-added? One git log -S pass per item.
+  {
+    for (const item of live.slice(0, 30)) {
+      try {
+        const out = git(repo, ["log", "-S", item.kind, "--format=%x1e%H", "-p", "--unified=0", "--", item.file]);
+        let seq = "";
+        for (const chunk of out.split("\x1e")) {
+          if (!chunk.trim()) continue;
+          let adds = 0, dels = 0;
+          for (const l of chunk.split("\n")) {
+            if (l.startsWith("+") && !l.startsWith("+++") && l.includes(item.kind)) adds++;
+            else if (l.startsWith("-") && !l.startsWith("---") && l.includes(item.kind)) dels++;
+          }
+          if (adds > dels) seq = "+" + seq;        // log is newest-first; build oldest-first
+          else if (dels > adds) seq = "-" + seq;
+        }
+        let seenMinus = false, re = 0;
+        for (const ch of seq) { if (ch === "-") seenMinus = true; else if (ch === "+" && seenMinus) re++; }
+        if (re > 0) { item.fight = seq; item.resilenced = re; }
+      } catch { /* untagged */ }
+    }
+  }
   return live;
 }
 
@@ -517,7 +540,8 @@ function renderAudit(name, live) {
   for (const x of live.slice(0, 30)) {
     const age = x.since ? `${((now - Date.parse(x.since)) / 31557600000).toFixed(1)}y` : "?";
     const since = x.since ? `since ${x.since} (${age})` : "origin outside window";
-    W.push(`  ${C.bad}${x.kind}${C.r}  ${x.file}:${x.line}  ${C.dim}${since}${C.r}`);
+    const fight = x.resilenced ? `  ${C.gold}re-silenced ×${x.resilenced} (${x.fight})${C.r}` : "";
+    W.push(`  ${C.bad}${x.kind}${C.r}  ${x.file}:${x.line}  ${C.dim}${since}${C.r}${fight}`);
   }
   if (live.length > 30) W.push(`  ${C.dim}…and ${live.length - 30} more${C.r}`);
   const dated = live.filter((x) => x.since);
