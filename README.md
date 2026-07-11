@@ -1,5 +1,7 @@
 # logbook
 
+[![ci](https://github.com/promptwheel-ai/logbook/actions/workflows/ci.yml/badge.svg)](https://github.com/promptwheel-ai/logbook/actions/workflows/ci.yml)
+
 **Graphify maps where the code is. The logbook records what happened and why.**
 
 A code graph can't tell you that the payments module was rewritten three times,
