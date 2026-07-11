@@ -58,8 +58,8 @@ run — still zero dependencies and zero network calls.
 
 ## Context economics
 
-The median top-2,500 repo's LOGBOOK.md is **798 tokens**. Its raw `git log`
-is 104× that — and for a third of repos the full log doesn't fit in a 150k
+The median top-2,500 repo's LOGBOOK.md is **~1,000 tokens**. Its raw `git log`
+is 82× that — and for a third of repos the full log doesn't fit in a 150k
 context window at all. Measured across 400 repos:
 [docs/context-economics.md](docs/context-economics.md).
 
@@ -80,7 +80,9 @@ first. Full transcripts: [docs/does-it-change-agent-behavior.md](docs/does-it-ch
 - Detection is regex over commit subjects and diffs (lineage: a calibrated
   classifier from a 1,800-PR study of agent-authored code). It will miss
   clever evasions and flag some innocents. That's the right trade for a
-  zero-dependency tool that runs in seconds.
+  zero-dependency tool that runs in seconds — and it's a deliberate division
+  of labor: the logbook is the cheap, deterministic recall layer; the agent
+  reading it is the precision layer that triages leads against the task.
 - Shallow clones starve the analysis — the logbook will tell you to
   `git fetch --unshallow`.
 

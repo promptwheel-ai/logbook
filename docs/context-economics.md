@@ -5,9 +5,9 @@ Measured across a random 400-repo sample of the top-2,500 GitHub repos
 
 | source | median tokens | vs logbook |
 |---|---|---|
-| LOGBOOK.md | **798** | — |
-| `git log --oneline` | 16,133 | 20× |
-| `git log` (full messages) | 83,279 | 104× |
+| LOGBOOK.md (v0.2, incl. per-file history) | **1,019** | — |
+| `git log --oneline` | 16,133 | 16× |
+| `git log` (full messages) | 83,279 | 82× |
 
 - **34% of repos' full git logs exceed a 150k-token context window entirely.**
 - 44% of repos' `--oneline` logs alone exceed 20k tokens.
@@ -23,8 +23,8 @@ also did the reading.
 
 ## Over a month / a year
 
-Per session that would otherwise ingest history: ~15.3k tokens saved vs
-`--oneline`, ~82.5k vs the full log (median repo). Every fresh context —
+Per session that would otherwise ingest history: ~15.1k tokens saved vs
+`--oneline`, ~82.3k vs the full log (median repo). Every fresh context —
 including every subagent — pays it again.
 
 | usage | sessions/mo | saved/mo (oneline → full) | saved/yr |
@@ -34,7 +34,7 @@ including every subagent — pays it again.
 | team of 5, heavy | ~2,200 | 34M → 181M | 405M → 2.2B |
 
 Honest framing: most agents today read no history at all — for them the
-logbook ADDS the knowledge for 798 tokens rather than saving 82k. The
+logbook ADDS the knowledge for ~1k tokens rather than saving 82k. The
 savings apply to sessions that would have pulled the log; the deeper point
 is context pressure (raw logs crowd out code) and impossibility (for 34% of
 top repos the full log exceeds the window entirely).

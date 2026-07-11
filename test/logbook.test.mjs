@@ -231,3 +231,34 @@ test("notable events surface security reverts and big assertion drops", () => {
   assert.match(lb, /security-revert.*CVE-2024-9999/);
   assert.match(lb, /-9 asserts.*clean up test harness/);
 });
+
+test("per-file history keys reverts/suppressions to hotspot files", () => {
+  const opts = { max: 5000, since: null, until: null };
+  const events = collectEvents(repo, opts);
+  diffScan(repo, events, opts);
+  const A = analyze(events, hotspots(repo, opts));
+  assert.ok(A.perFile.length >= 1, "at least one hotspot has history");
+  const core = A.perFile.find((x) => x.file === "core.js");
+  assert.ok(core, "core.js (top fixture hotspot) has a section");
+  assert.ok(core.hits.some((e) => e.revert), "its revert is keyed to it");
+  const lb = renderLogbookMd("fixture", A, false);
+  assert.match(lb, /## History by hotspot file/);
+  assert.match(lb, /### core\.js/);
+});
+
+test("assertion downgrades (strong→weak) are detected and notable", () => {
+  const d = mkdtempSync(join(tmpdir(), "logbook-downgrade-"));
+  const g = (args, date) => execFileSync("git", ["-C", d, ...args], { env: { ...process.env,
+    GIT_AUTHOR_NAME: "H", GIT_AUTHOR_EMAIL: "h@x.io", GIT_COMMITTER_NAME: "H",
+    GIT_COMMITTER_EMAIL: "h@x.io", ...(date && { GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date }) } });
+  g(["init", "-q"]);
+  writeFileSync(join(d, "a.test.js"),
+    "expect(x).toEqual(1);\nexpect(y).toEqual(2);\nexpect(z).toStrictEqual(3);\n");
+  g(["add", "-A"]); g(["commit", "-q", "-m", "add tests"], "2024-01-01T12:00:00");
+  writeFileSync(join(d, "a.test.js"),
+    "expect(x).toBeTruthy();\nexpect(y).toBeDefined();\nexpect(z).toStrictEqual(3);\n");
+  g(["add", "-A"]); g(["commit", "-q", "-m", "stabilize flaky expectations"], "2024-02-01T12:00:00");
+  execFileSync(process.execPath, [CLI, d, "-q"], { encoding: "utf8" });
+  const lb = readFileSync(join(d, "LOGBOOK.md"), "utf8");
+  assert.match(lb, /2 assert downgrades.*stabilize flaky expectations/);
+});

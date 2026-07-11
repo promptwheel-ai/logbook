@@ -1,14 +1,36 @@
 {
   "name": "@promptwheel/logbook",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Turn git history into memory an agent can use: hotspots, do-not-retry, suppression ledger — and your repo's story, told back to you.",
   "type": "module",
-  "bin": { "logbook": "bin/logbook.mjs" },
-  "files": ["bin"],
-  "engines": { "node": ">=18" },
-  "scripts": { "test": "node --test" },
-  "keywords": ["git", "history", "agent", "context", "claude", "ai", "repo", "archaeology"],
-  "repository": { "type": "git", "url": "git+https://github.com/promptwheel-ai/logbook.git" },
-  "publishConfig": { "access": "public" },
+  "bin": {
+    "logbook": "bin/logbook.mjs"
+  },
+  "files": [
+    "bin"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "keywords": [
+    "git",
+    "history",
+    "agent",
+    "context",
+    "claude",
+    "ai",
+    "repo",
+    "archaeology"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/promptwheel-ai/logbook.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "license": "MIT"
 }

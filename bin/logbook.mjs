@@ -20,13 +20,16 @@ import { resolve, join, basename } from "node:path";
 export const TEST_PAT =
   /(^|\/)(tests?|__tests__|spec|specs|fixtures?|snapshots?|__snapshots__|golden)\/|\.(test|spec)\.[jt]sx?$|_test\.(go|py|rb)$|conftest\.py$|(^|\/)(jest|vitest|playwright|cypress|karma)\.config/i;
 export const CONFIG_PAT =
-  /(^|\/)(\.eslintrc|eslint\.config|tsconfig[^/]*\.json|pytest\.ini|setup\.cfg|setup\.py|tox\.ini|\.rubocop|\.github\/|Dockerfile|docker-compose|vercel\.json|package\.json|Cargo\.toml|pyproject\.toml|go\.(mod|sum)|Gemfile|Rakefile|mix\.exs|composer\.json|CMakeLists\.txt|Makefile|\.pre-commit-config[^/]*|.*\.ya?ml)$/i;
+  /(^|\/)(\.eslintrc|eslint\.config|tsconfig[^/]*\.json|pytest\.ini|setup\.cfg|setup\.py|tox\.ini|\.rubocop|\.github\/|Dockerfile|docker-compose|vercel\.json|package\.json|Cargo\.toml|lerna\.json|nx\.json|turbo\.json|rush\.json|\.babelrc|babel\.config[^/]*|bower\.json|deno\.json[c]?|pyproject\.toml|go\.(mod|sum)|Gemfile|Rakefile|mix\.exs|composer\.json|CMakeLists\.txt|Makefile|\.pre-commit-config[^/]*|.*\.ya?ml)$/i;
 export const DOC_PAT = /\.(md|txt|rst|adoc)$|(^|\/)(LICENSE|CHANGELOG|CHANGES|NEWS|AUTHORS|CONTRIBUTORS|HISTORY|COPYING)([^/]*)?$|^docs\//i;
 export const GEN_PAT =
   /node_modules\/|\.map$|\.lock$|lock\.json$|\.gen\.|generated|dist\/|build\/|vendor\/|-?snapshot\.json$|\.snap$/i;
 export const SUPPRESS_PAT =
   /@ts-nocheck|@ts-ignore|eslint-disable|# *noqa|# *type: *ignore|\bit\.skip\b|\btest\.skip\b|\bxit\(|\bxdescribe\(|describe\.skip|@pytest\.mark\.skip|@unittest\.skip|t\.Skip\(|except[^:]*: *pass/g;
 export const ASSERT_PAT = /assert|expect\(|\.toBe|\.toEqual|t\.Error|t\.Fatal/;
+// Assertion strength (for downgrade detection): exact/behavioral vs existence/truthy.
+export const STRONG_ASSERT_PAT = /\.toStrictEqual\(|\.toEqual\(|\.toBe\(|\.toMatchObject\(|\.toThrow\([^)]|assertEqual\(|assertIs\(|assertRaises\([^)]/;
+export const WEAK_ASSERT_PAT = /\.toBeTruthy\(|\.toBeFalsy\(|\.toBeDefined\(|\.toBeUndefined\(|not\.toThrow\(\)|\.toHaveBeenCalled\(\)|assertTrue\(|assertIsNotNone\(/;
 export const REVERT_PAT = /revert|rollback|undo|back out/i;
 export const FIX_PAT = /\bfix|resolve|repair|bug\b/i;
 // The Threshold: the repo first accepting a gate (tests/CI) — the moment it got serious.
@@ -76,22 +79,24 @@ export function collectEvents(repo, opts) {
     if (p.length !== 5) continue;
     const [fullSha, sha, date, author, subject] = p;
     const shape = {};
+    const files = [];
     let adds = 0, dels = 0;
     for (const line of body.split("\n")) {
       const m = /^(\d+|-)\t(\d+|-)\t(.+)$/.exec(line);
       if (!m) continue;
       const cls = classifyFile(m[3]);
       shape[cls] = (shape[cls] || 0) + 1;
+      if (cls !== "doc" && cls !== "gen" && files.length < 6) files.push(m[3]);
       if (m[1] !== "-") adds += Number(m[1]);
       if (m[2] !== "-") dels += Number(m[2]);
     }
     events.push({
       sha, fullSha, date, author,
       subject: subject.slice(0, 110),
-      shape, adds, dels,
+      shape, files, adds, dels,
       revert: REVERT_PAT.test(subject),
       fix: FIX_PAT.test(subject),
-      suppressions: [], del_asserts: 0, add_asserts: 0,
+      suppressions: [], del_asserts: 0, add_asserts: 0, downgrades: 0,
     });
   }
   return events;
@@ -118,8 +123,14 @@ export function diffScan(repo, events, opts) {
     // Track which file each hunk belongs to: asserts/suppressions in doc
     // examples or generated/vendored files are not evaluator changes.
     let counted = true;
+    let strongRemoved = 0, weakAdded = 0;
+    const flushDowngrades = () => {
+      ev.downgrades += Math.min(strongRemoved, weakAdded);
+      strongRemoved = 0; weakAdded = 0;
+    };
     for (const line of (nl === -1 ? "" : chunk.slice(nl + 1)).split("\n")) {
       if (line.startsWith("+++ ") || line.startsWith("--- ")) {
+        if (line.startsWith("--- ")) flushDowngrades();
         const f = line.slice(4).replace(/^[ab]\//, "");
         if (f !== "/dev/null") {
           const cls = classifyFile(f);
@@ -131,10 +142,13 @@ export function diffScan(repo, events, opts) {
       if (line.startsWith("+") && !line.startsWith("+++")) {
         for (const m of line.matchAll(SUPPRESS_PAT)) supp.add(m[0].trim());
         if (ASSERT_PAT.test(line)) ev.add_asserts++;
+        if (WEAK_ASSERT_PAT.test(line)) weakAdded++;
       } else if (line.startsWith("-") && !line.startsWith("---")) {
         if (ASSERT_PAT.test(line)) ev.del_asserts++;
+        if (STRONG_ASSERT_PAT.test(line)) strongRemoved++;
       }
     }
+    flushDowngrades();
     ev.suppressions = [...supp].sort().slice(0, 6);
   }
   return true;
@@ -224,6 +238,7 @@ export function analyze(events, touched) {
   const notablePool = events.filter((e) =>
     isSecRevert(e) ||
     (e.del_asserts - e.add_asserts >= 8 && !isMassDeletion(e)) ||
+    (e.downgrades >= 2) ||
     (e.suppressions.length >= 3)
   );
   notablePool.sort((a, b) =>
@@ -234,9 +249,22 @@ export function analyze(events, touched) {
   const notable = notablePool.slice(0, 8);
   const notableMore = notablePool.length - notable.length;
 
+  // Per-file history: for the files an agent is most likely to touch (top
+  // src hotspots), the reverts/suppressions/weakening that touched THEM.
+  const perFile = touched
+    .filter(([f]) => classifyFile(f) === "src").slice(0, 3)
+    .map(([f]) => {
+      const hits = oldest.filter((e) => e.files?.includes(f) &&
+        (e.revert || e.suppressions.length > 0 || e.del_asserts - e.add_asserts > 2));
+      hits.sort((a, b) => (b.revert - a.revert) ||
+        ((b.del_asserts - b.add_asserts) - (a.del_asserts - a.add_asserts)));
+      return { file: f, hits: hits.slice(0, 4), more: Math.max(0, hits.length - 4) };
+    })
+    .filter((x) => x.hits.length);
+
   const iso = (t) => new Date(t).toISOString().slice(0, 10);
   return {
-    notable, notableMore,
+    notable, notableMore, perFile,
     n: events.length, first, last, spanDays,
     spanStart: times.length ? iso(eraStart) : first?.date,
     spanEnd: times.length ? iso(times[times.length - 1]) : last?.date,
@@ -281,10 +309,26 @@ export function renderLogbookMd(name, A, shallow, capped) {
       const tags = [];
       if (e.revert && /security|CVE-|vulnerab|exploit/i.test(e.subject)) tags.push("security-revert");
       if (e.del_asserts - e.add_asserts >= 8) tags.push(`-${e.del_asserts} asserts`);
+      if (e.downgrades >= 2) tags.push(`${e.downgrades} assert downgrades`);
       if (e.suppressions.length >= 3) tags.push(`${e.suppressions.length} suppressions`);
       L.push(`- ${e.date} ${e.sha} [${tags.join(", ")}] ${e.subject}`);
     }
     if (A.notableMore > 0) L.push(`- …and ${A.notableMore} more — full record in events.jsonl`);
+  }
+  if (A.perFile.length) {
+    L.push(``);
+    L.push(`## History by hotspot file (what touched the files you'll touch)`);
+    for (const pf of A.perFile) {
+      L.push(`### ${pf.file}`);
+      for (const e of pf.hits) {
+        const tag = e.revert ? "revert" :
+          e.downgrades >= 2 ? `${e.downgrades} assert downgrades` :
+          e.suppressions.length ? e.suppressions.slice(0, 2).join(" + ") :
+          `-${e.del_asserts} asserts`;
+        L.push(`- ${e.date} ${e.sha} [${tag}] ${e.subject}`);
+      }
+      if (pf.more) L.push(`- …and ${pf.more} more — full record in events.jsonl`);
+    }
   }
   L.push(``);
   L.push(`## Hotspots — source files (where the complexity lives)`);

@@ -14,6 +14,9 @@ npx @promptwheel/logbook --json       # events to stdout (writes nothing)
 Read-only. Zero deps. `-n N` caps commits; `--since/--until` for era scoping.
 
 After running: read LOGBOOK.md and relay "What a fresh session should know"
-plus the 2-3 most notable findings. Findings are leads, not verdicts — a
-suppression event means "a human should look here," not misconduct. If the
-repo is shallow, offer `git fetch --unshallow` first.
+plus the 2-3 most notable findings. TRIAGE, don't parrot: the logbook is a
+recall layer — you are the precision layer. Cross-reference findings against
+the current task, and verify any lead you act on with `git show <sha>` before
+asserting what happened. Findings are leads, not verdicts — a suppression
+event means "a human should look here," not misconduct. If the repo is
+shallow, offer `git fetch --unshallow` first.
