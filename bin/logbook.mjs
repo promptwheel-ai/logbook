@@ -478,14 +478,28 @@ export function auditHead(repo, events) {
       live.push({ file, line: Number(lineNo), kind: hit[0].trim() });
     }
   }
-  // join: earliest ledger event that introduced this kind in this file
+  // join: git blame gives the EXACT commit that introduced each live line
+  // (precise dates); fall back to the ledger heuristic only if blame fails
+  // or the finding count is monster-sized.
   const oldest = [...events].reverse();
-  for (const item of live) {
+  const heuristic = (item) => {
     let hit = oldest.find((e) => e.files?.includes(item.file) &&
       e.suppressions.some((s) => s === item.kind));
     if (!hit) hit = oldest.find((e) => e.files?.includes(item.file) && e.suppressions.length);
     item.since = hit ? hit.date : null;
     item.sha = hit ? hit.sha : null;
+  };
+  for (const item of live) {
+    if (live.length > 120) { heuristic(item); continue; }
+    try {
+      const b = git(repo, ["blame", "-L", `${item.line},${item.line}`, "--porcelain", "HEAD", "--", item.file]);
+      const sha = b.slice(0, 8);
+      const t = /author-time (\d+)/.exec(b);
+      if (t) {
+        item.since = new Date(Number(t[1]) * 1000).toISOString().slice(0, 10);
+        item.sha = sha;
+      } else heuristic(item);
+    } catch { heuristic(item); }
   }
   live.sort((a, b) => (a.since || "9999") < (b.since || "9999") ? -1 : 1);
   return live;

@@ -46,3 +46,22 @@ launch if downgrade detection proves the appetite.
 Regex+heuristics stays the core. Adopt downgrade detection now (it is the
 strongest "not just grep" proof and a real capability). AST proper enters as
 packs, funded by demand, never into the zero-dep core.
+
+## Postscript: the doctrine the exploration ended at (2026-07-11)
+
+The night's real finding, one level above "regex vs AST": **git itself is the
+tool.** Git is already a content-addressed database with a C-speed query
+engine — log, grep, blame, pickaxe (-S), numstat, diff. The logbook is thin
+layers over that substrate:
+
+1. **git plumbing = the database** (log/numstat/-p for events; grep for
+   present-state; blame for exact line provenance; pickaxe held for deep joins)
+2. **lexical classifiers = the distiller** (the regex tables; 93% calibrated)
+3. **joins = the product** (dates × presence × files: the audit, the ledger,
+   per-file history)
+4. **parsers = the ruler** (AST's proven job: calibrating the classifiers)
+5. **the reading agent = the judge** (triage, verification, intent)
+
+Each layer stays replaceable without touching the others. Versatility didn't
+come from a smarter parser; it came from asking git questions it could
+already answer.
