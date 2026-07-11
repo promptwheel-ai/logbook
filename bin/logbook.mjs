@@ -115,7 +115,19 @@ export function diffScan(repo, events, opts) {
     const ev = bySha.get(chunk.slice(0, nl === -1 ? undefined : nl).trim());
     if (!ev) continue;
     const supp = new Set();
+    // Track which file each hunk belongs to: asserts/suppressions in doc
+    // examples or generated/vendored files are not evaluator changes.
+    let counted = true;
     for (const line of (nl === -1 ? "" : chunk.slice(nl + 1)).split("\n")) {
+      if (line.startsWith("+++ ") || line.startsWith("--- ")) {
+        const f = line.slice(4).replace(/^[ab]\//, "");
+        if (f !== "/dev/null") {
+          const cls = classifyFile(f);
+          counted = cls !== "doc" && cls !== "gen";
+        }
+        continue;
+      }
+      if (!counted) continue;
       if (line.startsWith("+") && !line.startsWith("+++")) {
         for (const m of line.matchAll(SUPPRESS_PAT)) supp.add(m[0].trim());
         if (ASSERT_PAT.test(line)) ev.add_asserts++;
@@ -203,15 +215,28 @@ export function analyze(events, touched) {
 
   // Notable events: outliers worth seeing even in the digest —
   // security-adjacent reverts, large assertion drops, suppression-dense commits.
-  const notable = events.filter((e) =>
-    (e.revert && /security|CVE-|vulnerab|exploit/i.test(e.subject)) ||
-    (e.del_asserts - e.add_asserts >= 8) ||
+  // Severity-ranked, not recency-sliced: a security-revert must never be pushed
+  // out of the digest by recent routine churn.
+  const isSecRevert = (e) => e.revert && /security|CVE-|vulnerab|exploit/i.test(e.subject);
+  // Mass deletions (docs archival, module removal) lose thousands of asserts
+  // legitimately — they are not evaluator weakening; exclude them here.
+  const isMassDeletion = (e) => e.dels > 4 * Math.max(e.adds, 1) && e.dels > 150;
+  const notablePool = events.filter((e) =>
+    isSecRevert(e) ||
+    (e.del_asserts - e.add_asserts >= 8 && !isMassDeletion(e)) ||
     (e.suppressions.length >= 3)
-  ).slice(0, 8);
+  );
+  notablePool.sort((a, b) =>
+    (isSecRevert(b) - isSecRevert(a)) ||
+    ((b.del_asserts - b.add_asserts) - (a.del_asserts - a.add_asserts)) ||
+    (b.suppressions.length - a.suppressions.length)
+  );
+  const notable = notablePool.slice(0, 8);
+  const notableMore = notablePool.length - notable.length;
 
   const iso = (t) => new Date(t).toISOString().slice(0, 10);
   return {
-    notable,
+    notable, notableMore,
     n: events.length, first, last, spanDays,
     spanStart: times.length ? iso(eraStart) : first?.date,
     spanEnd: times.length ? iso(times[times.length - 1]) : last?.date,
@@ -259,6 +284,7 @@ export function renderLogbookMd(name, A, shallow, capped) {
       if (e.suppressions.length >= 3) tags.push(`${e.suppressions.length} suppressions`);
       L.push(`- ${e.date} ${e.sha} [${tags.join(", ")}] ${e.subject}`);
     }
+    if (A.notableMore > 0) L.push(`- …and ${A.notableMore} more — full record in events.jsonl`);
   }
   L.push(``);
   L.push(`## Hotspots — source files (where the complexity lives)`);
