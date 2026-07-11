@@ -45,6 +45,7 @@ npx @promptwheel/logbook              # analyze the current repo
 npx @promptwheel/logbook path/to/repo # or any repo
 npx @promptwheel/logbook journey      # the story, in color (writes nothing)
 npx @promptwheel/logbook journey --compare  # rank your almanac vs the top 1,000 GitHub repos
+npx @promptwheel/logbook audit        # what is STILL suppressed in HEAD, and since when
 npx @promptwheel/logbook --json       # events to stdout (writes nothing)
 
 # era-scoped archaeology
@@ -55,6 +56,21 @@ Options: `-n/--max N` (commit cap, default 20000) · `--compare` · `--out DIR` 
 
 `--compare` uses a percentile table baked into the CLI from a 1,000-repo fleet
 run — still zero dependencies and zero network calls.
+
+## The audit: archaeology becomes a to-do list
+
+`logbook audit` joins the ledger's dates with what is still true in HEAD:
+
+```
+  describe.skip  test/express.static.js:137  since 2019-05-02 (7.2y)
+
+  1 live suppression · oldest 7.2 years
+```
+
+That is express, today: its static-file test suite has been skipped for
+seven years. The ledger tells you when it happened; the audit tells you it
+is still happening. Instant on normal repos; up to ~a minute on 20k-commit
+monsters (the ledger build, not the scan).
 
 ## Context economics
 

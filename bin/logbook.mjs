@@ -456,6 +456,62 @@ export function renderJourneyAnsi(name, A, compare) {
   return L.join("\n");
 }
 
+// ---------- audit: what is STILL suppressed today, and since when ----------
+export function auditHead(repo, events) {
+  const live = [];
+  let grep = "";
+  try {
+    // one C-speed pass over the whole tree; PCRE shares the JS pattern source
+    grep = git(repo, ["grep", "-nP", SUPPRESS_PAT.source, "HEAD"]);
+  } catch (e) {
+    // exit 1 = no matches (fine); other failures leave grep empty
+    if (!/exit|no match/i.test(String(e.message))) grep = "";
+  }
+  for (const row of grep.split("\n")) {
+    if (!row) continue;
+    const m = /^HEAD:([^:]+):(\d+):(.*)$/.exec(row);
+    if (!m) continue;
+    const [, file, lineNo, content] = m;
+    const cls = classifyFile(file);
+    if (cls === "doc" || cls === "gen") continue;
+    for (const hit of content.matchAll(SUPPRESS_PAT)) {
+      live.push({ file, line: Number(lineNo), kind: hit[0].trim() });
+    }
+  }
+  // join: earliest ledger event that introduced this kind in this file
+  const oldest = [...events].reverse();
+  for (const item of live) {
+    let hit = oldest.find((e) => e.files?.includes(item.file) &&
+      e.suppressions.some((s) => s === item.kind));
+    if (!hit) hit = oldest.find((e) => e.files?.includes(item.file) && e.suppressions.length);
+    item.since = hit ? hit.date : null;
+    item.sha = hit ? hit.sha : null;
+  }
+  live.sort((a, b) => (a.since || "9999") < (b.since || "9999") ? -1 : 1);
+  return live;
+}
+
+function renderAudit(name, live) {
+  const W = [];
+  const now = Date.now();
+  W.push(`\n  ${C.gold}${C.bold}⚓ Suppression audit of ${name}${C.r}`);
+  W.push(`  ${C.dim}what is still silenced in HEAD, and since when${C.r}\n`);
+  if (!live.length) {
+    W.push(`  ${C.good}clean — no live suppressions in src/test/config files${C.r}\n`);
+    return W.join("\n");
+  }
+  for (const x of live.slice(0, 30)) {
+    const age = x.since ? `${((now - Date.parse(x.since)) / 31557600000).toFixed(1)}y` : "?";
+    const since = x.since ? `since ${x.since} (${age})` : "origin outside window";
+    W.push(`  ${C.bad}${x.kind}${C.r}  ${x.file}:${x.line}  ${C.dim}${since}${C.r}`);
+  }
+  if (live.length > 30) W.push(`  ${C.dim}…and ${live.length - 30} more${C.r}`);
+  const dated = live.filter((x) => x.since);
+  const oldest = dated[0];
+  W.push(`\n  ${C.gold}${live.length} live suppression${live.length === 1 ? "" : "s"}${C.r}${oldest ? `${C.dim} · oldest ${((now - Date.parse(oldest.since)) / 31557600000).toFixed(1)} years (${oldest.file})${C.r}` : ""}\n`);
+  return W.join("\n");
+}
+
 // ---------- CLI ----------
 function usage() {
   console.log(`
@@ -464,6 +520,7 @@ function usage() {
   usage:
     logbook [path]                analyze repo → LOGBOOK.md, events.jsonl, JOURNEY.md
     logbook journey [path]        the repo's story, in color (writes nothing)
+    logbook audit [path]          what is STILL suppressed in HEAD, and since when
     logbook [path] --json         structured events to stdout (writes nothing)
 
   options:
@@ -484,6 +541,7 @@ export function parseArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "journey") o.cmd = "journey";
+    else if (a === "audit") o.cmd = "audit";
     else if (a === "-n" || a === "--max") o.max = Number(argv[++i]);
     else if (a === "--since") o.since = argv[++i];
     else if (a === "--until") o.until = argv[++i];
@@ -532,6 +590,7 @@ async function main() {
     return;
   }
   if (o.cmd === "journey") return console.log(renderJourneyAnsi(name, A, o.compare));
+  if (o.cmd === "audit") return console.log(renderAudit(name, auditHead(repo, events)));
 
   const outDir = o.out ? resolve(o.out) : repo;
   writeFileSync(join(outDir, "LOGBOOK.md"), renderLogbookMd(name, A, shallow, capped));

@@ -262,3 +262,24 @@ test("assertion downgrades (strong→weak) are detected and notable", () => {
   const lb = readFileSync(join(d, "LOGBOOK.md"), "utf8");
   assert.match(lb, /2 assert downgrades.*stabilize flaky expectations/);
 });
+
+test("audit reports live suppressions with since-dates, ignores removed ones", () => {
+  const d = mkdtempSync(join(tmpdir(), "logbook-audit-"));
+  const g = (args, date) => execFileSync("git", ["-C", d, ...args], { env: { ...process.env,
+    GIT_AUTHOR_NAME: "H", GIT_AUTHOR_EMAIL: "h@x.io", GIT_COMMITTER_NAME: "H",
+    GIT_COMMITTER_EMAIL: "h@x.io", ...(date && { GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date }) } });
+  g(["init", "-q"]);
+  writeFileSync(join(d, "a.js"), "let x = 1;\n");
+  g(["add", "-A"]); g(["commit", "-q", "-m", "init"], "2020-01-01T12:00:00");
+  writeFileSync(join(d, "a.js"), "/* eslint-disable no-unused-vars */\nlet x = 1;\n");
+  g(["add", "-A"]); g(["commit", "-q", "-m", "hush lint"], "2021-06-15T12:00:00");
+  writeFileSync(join(d, "b.test.js"), "it.skip('later removed', () => {});\n");
+  g(["add", "-A"]); g(["commit", "-q", "-m", "skip flaky"], "2022-01-01T12:00:00");
+  writeFileSync(join(d, "b.test.js"), "it('restored', () => {});\n");
+  g(["add", "-A"]); g(["commit", "-q", "-m", "restore test"], "2023-01-01T12:00:00");
+  const out = execFileSync(process.execPath, [CLI, "audit", d],
+    { encoding: "utf8", env: { ...process.env, FORCE_COLOR: "0" } });
+  assert.match(out, /eslint-disable.*a\.js:1.*since 2021-06-15/);
+  assert.ok(!/it\.skip/.test(out), "removed skip is not reported live");
+  assert.match(out, /1 live suppression/);
+});
