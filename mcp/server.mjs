@@ -4,17 +4,43 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { execFileSync } from "node:child_process";
 import {
   collectEvents, diffScan, hotspots, analyze, renderLogbookMd,
-  auditHead, queryEvents,
+  auditHead, queryEvents, loadEvents,
 } from "@promptwheel/logbook";
 
 const DEFAULTS = { max: 20000, since: null, until: null };
-function pipeline(repo) {
-  const events = collectEvents(repo, DEFAULTS);
-  diffScan(repo, events, DEFAULTS);
+// Batched ledger, three layers: session memo per HEAD; disk reuse/incremental
+// via loadEvents; windowed full builds that report progress (clients reset
+// their timeout on progress notifications).
+const cache = new Map();
+function pipeline(repo, onProgress) {
+  const head = execFileSync("git", ["-C", repo, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  const hit = cache.get(repo);
+  if (hit && hit.head === head) return hit;
+  const reused = loadEvents(repo, DEFAULTS, onProgress);
+  let events;
+  if (reused) {
+    events = reused.events;
+  } else {
+    events = collectEvents(repo, DEFAULTS);
+    diffScan(repo, events, DEFAULTS, onProgress);
+  }
   const A = analyze(events, hotspots(repo, DEFAULTS));
-  return { events, A };
+  const entry = { head, events, A };
+  cache.set(repo, entry);
+  if (cache.size > 8) cache.delete(cache.keys().next().value);
+  return entry;
+}
+
+function progressFor(extra) {
+  const token = extra?._meta?.progressToken ?? extra?.requestMeta?.progressToken;
+  if (token == null || !extra?.sendNotification) return undefined;
+  return (progress, total) => extra.sendNotification({
+    method: "notifications/progress",
+    params: { progressToken: token, progress, total },
+  }).catch(() => {});
 }
 
 const server = new McpServer({ name: "logbook", version: "0.1.0" });
@@ -23,8 +49,8 @@ server.tool(
   "logbook_digest",
   "The repo's history digest: hotspots, do-not-retry reverts, suppression ledger, fragile areas, notable events, per-file history. Use when starting work in an unfamiliar repo, before a refactor or large change, or when deciding whether green tests can be trusted.",
   { repo: z.string().describe("absolute path to the git repository") },
-  async ({ repo }) => {
-    const { A } = pipeline(repo);
+  async ({ repo }, extra) => {
+    const { A } = pipeline(repo, progressFor(extra));
     return { content: [{ type: "text", text: renderLogbookMd(repo.split("/").pop(), A, false, A.n >= DEFAULTS.max) }] };
   }
 );
@@ -33,8 +59,8 @@ server.tool(
   "logbook_audit",
   "What is STILL suppressed in HEAD and since when (blame-dated), with re-silencing fight logs. Use when asked what tests are skipped, what debt is live, or whether a suppression keeps coming back.",
   { repo: z.string().describe("absolute path to the git repository") },
-  async ({ repo }) => {
-    const { events } = pipeline(repo);
+  async ({ repo }, extra) => {
+    const { events } = pipeline(repo, progressFor(extra));
     const live = auditHead(repo, events);
     const lines = live.slice(0, 40).map((x) =>
       `${x.kind}  ${x.file}:${x.line}  since ${x.since || "?"}${x.resilenced ? `  re-silenced x${x.resilenced} (${x.fight})` : ""}`);
@@ -56,8 +82,8 @@ server.tool(
     since: z.string().optional(), until: z.string().optional(),
     limit: z.number().optional(),
   },
-  async ({ repo, ...f }) => {
-    const { events } = pipeline(repo);
+  async ({ repo, ...f }, extra) => {
+    const { events } = pipeline(repo, progressFor(extra));
     const hits = queryEvents(events, f).slice(0, f.limit || 100);
     return { content: [{ type: "text", text: hits.map((e) => JSON.stringify(e)).join("\n") || "no matching events" }] };
   }

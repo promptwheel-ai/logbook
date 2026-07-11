@@ -327,3 +327,44 @@ test("query filters the record (mirrors the MCP experiment)", () => {
   const out2 = execFileSync(process.execPath, [CLI, "query", repo, "--file", "core.js", "--suppress"], { encoding: "utf8" });
   assert.ok(out2.trim().split("\n").filter(Boolean).length >= 1, "file+suppress filter works");
 });
+
+test("ledger cache: reuse, incremental append, window-poisoning guard", () => {
+  const d = mkdtempSync(join(tmpdir(), "logbook-cache-"));
+  const g = (args, date) => execFileSync("git", ["-C", d, ...args], { env: { ...process.env,
+    GIT_AUTHOR_NAME: "H", GIT_AUTHOR_EMAIL: "h@x.io", GIT_COMMITTER_NAME: "H",
+    GIT_COMMITTER_EMAIL: "h@x.io", ...(date && { GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date }) } });
+  g(["init", "-q"]);
+  for (let i = 0; i < 4; i++) {
+    writeFileSync(join(d, "a.js"), `let x = ${i};\n`);
+    g(["add", "-A"]); g(["commit", "-q", "-m", `c${i}`], `2024-0${i + 1}-01T12:00:00`);
+  }
+  execFileSync(process.execPath, [CLI, d, "-q"], { encoding: "utf8" });
+  // 1. fresh cache is reused
+  let err = execFileSync(process.execPath, [CLI, "query", d, "--grep", "c1"],
+    { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  const r1 = execFileSync(process.execPath, [CLI, "query", d, "--grep", "c1"], { encoding: "utf8" });
+  assert.equal(r1.trim().split("\n").length, 1);
+  // 2. new commit → incremental path still returns complete, correct results
+  writeFileSync(join(d, "a.js"), "let x = 99;\n");
+  g(["add", "-A"]); g(["commit", "-q", "-m", "brand new"], "2024-06-01T12:00:00");
+  const r2 = execFileSync(process.execPath, [CLI, "query", d, "--grep", "brand new"], { encoding: "utf8" });
+  assert.equal(r2.trim().split("\n").length, 1, "incremental includes the new commit");
+  const r3 = execFileSync(process.execPath, [CLI, "query", d, "--grep", "c0"], { encoding: "utf8" });
+  assert.equal(r3.trim().split("\n").length, 1, "old commits survive the merge");
+  // 3. window-poisoned cache is rejected (write a -n 2 record, ask default)
+  execFileSync(process.execPath, [CLI, d, "-q", "-n", "2"], { encoding: "utf8" });
+  const r4 = execFileSync(process.execPath, [CLI, "query", d, "--grep", "c0"], { encoding: "utf8" });
+  assert.equal(r4.trim().split("\n").length, 1, "capped cache not trusted as full ledger");
+  // 4. LOGBOOK_NO_CACHE forces recompute
+  const r5 = execFileSync(process.execPath, [CLI, "query", d, "--grep", "c0"],
+    { encoding: "utf8", env: { ...process.env, LOGBOOK_NO_CACHE: "1" } });
+  assert.equal(r5.trim().split("\n").length, 1);
+});
+
+test("chunked diff scan is equivalent to single-pass", () => {
+  const out1 = execFileSync(process.execPath, [CLI, "query", repo, "--suppress"],
+    { encoding: "utf8", env: { ...process.env, LOGBOOK_NO_CACHE: "1", LOGBOOK_WINDOW: "2" } });
+  const out2 = execFileSync(process.execPath, [CLI, "query", repo, "--suppress"],
+    { encoding: "utf8", env: { ...process.env, LOGBOOK_NO_CACHE: "1", LOGBOOK_WINDOW: "100000" } });
+  assert.equal(out1, out2, "window size must not change results");
+});

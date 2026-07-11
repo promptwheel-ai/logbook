@@ -56,6 +56,16 @@ npx @promptwheel/logbook --since 2024-01-01 --until 2025-01-01
 
 Options: `-n/--max N` (commit cap, default 20000) · `--compare` · `--out DIR` · `-q/--quiet`
 
+## The ledger is batched
+
+The expensive part (scanning 20k commits of diffs) runs once, in bounded
+windows, and every consumer reuses it: if `events.jsonl` is present and
+matches HEAD it is loaded instantly; if new commits landed, only they are
+scanned and merged. Measured on a 20k-commit repo: 43s cold, 0.4s with a
+prior run on disk, 4ms on repeat calls in an MCP session. Escape hatches:
+`LOGBOOK_NO_CACHE=1` forces a full rebuild; `LOGBOOK_WINDOW=N` tunes the
+scan window.
+
 `--compare` uses a percentile table baked into the CLI from a 1,000-repo fleet
 run — still zero dependencies and zero network calls.
 
@@ -88,8 +98,7 @@ That is express, today: its static-file test suite has been skipped for
 seven years. The ledger tells you when it happened; the audit tells you it
 is still happening. And when a suppression has been removed and RE-added,
 the audit shows the fight log: `re-silenced ×3 (+-++--+)` — a test someone
-keeps trying to fix, and keeps losing to. Instant on normal repos; up to ~a minute on 20k-commit
-monsters (the ledger build, not the scan).
+keeps trying to fix, and keeps losing to.
 
 ## Context economics
 

@@ -12,7 +12,7 @@
 // Classifier lineage: the wild-rate-study scan (calibrated 12/12).
 
 import { spawnSync } from "node:child_process";
-import { writeFileSync, existsSync, realpathSync } from "node:fs";
+import { writeFileSync, existsSync, realpathSync, readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { resolve, join, basename } from "node:path";
 
@@ -88,7 +88,7 @@ function eraArgs(opts) {
 // ---------- layer 1: commit events (metadata + shape) ----------
 export function collectEvents(repo, opts) {
   const log = git(repo, [
-    "log", `-${opts.max}`, "--no-merges", "--date=short", ...eraArgs(opts),
+    "log", ...(opts.range ? [opts.range] : [`-${opts.max}`]), "--no-merges", "--date=short", ...eraArgs(opts),
     "--pretty=%x1e%H%x1f%h%x1f%ad%x1f%an%x1f%s", "--numstat",
   ]);
   const events = [];
@@ -125,17 +125,37 @@ export function collectEvents(repo, opts) {
 }
 
 // ---------- layer 2: diff scan (suppressions + assertion deltas), one git pass ----------
-export function diffScan(repo, events, opts) {
+export function diffScan(repo, events, opts, onProgress) {
   const bySha = new Map(events.map((e) => [e.fullSha, e]));
-  let patch;
-  try {
-    patch = git(repo, [
-      "log", `-${opts.max}`, "--no-merges", ...eraArgs(opts),
-      "--pretty=%x1e%H", "-p", "--unified=0",
-    ]);
-  } catch {
-    return false; // huge repo / binary trouble: degrade to subject-level only
+  // The -p pass is the expensive phase. Run it in commit WINDOWS so memory is
+  // bounded and long builds can report progress (MCP clients reset their
+  // timeout on progress notifications).
+  const WINDOW = Number(process.env.LOGBOOK_WINDOW) || 4000;
+  const total = events.length;
+  let scanned = 0;
+  const windows = [];
+  if (opts.range) {
+    windows.push(["log", opts.range, "--no-merges", "--pretty=%x1e%H", "-p", "--unified=0"]);
+  } else {
+    for (let skip = 0; skip < total; skip += WINDOW) {
+      windows.push(["log", `-${Math.min(WINDOW, total - skip)}`, `--skip=${skip}`, "--no-merges",
+        ...eraArgs(opts), "--pretty=%x1e%H", "-p", "--unified=0"]);
+    }
   }
+  for (const args of windows) {
+    let patch;
+    try {
+      patch = git(repo, args);
+    } catch {
+      return false; // degrade to subject-level only
+    }
+    scanned = scanWindow(patch, bySha, scanned);
+    if (onProgress) onProgress(Math.min(scanned, total), total);
+  }
+  return true;
+}
+
+function scanWindow(patch, bySha, scanned) {
   for (const chunk of patch.split("\x1e")) {
     if (!chunk.trim()) continue;
     const nl = chunk.indexOf("\n");
@@ -174,8 +194,44 @@ export function diffScan(repo, events, opts) {
     }
     flushDowngrades();
     ev.suppressions = [...supp].sort().slice(0, 6);
+    scanned++;
   }
-  return true;
+  return scanned;
+}
+
+// ---------- ledger cache: reuse events.jsonl when fresh; append when stale ----------
+export function loadEvents(repo, opts, onProgress) {
+  if (process.env.LOGBOOK_NO_CACHE) return null;
+  if (opts.max !== 20000 || opts.since || opts.until || opts.range) return null;
+  let lines;
+  try {
+    lines = readFileSync(join(repo, "events.jsonl"), "utf8").split("\n").filter(Boolean);
+  } catch { return null; }
+  if (!lines.length) return null;
+  let cached;
+  try { cached = lines.map((l) => JSON.parse(l)); } catch { return null; }
+  const newest = cached[0];
+  if (!newest?.fullSha || newest.files === undefined || newest.downgrades === undefined) return null;
+  let head;
+  try { head = git(repo, ["rev-parse", "HEAD"]).trim(); } catch { return null; }
+  // completeness: a record written with a smaller -n window must not
+  // masquerade as the full ledger — accept only cache-at-cap, or a cache
+  // whose oldest event is a root commit of the repo.
+  if (cached.length < opts.max) {
+    try {
+      const roots = git(repo, ["rev-list", "--max-parents=0", "HEAD"]).split("\n").filter(Boolean);
+      if (!roots.includes(cached[cached.length - 1].fullSha)) return null;
+    } catch { return null; }
+  }
+  if (newest.fullSha === head) return { events: cached, mode: "cached" };
+  // stale: try incremental append of only the new commits
+  try {
+    const fresh = collectEvents(repo, { ...opts, range: `${newest.fullSha}..HEAD` });
+    if (!fresh.length) return null;
+    diffScan(repo, fresh, { ...opts, range: `${newest.fullSha}..HEAD` }, onProgress);
+    const merged = fresh.concat(cached).slice(0, opts.max);
+    return { events: merged, mode: `incremental +${fresh.length}` };
+  } catch { return null; } // rewritten history etc: full rebuild
 }
 
 // ---------- layer 3: hotspots (name-only pass) ----------
@@ -663,13 +719,20 @@ async function main() {
   const shallow = existsSync(join(repo, ".git", "shallow"));
 
   if (!o.quiet && !o.json) console.error(`\n  ${C.dim}reading git history…${C.r}`);
-  const events = collectEvents(repo, o);
+  const reused = loadEvents(repo, o);
+  let events;
+  if (reused) {
+    events = reused.events;
+    if (!o.quiet && !o.json) console.error(`  ${C.dim}(ledger ${reused.mode})${C.r}`);
+  } else {
+    events = collectEvents(repo, o);
+  }
   if (!events.length) {
     console.error("  no commits found (empty repo, or --since/--until excluded everything)");
     process.exit(1);
   }
   const capped = events.length >= o.max;
-  diffScan(repo, events, o);
+  if (!reused) diffScan(repo, events, o);
   const touched = hotspots(repo, o);
   const A = analyze(events, touched);
 
