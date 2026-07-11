@@ -395,12 +395,31 @@ test("annotate: persists a why, merges into LOGBOOK.md with provenance, last wri
   assert.equal(notes[0].why, "updated verdict");
   assert.equal(notes[0].sha, revertSha);
 
+  // annotate merges into an existing LOGBOOK.md IMMEDIATELY (a later session
+  // that finds fresh artifacts on disk may never re-run the CLI)
+  const out2 = execFileSync(process.execPath,
+    [CLI, "annotate", revertSha.slice(0, 8), "immediate merge verdict", repo, "--by", "tester3"],
+    { encoding: "utf8" });
+  assert.match(out2, /merged into LOGBOOK\.md(?! on the next run)/, "reports immediate merge");
+  assert.match(readFileSync(join(repo, "LOGBOOK.md"), "utf8"), /immediate merge verdict/,
+    "LOGBOOK.md carries the why without another run");
+
+  // a why on a commit outside every rendered section still surfaces (never
+  // silently truncated) — "first light" is no revert/suppression/weakening
+  const firstSha = git(["log", "--format=%H", "--reverse"]).trim().split("\n")[0];
+  execFileSync(process.execPath,
+    [CLI, "annotate", firstSha, "the repo began as a calculator", repo, "--by", "tester4"],
+    { encoding: "utf8" });
+  const lb2 = readFileSync(join(repo, "LOGBOOK.md"), "utf8");
+  assert.match(lb2, /## Annotated commits/, "leftover section renders");
+  assert.match(lb2, /the repo began as a calculator/);
+
   // unknown sha is rejected, exit 1
   assert.throws(() =>
     execFileSync(process.execPath, [CLI, "annotate", "deadbeef1234", "nope", repo], { encoding: "utf8", stdio: "pipe" }));
 
-  // malformed lines are skipped, not fatal
+  // malformed lines are skipped, not fatal (2 valid notes: revert + first)
   writeFileSync(join(repo, "annotations.jsonl"), "not json\n", { flag: "a" });
-  assert.equal(loadAnnotations(repo).length, 1);
+  assert.equal(loadAnnotations(repo).length, 2);
   rmSync(join(repo, "annotations.jsonl"));
 });

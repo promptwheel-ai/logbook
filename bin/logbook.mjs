@@ -366,9 +366,12 @@ function spanHuman(days) {
 const fmt = (x) => x.toLocaleString("en-US");
 
 export function renderLogbookMd(name, A, shallow, capped, notes = []) {
+  const usedNotes = new Set();
   const why = (e) => {
     const a = noteFor(notes, e);
-    return a ? [`  - why (inferred by ${a.by}, ${a.date}): ${a.why}`] : [];
+    if (!a) return [];
+    usedNotes.add(a.sha);
+    return [`  - why (inferred by ${a.by}, ${a.date}): ${a.why}`];
   };
   const L = [];
   L.push(`# The Logbook of ${name}`);
@@ -424,13 +427,14 @@ export function renderLogbookMd(name, A, shallow, capped, notes = []) {
   L.push(`## Do-not-retry: reverts / rollbacks (${A.reverts.length})`);
   if (notes.length)
     L.push(`_"why" lines are agent-inferred judgments persisted via \`logbook annotate\` — dated, attributed, and worth re-verifying: the fact never changes, but its force can age._`);
-  for (const e of A.reverts.slice(0, 20)) L.push(`- ${e.date} ${e.sha} ${e.subject}`, ...why(e));
-  if (A.reverts.length > 20) L.push(`- …and ${A.reverts.length - 20} more — full record in events.jsonl`);
+  // truncate the OLD end — the recent reverts are the ones a session must see
+  if (A.reverts.length > 20) L.push(`- …${A.reverts.length - 20} earlier — full record in events.jsonl`);
+  for (const e of A.reverts.slice(-20)) L.push(`- ${e.date} ${e.sha} ${e.subject}`, ...why(e));
   L.push(``);
   L.push(`## Suppression ledger (${A.suspEvents.length} commits)`);
-  for (const e of A.suspEvents.slice(0, 20))
+  if (A.suspEvents.length > 20) L.push(`- …${A.suspEvents.length - 20} earlier — full record in events.jsonl`);
+  for (const e of A.suspEvents.slice(-20))
     L.push(`- ${e.date} ${e.sha} [${e.suppressions.slice(0, 3).join(" + ")}] ${e.subject}`, ...why(e));
-  if (A.suspEvents.length > 20) L.push(`- …and ${A.suspEvents.length - 20} more — full record in events.jsonl`);
   L.push(``);
   L.push(`## Assertion-weakening events (${A.weaken.length})`);
   for (const e of A.weaken.slice(0, 15)) {
@@ -444,6 +448,15 @@ export function renderLogbookMd(name, A, shallow, capped, notes = []) {
   L.push(`## Fragile areas (same fix subject 2+ times)`);
   for (const [k, c] of A.fragile) L.push(`- ×${c}: ${k.trim()}`);
   L.push(``);
+  // an annotated commit is by definition important — any why whose event fell
+  // outside every section above still renders, never silently truncated
+  const leftover = notes.filter((a) => !usedNotes.has(a.sha));
+  if (leftover.length) {
+    L.push(`## Annotated commits (whys persisted via \`logbook annotate\`)`);
+    for (const a of leftover)
+      L.push(`- ${a.sha.slice(0, 8)} — why (inferred by ${a.by}, ${a.date}): ${a.why}`);
+    L.push(``);
+  }
   L.push(`---`);
   L.push(`_Findings are leads, not verdicts — a suppression means "a human should look here," not misconduct. Generated read-only by [@promptwheel/logbook](https://github.com/promptwheel-ai/logbook); the logbook records, [the referee](https://github.com/promptwheel-ai/promptwheel) judges._`);
   return L.join("\n") + "\n";
@@ -778,9 +791,22 @@ async function main() {
       console.error(`  not a commit in this repo: ${o.sha}`);
       process.exit(1);
     }
+    // merge into LOGBOOK.md now if a complete ledger is on disk (sub-second
+    // via reuse) — a session that finds fresh artifacts won't re-run the CLI,
+    // so "next run" may never come
+    let merged = false;
+    if (existsSync(join(dir, "LOGBOOK.md"))) {
+      const reused = loadEvents(repo, o);
+      if (reused) {
+        const A = analyze(reused.events, hotspots(repo, o));
+        writeFileSync(join(dir, "LOGBOOK.md"),
+          renderLogbookMd(name, A, shallow, reused.events.length >= o.max, loadAnnotations(dir)));
+        merged = true;
+      }
+    }
     if (!o.quiet) {
       console.log(`  ${C.good}✓${C.r} annotated ${C.bold}${a.sha.slice(0, 8)}${C.r} ${C.dim}(by ${a.by}, ${a.date})${C.r}`);
-      console.log(`  ${C.dim}merged into LOGBOOK.md on the next run${C.r}\n`);
+      console.log(`  ${C.dim}${merged ? "merged into LOGBOOK.md" : "merged into LOGBOOK.md on the next run"}${C.r}\n`);
     }
     return;
   }

@@ -98,7 +98,9 @@ instead of discarding it at session end:
 logbook annotate c08adc2 "WeakMap cache added to dodge a React-Compiler lint warning; reverted to direct ref mutation" --by claude
 ```
 
-On the next run, LOGBOOK.md's do-not-retry entry carries the why:
+LOGBOOK.md is updated immediately (a later session that finds fresh
+artifacts on disk may never re-run the CLI), and the do-not-retry entry
+carries the why:
 
 ```
 - 2024-09-15 c08adc2 revert useShallow refactor in #2701 (#2703)
