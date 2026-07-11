@@ -56,6 +56,15 @@ Options: `-n/--max N` (commit cap, default 20000) · `--compare` · `--out DIR` 
 `--compare` uses a percentile table baked into the CLI from a 1,000-repo fleet
 run — still zero dependencies and zero network calls.
 
+## Does it actually change agent behavior?
+
+Yes — measurably. In an A/B test, an agent asked to plan a `useShallow`
+refactor in zustand walked straight into re-attempting a refactor that was
+merged and reverted in 2024. The same agent with LOGBOOK.md in context
+started from the revert, inferred the repo's characteristic failure class
+from the do-not-retry list, and planned to pin the old failure with a test
+first. Full transcripts: [docs/does-it-change-agent-behavior.md](docs/does-it-change-agent-behavior.md).
+
 ## Honest scope
 
 - Findings are **leads, not verdicts**. A suppression commit means "a human
