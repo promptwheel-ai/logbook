@@ -248,19 +248,22 @@ export function renderLogbookMd(name, A, shallow, capped) {
   for (const [f, c] of A.allHot) L.push(`- ${f} — ${c} commits`);
   L.push(``);
   L.push(`## Do-not-retry: reverts / rollbacks (${A.reverts.length})`);
-  for (const e of A.reverts.slice(0, 10)) L.push(`- ${e.date} ${e.sha} ${e.subject}`);
+  for (const e of A.reverts.slice(0, 20)) L.push(`- ${e.date} ${e.sha} ${e.subject}`);
+  if (A.reverts.length > 20) L.push(`- …and ${A.reverts.length - 20} more — full record in events.jsonl`);
   L.push(``);
   L.push(`## Suppression ledger (${A.suspEvents.length} commits)`);
-  for (const e of A.suspEvents.slice(0, 12))
+  for (const e of A.suspEvents.slice(0, 20))
     L.push(`- ${e.date} ${e.sha} [${e.suppressions.slice(0, 3).join(" + ")}] ${e.subject}`);
+  if (A.suspEvents.length > 20) L.push(`- …and ${A.suspEvents.length - 20} more — full record in events.jsonl`);
   L.push(``);
   L.push(`## Assertion-weakening events (${A.weaken.length})`);
-  for (const e of A.weaken.slice(0, 10)) {
+  for (const e of A.weaken.slice(0, 15)) {
     const tag =
       e.dels > 4 * Math.max(e.adds, 1) && e.dels > 150
         ? " [large removal — likely feature/module deletion]" : "";
     L.push(`- ${e.date} ${e.sha} (-${e.del_asserts}/+${e.add_asserts})${tag} ${e.subject}`);
   }
+  if (A.weaken.length > 15) L.push(`- …and ${A.weaken.length - 15} more — full record in events.jsonl`);
   L.push(``);
   L.push(`## Fragile areas (same fix subject 2+ times)`);
   for (const [k, c] of A.fragile) L.push(`- ×${c}: ${k.trim()}`);
