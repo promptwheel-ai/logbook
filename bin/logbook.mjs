@@ -25,7 +25,7 @@ export const DOC_PAT = /\.(md|txt|rst|adoc)$|(^|\/)(LICENSE|CHANGELOG|CHANGES|NE
 export const GEN_PAT =
   /node_modules\/|\.map$|\.lock$|lock\.json$|\.gen\.|generated|dist\/|build\/|vendor\/|-?snapshot\.json$|\.snap$/i;
 export const SUPPRESS_PAT =
-  /@ts-nocheck|@ts-ignore|eslint-disable|# *noqa|# *type: *ignore|\bit\.skip\b|\btest\.skip\b|\bxit\(|\bxdescribe\(|describe\.skip|@pytest\.mark\.skip|@unittest\.skip|\bt\.Skip\(|except[^:]*: *pass/g;
+  /@ts-nocheck|@ts-ignore|eslint-disable|# *noqa|# *type: *ignore|\bit\.skip\b|\btest\.skip\b|\bxit\(|\bxdescribe\(|describe\.skip\b|@pytest\.mark\.skip\b|@unittest\.skip\b|\bt\.Skip\(|except[^:]*: *pass/g;
 export const ASSERT_PAT = /assert|expect\(|\.toBe|\.toEqual|t\.Error|t\.Fatal/;
 // Assertion strength (for downgrade detection): exact/behavioral vs existence/truthy.
 export const STRONG_ASSERT_PAT = /\.toStrictEqual\(|\.toEqual\(|\.toBe\(|\.toMatchObject\(|\.toThrow\([^)]|assertEqual\(|assertIs\(|assertRaises\([^)]/;
@@ -501,7 +501,7 @@ export function journeyBeats(name, A) {
 // Regenerate from a fleet run per release; no network calls, ever.
 export const FLEET = {
   reverts_per_1k: [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0.22,0.81,1.09,1.34,1.53,1.7,1.84,1.98,2.15,2.34,2.48,2.64,2.79,2.91,3.08,3.22,3.34,3.56,3.68,3.86,3.99,4.13,4.26,4.35,4.47,4.66,4.75,4.83,4.95,5.06,5.21,5.35,5.5,5.66,5.75,5.89,6.07,6.16,6.29,6.39,6.51,6.65,6.76,6.94,7.07,7.23,7.38,7.54,7.7,7.87,8.11,8.29,8.43,8.67,8.87,9.07,9.3,9.53,9.78,10,10.22,10.57,10.81,11.13,11.43,12,12.43,12.92,13.33,13.92,14.52,15.36,16.04,17.05,18.49,20.46,24.27,57.37],
-  bargains_per_1k: [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0.18,0.33,0.48,0.72,0.94,1.16,1.36,1.68,2.01,2.29,2.64,3.13,3.57,3.94,4.55,5.01,5.48,5.95,6.49,7.19,7.88,8.35,9.01,9.72,10.52,11.3,12.01,12.8,13.7,14.98,15.76,17.05,18.23,19.27,20.47,21.83,23.33,25.27,26.52,28.51,31.75,34.48,37.79,42.12,46.09,51.66,57.08,63.97,76.12,87.82,111.33,1000],
+  bargains_per_1k: [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0.13,0.27,0.41,0.61,0.84,1.05,1.22,1.47,1.74,2.09,2.48,2.77,3.25,3.69,4.18,4.73,5.08,5.55,6.05,6.58,7.25,7.88,8.3,8.99,9.56,10.2,11.11,11.8,12.59,13.58,14.61,15.65,16.75,17.85,18.85,19.84,21.24,22.73,24.33,26.14,29.3,32.44,35.19,38.92,43.78,48.48,52.63,58.71,70.17,85.07,108.19,1000],
   winter_days: [0,3,6,10,12,15,18,21,23,27,30,33,36,40,43,46,49,53,57,60,63,67,70,74,79,83,86,93,97,100,105,110,115,119,124,130,140,146,150,156,163,168,175,181,189,194,202,211,216,222,231,237,245,253,262,271,281,297,308,322,331,343,352,368,378,389,400,412,428,442,459,474,490,503,521,533,553,576,591,618,652,676,713,743,767,789,818,857,901,943,998,1060,1112,1194,1272,1381,1586,1810,2136,2552,4321],
 };
 
@@ -583,14 +583,19 @@ export function auditHead(repo, events) {
     const [, file, lineNo, content] = m;
     const cls = classifyFile(file);
     if (cls === "doc" || cls === "gen") continue;
+    // example/demo corpora are exhibits, not debt — the audit is a to-do list
+    if (/(^|\/)(examples?|example_scripts|samples?|demos?)(\/|$)/i.test(file)) continue;
     for (const hit of content.matchAll(SUPPRESS_PAT)) {
       if (isMention(content, hit.index)) continue;
       live.push({ file, line: Number(lineNo), kind: hit[0].trim() });
     }
   }
-  // join: git blame gives the EXACT commit that introduced each live line
-  // (precise dates); fall back to the ledger heuristic only if blame fails
-  // or the finding count is monster-sized.
+  // join: heuristic-date everything from the ledger (cheap, approximate),
+  // sort, then blame-refine the entries that will actually be displayed —
+  // git blame gives the EXACT commit for each live line, at a bounded cost
+  // regardless of how suppression-heavy the repo is. (Previously repos with
+  // >120 findings skipped blame entirely and every entry inherited the
+  // file's EARLIEST skip date — pytest showed 2010 for a line from 2025.)
   const oldest = [...events].reverse();
   const heuristic = (item) => {
     let hit = oldest.find((e) => e.files?.includes(item.file) &&
@@ -599,8 +604,7 @@ export function auditHead(repo, events) {
     item.since = hit ? hit.date : null;
     item.sha = hit ? hit.sha : null;
   };
-  for (const item of live) {
-    if (live.length > 120) { heuristic(item); continue; }
+  const blame = (item) => {
     try {
       const b = git(repo, ["blame", "-L", `${item.line},${item.line}`, "--porcelain", "HEAD", "--", item.file]);
       const sha = b.slice(0, 8);
@@ -608,10 +612,55 @@ export function auditHead(repo, events) {
       if (t) {
         item.since = new Date(Number(t[1]) * 1000).toISOString().slice(0, 10);
         item.sha = sha;
-      } else heuristic(item);
-    } catch { heuristic(item); }
+        return true;
+      }
+    } catch { /* fall through to heuristic date already set */ }
+    return false;
+  };
+  for (const item of live) heuristic(item);
+  const byDate = (a, b) => ((a.since || "9999") < (b.since || "9999") ? -1 : 1);
+  live.sort(byDate);
+  // displayed entries get two precision passes, each bounded: (1) drop
+  // matches sitting inside a multi-line string (pytest embeds whole test
+  // files with skip markers in triple-quoted fixtures — mentions, not
+  // directives; line-local isMention can't see that context, but here the
+  // full file is available), then (2) blame the survivors for exact dates.
+  const fileCache = new Map();
+  const inMultilineString = (item) => {
+    const py = /\.pyi?$/.test(item.file), tick = /\.(m?[jt]sx?|go)$/.test(item.file);
+    if (!py && !tick) return false;
+    let text = fileCache.get(item.file);
+    if (text === undefined) {
+      try { text = git(repo, ["show", `HEAD:${item.file}`]); } catch { text = null; }
+      fileCache.set(item.file, text);
+    }
+    if (text == null) return false;
+    const lines = text.split("\n").slice(0, item.line - 1);
+    let triple = false, tickOpen = false;
+    for (const ln of lines) {
+      if (py) { const n = (ln.match(/'''|"""/g) || []).length; if (n % 2) triple = !triple; }
+      if (tick) {
+        let esc = false;
+        for (const c of ln) {
+          if (esc) { esc = false; continue; }
+          if (c === "\\") esc = true;
+          else if (c === "`") tickOpen = !tickOpen;
+        }
+      }
+    }
+    return triple || tickOpen;
+  };
+  const refined = [];
+  for (const item of live) {
+    if (refined.length >= 40) break;
+    if (inMultilineString(item)) { item.drop = true; continue; }
+    blame(item);
+    refined.push(item);
   }
-  live.sort((a, b) => (a.since || "9999") < (b.since || "9999") ? -1 : 1);
+  const kept = live.filter((x) => !x.drop);
+  kept.sort(byDate);
+  live.length = 0;
+  live.push(...kept);
   // Fight log (pickaxe): for displayed findings, how many times was this
   // suppression removed and RE-added? One git log -S pass per item.
   {
