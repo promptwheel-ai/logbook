@@ -210,3 +210,24 @@ test("a lone wrong-but-plausible early date does not poison winter/span", () => 
   const lb = readFileSync(join(d, "LOGBOOK.md"), "utf8");
   assert.ok(!/2005/.test(/\(([\d?-]+) →/.exec(lb)?.[1] || ""), "span starts in era, not 2005");
 });
+
+test("notable events surface security reverts and big assertion drops", () => {
+  const d = mkdtempSync(join(tmpdir(), "logbook-notable-"));
+  const g = (args, date) => execFileSync("git", ["-C", d, ...args], { env: { ...process.env,
+    GIT_AUTHOR_NAME: "H", GIT_AUTHOR_EMAIL: "h@x.io", GIT_COMMITTER_NAME: "H",
+    GIT_COMMITTER_EMAIL: "h@x.io", ...(date && { GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date }) } });
+  g(["init", "-q"]);
+  writeFileSync(join(d, "t.test.js"),
+    Array.from({ length: 9 }, (_, i) => `assert.equal(f(${i}), ${i});`).join("\n") + "\n");
+  g(["add", "-A"]); g(["commit", "-q", "-m", "add tests"], "2024-01-01T12:00:00");
+  writeFileSync(join(d, "t.test.js"), "// gutted\n");
+  g(["add", "-A"]); g(["commit", "-q", "-m", "clean up test harness"], "2024-02-01T12:00:00");
+  writeFileSync(join(d, "a.js"), "x\n");
+  g(["add", "-A"]);
+  g(["commit", "-q", "-m", 'Revert "security patch for CVE-2024-9999"'], "2024-03-01T12:00:00");
+  execFileSync(process.execPath, [CLI, d, "-q"], { encoding: "utf8" });
+  const lb = readFileSync(join(d, "LOGBOOK.md"), "utf8");
+  assert.match(lb, /## Notable events/);
+  assert.match(lb, /security-revert.*CVE-2024-9999/);
+  assert.match(lb, /-9 asserts.*clean up test harness/);
+});

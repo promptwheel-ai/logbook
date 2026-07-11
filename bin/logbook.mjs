@@ -201,8 +201,17 @@ export function analyze(events, touched) {
     ? Math.max(1, Math.round((times[times.length - 1] - eraStart) / 86400000))
     : 0;
 
+  // Notable events: outliers worth seeing even in the digest —
+  // security-adjacent reverts, large assertion drops, suppression-dense commits.
+  const notable = events.filter((e) =>
+    (e.revert && /security|CVE-|vulnerab|exploit/i.test(e.subject)) ||
+    (e.del_asserts - e.add_asserts >= 8) ||
+    (e.suppressions.length >= 3)
+  ).slice(0, 8);
+
   const iso = (t) => new Date(t).toISOString().slice(0, 10);
   return {
+    notable,
     n: events.length, first, last, spanDays,
     spanStart: times.length ? iso(eraStart) : first?.date,
     spanEnd: times.length ? iso(times[times.length - 1]) : last?.date,
@@ -240,6 +249,17 @@ export function renderLogbookMd(name, A, shallow, capped) {
   if (A.fragile.length)
     L.push(`- Fragile areas (fixed 2+ times): ${A.fragile.slice(0, 3).map(([k]) => k.trim()).join("; ")}`);
   L.push(`- Oversight ledger: ${A.suspEvents.length} suppression commits, ${A.weaken.length} assertion-weakening commits`);
+  if (A.notable.length) {
+    L.push(``);
+    L.push(`## Notable events (outliers a reader should see)`);
+    for (const e of A.notable) {
+      const tags = [];
+      if (e.revert && /security|CVE-|vulnerab|exploit/i.test(e.subject)) tags.push("security-revert");
+      if (e.del_asserts - e.add_asserts >= 8) tags.push(`-${e.del_asserts} asserts`);
+      if (e.suppressions.length >= 3) tags.push(`${e.suppressions.length} suppressions`);
+      L.push(`- ${e.date} ${e.sha} [${tags.join(", ")}] ${e.subject}`);
+    }
+  }
   L.push(``);
   L.push(`## Hotspots — source files (where the complexity lives)`);
   for (const [f, c] of A.srcHot) L.push(`- ${f} — ${c} commits`);
