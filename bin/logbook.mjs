@@ -37,6 +37,28 @@ export const GATE_PAT =
   /\b(add|set ?up|introduce|first).{0,20}(test|ci|workflow|jest|vitest|pipeline|coverage|lint)|\.github\/workflows|jest\.config|vitest\.config|first release|v?1\.0\.0|initial release/i;
 export const MENTOR_PAT = /claude\.md|\.claude|cursorrules|agents?\.md/i;
 
+// A suppression directive only functions in a comment or as call syntax.
+// Inside a quoted string or regex-source it is a MENTION (pattern tables,
+// test fixtures, docs generators) — not a live directive. Approximate but
+// sound for directives: count unescaped quote chars before the match.
+export function isMention(line, idx) {
+  let sq = 0, dq = 0, bt = 0;
+  for (let i = 0; i < idx; i++) {
+    const c = line[i];
+    if (c === "\\") { i++; continue; }
+    if (c === "'") sq++;
+    else if (c === '"') dq++;
+    else if (c === "`") bt++;
+  }
+  if (sq % 2 === 1 || dq % 2 === 1 || bt % 2 === 1) return true;
+  // a line that BEGINS with a bare regex literal (continuation of `X =` on
+  // the previous line) — not // or /* comments
+  const t = line.trimStart();
+  if (t[0] === "/" && t[1] !== "/" && t[1] !== "*") return true;
+  // regex-literal context: an unclosed /… opened after = ( , : [ or return
+  return /(?:[=(,:[]|\breturn)\s*\/(?:[^/\\\n]|\\.)*$/.test(line.slice(0, idx));
+}
+
 export function classifyFile(f) {
   if (GEN_PAT.test(f)) return "gen";
   if (DOC_PAT.test(f)) return "doc";
@@ -140,7 +162,9 @@ export function diffScan(repo, events, opts) {
       }
       if (!counted) continue;
       if (line.startsWith("+") && !line.startsWith("+++")) {
-        for (const m of line.matchAll(SUPPRESS_PAT)) supp.add(m[0].trim());
+        for (const m of line.matchAll(SUPPRESS_PAT)) {
+          if (!isMention(line, m.index)) supp.add(m[0].trim());
+        }
         if (ASSERT_PAT.test(line)) ev.add_asserts++;
         if (WEAK_ASSERT_PAT.test(line)) weakAdded++;
       } else if (line.startsWith("-") && !line.startsWith("---")) {
@@ -475,6 +499,7 @@ export function auditHead(repo, events) {
     const cls = classifyFile(file);
     if (cls === "doc" || cls === "gen") continue;
     for (const hit of content.matchAll(SUPPRESS_PAT)) {
+      if (isMention(content, hit.index)) continue;
       live.push({ file, line: Number(lineNo), kind: hit[0].trim() });
     }
   }
