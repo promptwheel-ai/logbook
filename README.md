@@ -57,6 +57,21 @@ Options: `-n/--max N` (commit cap, default 20000) · `--compare` · `--out DIR` 
 `--compare` uses a percentile table baked into the CLI from a 1,000-repo fleet
 run — still zero dependencies and zero network calls.
 
+## Wire it into your agent (30 seconds)
+
+Commit LOGBOOK.md, then add this to your CLAUDE.md (or AGENTS.md /
+.cursorrules) so every fresh session reads the history without being asked:
+
+```markdown
+## Repo memory
+Read LOGBOOK.md before proposing changes — especially the do-not-retry
+list and fragile areas. Refresh with: npx -y @promptwheel/logbook
+Check what is still silenced: npx -y @promptwheel/logbook audit
+```
+
+Passive beats invoked: the agent doesn't have to decide to look — the
+history is simply in front of it.
+
 ## The audit: archaeology becomes a to-do list
 
 `logbook audit` joins the ledger's dates with what is still true in HEAD:
