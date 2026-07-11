@@ -318,3 +318,12 @@ test("suppressions inside string literals are mentions, not directives", () => {
   assert.match(out, /patterns\.js:2/);
   assert.ok(!/ts-ignore/.test(out), "string-literal mention not flagged");
 });
+
+test("query filters the record (mirrors the MCP experiment)", () => {
+  const out = execFileSync(process.execPath, [CLI, "query", repo, "--revert"], { encoding: "utf8" });
+  const rows = out.trim().split("\n").map((l) => JSON.parse(l));
+  assert.equal(rows.length, 1);
+  assert.match(rows[0].subject, /Revert/);
+  const out2 = execFileSync(process.execPath, [CLI, "query", repo, "--file", "core.js", "--suppress"], { encoding: "utf8" });
+  assert.ok(out2.trim().split("\n").filter(Boolean).length >= 1, "file+suppress filter works");
+});

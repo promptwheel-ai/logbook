@@ -1,6 +1,6 @@
 {
   "name": "@promptwheel/logbook",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "Turn git history into memory an agent can use: hotspots, do-not-retry, suppression ledger — and your repo's story, told back to you.",
   "type": "module",
   "bin": {
@@ -33,5 +33,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "main": "bin/logbook.mjs",
+  "exports": "./bin/logbook.mjs"
 }

@@ -575,6 +575,20 @@ function renderAudit(name, live) {
   return W.join("\n");
 }
 
+// ---------- query: first-class filters over the event record ----------
+export function queryEvents(events, f) {
+  return events.filter((e) =>
+    (!f.file || (e.files || []).some((x) => x.includes(f.file))) &&
+    (!f.revert || e.revert) &&
+    (!f.suppress || e.suppressions.length > 0) &&
+    (f.weaken == null || e.del_asserts - e.add_asserts >= f.weaken) &&
+    (f.downgrade == null || (e.downgrades || 0) >= f.downgrade) &&
+    (!f.since || e.date >= f.since) &&
+    (!f.until || e.date <= f.until) &&
+    (!f.grep || e.subject.toLowerCase().includes(f.grep.toLowerCase()))
+  );
+}
+
 // ---------- CLI ----------
 function usage() {
   console.log(`
@@ -584,6 +598,9 @@ function usage() {
     logbook [path]                analyze repo → LOGBOOK.md, events.jsonl, JOURNEY.md
     logbook journey [path]        the repo's story, in color (writes nothing)
     logbook audit [path]          what is STILL suppressed in HEAD, and since when
+    logbook query [path] [--file S] [--revert] [--suppress] [--weaken N]
+                  [--downgrade N] [--grep S] [--since D] [--until D] [--limit N]
+                                  filter the full event record (JSONL out)
     logbook [path] --json         structured events to stdout (writes nothing)
 
   options:
@@ -605,6 +622,14 @@ export function parseArgs(argv) {
     const a = argv[i];
     if (a === "journey") o.cmd = "journey";
     else if (a === "audit") o.cmd = "audit";
+    else if (a === "query") o.cmd = "query";
+    else if (a === "--file") o.file = argv[++i];
+    else if (a === "--revert") o.revert = true;
+    else if (a === "--suppress") o.suppress = true;
+    else if (a === "--weaken") o.weaken = Number(argv[++i]);
+    else if (a === "--downgrade") o.downgrade = Number(argv[++i]);
+    else if (a === "--grep") o.grep = argv[++i];
+    else if (a === "--limit") o.limit = Number(argv[++i]);
     else if (a === "-n" || a === "--max") o.max = Number(argv[++i]);
     else if (a === "--since") o.since = argv[++i];
     else if (a === "--until") o.until = argv[++i];
@@ -637,7 +662,7 @@ async function main() {
   const name = basename(repo);
   const shallow = existsSync(join(repo, ".git", "shallow"));
 
-  if (!o.quiet && !o.json) console.log(`\n  ${C.dim}reading git history…${C.r}`);
+  if (!o.quiet && !o.json) console.error(`\n  ${C.dim}reading git history…${C.r}`);
   const events = collectEvents(repo, o);
   if (!events.length) {
     console.error("  no commits found (empty repo, or --since/--until excluded everything)");
@@ -654,6 +679,12 @@ async function main() {
   }
   if (o.cmd === "journey") return console.log(renderJourneyAnsi(name, A, o.compare));
   if (o.cmd === "audit") return console.log(renderAudit(name, auditHead(repo, events)));
+  if (o.cmd === "query") {
+    const hits = queryEvents(events, o).slice(0, o.limit || 200);
+    for (const e of hits) console.log(JSON.stringify(e));
+    console.error(`  ${hits.length} matching events${hits.length === (o.limit || 200) ? " (limit reached)" : ""}`);
+    return;
+  }
 
   const outDir = o.out ? resolve(o.out) : repo;
   writeFileSync(join(outDir, "LOGBOOK.md"), renderLogbookMd(name, A, shallow, capped));
