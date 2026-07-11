@@ -96,3 +96,38 @@ trustworthy, where security fixes needed two passes) on top of strong priors.
 On PRIVATE repos — the actual target user — the control has no priors at all:
 training data has never seen your company's history. Famous-repo tests
 understate the private-repo value.
+
+---
+
+# Round 3: does DEPTH pay? (shallow 800-token vs deep ~3k-token, same task)
+
+Same express risk-assessment task. The deep variant was a HAND-BUILT mockup
+of a possible v0.2 output: all 22 reverts, per-file revert history for the
+three hotspot files, and a "notable events" highlight (a Dec-2025 revert of
+a CVE security patch that also deleted 9 assertions). The current tool does
+NOT emit this format yet — this tests the direction, not the code.
+
+## What the extra ~2k tokens bought (verbatim)
+
+> response.js (392 commits, 5 reverts) is the single riskiest file to touch:
+> reverted fixes there — infinite loop on `res.send(status)`, JSON charset
+> removal, error messaging for null/undefined `res.status` — all show that
+> content-negotiation and status-handling code has non-obvious behavioral
+> contracts that "obvious" cleanups keep breaking. [...] The single most
+> alarming data point is the 2025-12-01 revert of the CVE-2024-51999
+> security patch, which also stripped 9 assertions — meaning a real
+> vulnerability class was reintroduced with the tests that would have caught
+> it removed in the same commit [...] treat any diff that removes or weakens
+> assertions as a hard stop [...] given how normalized that anti-pattern
+> already is in this repo's history (38 prior instances).
+
+The shallow arm could not say any of that: the CVE revert wasn't in its
+10-revert sample, and per-file attribution didn't exist.
+
+## Verdict
+
+Depth changes decisions — but only CURATED depth. What paid was (1)
+file-keyed revert history and (2) notable-event highlighting, not longer
+flat lists. The 800-token digest is the right default (context economics);
+the validated v0.2 shape is per-file sections + a notable-events section at
+~2-4k tokens. Honest scope: n=1 per arm, one repo, deep variant hand-curated.
