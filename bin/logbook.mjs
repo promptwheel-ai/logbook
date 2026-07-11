@@ -585,6 +585,10 @@ export function auditHead(repo, events) {
     if (cls === "doc" || cls === "gen") continue;
     // example/demo corpora are exhibits, not debt — the audit is a to-do list
     if (/(^|\/)(examples?|example_scripts|samples?|demos?)(\/|$)/i.test(file)) continue;
+    // vendored copies and test-framework sources DEFINE the skip API
+    // (jasmine's xit/xdescribe, mocha's describe.skip) — not debt either
+    if (/(^|\/)(third[-_]?party|externals?)(\/|$)/i.test(file)) continue;
+    if (/(^|\/)(jasmine|mocha|chai|qunit|sinon)([-.][\w.]+)?\.js$/i.test(file)) continue;
     for (const hit of content.matchAll(SUPPRESS_PAT)) {
       if (isMention(content, hit.index)) continue;
       live.push({ file, line: Number(lineNo), kind: hit[0].trim() });
