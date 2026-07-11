@@ -12,10 +12,13 @@ same commits.
 | direction agreement (asserts up / down / flat) | **92%** |
 | assert-delta error, median | 2 |
 | assert-delta error, p90 | 21 |
-| commits AST-flagged for assertion downgrade (strong→weak) | 7 (~0.4%) |
-| …of which survive hand review (named-matcher class) | 2 — detector catches 2/2 |
-| …AST-heuristic false positives (np.all() wrappers, or-widened conditions, .startswith counted weak) | 5 |
+| commits AST-flagged for downgrade, v1 heuristic | 7 (~0.4%) |
+| …surviving a wrapper-aware, ambiguous-excluding v2 heuristic | **1** (~0.06%) — detector catches 1/1 |
+| …dissolved as heuristic artifacts (np.all wrappers, or-widening, .startswith) | 6 |
 | commits with AST-confirmed test-skips added | 14 |
+
+The 92% direction agreement and error distribution were IDENTICAL under both
+ground-truth heuristics — the calibration is stable when the ruler improves.
 
 ## Honest reading
 
@@ -26,11 +29,11 @@ same commits.
   nodes — multi-assert lines and reformat-heavy commits diverge. This is why
   every number in LOGBOOK.md is a lead, not a verdict, and why the agent
   reading it is instructed to `git show` before acting.
-- **Assertion downgrades are rare in the wild** (~0.4% flagged; ~0.1%
-  confirmed) — which is exactly what makes them worth a tripwire. The
-  detector ships in 0.2.0 scoped to the class that can be judged precisely:
-  named matchers (toEqual→toBeTruthy, assertEqual→assertTrue). On that
-  class its recall against AST ground truth was 2/2.
+- **True assertion downgrades are outlier-rare** (~1 in 1,600
+  assert-touching commits under the strict v2 ground truth) — which makes
+  the tripwire MORE valuable per firing, like the security-revert tag. The
+  detector ships in 0.2.0 scoped to the precisely-judgeable named-matcher
+  class; recall on confirmed cases: 1/1 (v2), 2/2 (v1).
 - **The sharpest finding cuts the other way:** hand-reviewing the AST flags
   showed even real parsers can't cheaply judge bare-assert strength —
   `np.all()` wrappers and or-widened conditions read as "weakening" to a
