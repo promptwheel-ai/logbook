@@ -12,7 +12,7 @@
 // Classifier lineage: the wild-rate-study scan (calibrated 12/12).
 
 import { spawnSync } from "node:child_process";
-import { writeFileSync, existsSync, realpathSync, readFileSync } from "node:fs";
+import { writeFileSync, existsSync, realpathSync, readFileSync, mkdirSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { resolve, join, basename } from "node:path";
 
@@ -210,6 +210,11 @@ export function loadEvents(repo, opts, onProgress) {
   if (!lines.length) return null;
   let cached;
   try { cached = lines.map((l) => JSON.parse(l)); } catch { return null; }
+  // self-heal: earlier incremental appends could duplicate window-boundary
+  // commits (a log-order window is not ancestry-closed, so `newest..HEAD`
+  // can re-return side-branch commits already cached); keep first occurrence
+  const seenSha = new Set();
+  cached = cached.filter((e) => !e.fullSha || (!seenSha.has(e.fullSha) && (seenSha.add(e.fullSha), true)));
   const newest = cached[0];
   if (!newest?.fullSha || newest.files === undefined || newest.downgrades === undefined) return null;
   let head;
@@ -229,7 +234,9 @@ export function loadEvents(repo, opts, onProgress) {
     const fresh = collectEvents(repo, { ...opts, range: `${newest.fullSha}..HEAD` });
     if (!fresh.length) return null;
     diffScan(repo, fresh, { ...opts, range: `${newest.fullSha}..HEAD` }, onProgress);
-    const merged = fresh.concat(cached).slice(0, opts.max);
+    // the range can re-return cached side-branch commits (see self-heal note)
+    const freshShas = new Set(fresh.map((e) => e.fullSha));
+    const merged = fresh.concat(cached.filter((e) => !freshShas.has(e.fullSha))).slice(0, opts.max);
     return { events: merged, mode: `incremental +${fresh.length}` };
   } catch { return null; } // rewritten history etc: full rebuild
 }
@@ -786,6 +793,7 @@ async function main() {
       process.exit(1);
     }
     const dir = o.out ? resolve(o.out) : repo;
+    mkdirSync(dir, { recursive: true });
     const a = saveAnnotation(repo, dir, { sha: o.sha, why: o.why, by: o.by });
     if (!a) {
       console.error(`  not a commit in this repo: ${o.sha}`);
@@ -843,6 +851,7 @@ async function main() {
   }
 
   const outDir = o.out ? resolve(o.out) : repo;
+  mkdirSync(outDir, { recursive: true });
   const notes = loadAnnotations(outDir);
   writeFileSync(join(outDir, "LOGBOOK.md"), renderLogbookMd(name, A, shallow, capped, notes));
   writeFileSync(join(outDir, "events.jsonl"), events.map((e) => JSON.stringify(e)).join("\n") + "\n");

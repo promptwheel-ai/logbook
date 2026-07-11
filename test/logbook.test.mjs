@@ -360,6 +360,27 @@ test("ledger cache: reuse, incremental append, window-poisoning guard", () => {
   const r5 = execFileSync(process.execPath, [CLI, "query", d, "--grep", "c0"],
     { encoding: "utf8", env: { ...process.env, LOGBOOK_NO_CACHE: "1" } });
   assert.equal(r5.trim().split("\n").length, 1);
+  // 5. duplicate events on disk self-heal, and an overlapping incremental
+  //    range cannot re-add a cached commit (log windows aren't ancestry-closed
+  //    — merge-train repos hit this; found on spring-boot: 682 dupes at cap)
+  execFileSync(process.execPath, [CLI, d, "-q"], { encoding: "utf8" });
+  const evPath = join(d, "events.jsonl");
+  const lines5 = readFileSync(evPath, "utf8").trim().split("\n");
+  const older = lines5[2]; // duplicate an already-cached older commit
+  writeFileSync(evPath, lines5.slice(0, 2).join("\n") + "\n" + older + "\n" + lines5.slice(2).join("\n") + "\n");
+  const r6 = execFileSync(process.execPath, [CLI, d, "--json"], { encoding: "utf8" }).trim().split("\n");
+  const shas6 = r6.map((l) => JSON.parse(l).fullSha);
+  assert.equal(new Set(shas6).size, shas6.length, "no duplicate events after self-heal");
+  assert.equal(shas6.length, 5, "all 5 distinct commits present");
+  // overlap-merge: stale newest + the range's commit already buried in the
+  // cache → incremental merge must not duplicate it
+  execFileSync(process.execPath, [CLI, d, "-q"], { encoding: "utf8" });
+  const l7 = readFileSync(evPath, "utf8").trim().split("\n");
+  writeFileSync(evPath, [l7[1], l7[2], l7[0], l7[3], l7[4]].join("\n") + "\n");
+  const r7 = execFileSync(process.execPath, [CLI, d, "--json"], { encoding: "utf8" }).trim().split("\n");
+  const shas7 = r7.map((l) => JSON.parse(l).fullSha);
+  assert.equal(new Set(shas7).size, shas7.length, "overlapping incremental does not duplicate");
+  assert.equal(shas7.length, 5);
 });
 
 test("chunked diff scan is equivalent to single-pass", () => {
