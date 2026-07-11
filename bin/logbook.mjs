@@ -217,8 +217,11 @@ export function loadEvents(repo, opts, onProgress) {
   cached = cached.filter((e) => !e.fullSha || (!seenSha.has(e.fullSha) && (seenSha.add(e.fullSha), true)));
   const newest = cached[0];
   if (!newest?.fullSha || newest.files === undefined || newest.downgrades === undefined) return null;
+  // compare against the newest NON-merge commit — the ledger records
+  // --no-merges, so a merge commit at HEAD would otherwise force a pointless
+  // incremental pass (and, pre-dedupe, compounding duplicates) on every load
   let head;
-  try { head = git(repo, ["rev-parse", "HEAD"]).trim(); } catch { return null; }
+  try { head = git(repo, ["log", "-1", "--no-merges", "--pretty=%H"]).trim(); } catch { return null; }
   // completeness: a record written with a smaller -n window must not
   // masquerade as the full ledger — accept only cache-at-cap, or a cache
   // whose oldest event is a root commit of the repo.

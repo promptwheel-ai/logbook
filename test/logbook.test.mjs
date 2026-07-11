@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import {
   classifyFile, parseArgs, collectEvents, diffScan, hotspots, analyze,
   renderLogbookMd, renderJourneyMd, journeyBeats, almanacStats,
-  loadAnnotations, saveAnnotation,
+  loadAnnotations, saveAnnotation, loadEvents,
 } from "../bin/logbook.mjs";
 
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "bin", "logbook.mjs");
@@ -381,6 +381,19 @@ test("ledger cache: reuse, incremental append, window-poisoning guard", () => {
   const shas7 = r7.map((l) => JSON.parse(l).fullSha);
   assert.equal(new Set(shas7).size, shas7.length, "overlapping incremental does not duplicate");
   assert.equal(shas7.length, 5);
+  // 6. a merge commit at HEAD must not defeat the cache (ledger records
+  //    --no-merges, so staleness compares against the newest non-merge)
+  g(["checkout", "-q", "-f", "-b", "side", "HEAD~1"]);
+  writeFileSync(join(d, "side.js"), "export const s = 1;\n");
+  g(["add", "side.js"]); g(["commit", "-q", "-m", "side work"], "2024-07-01T12:00:00");
+  g(["checkout", "-q", "-f", "-"]);
+  g(["merge", "-q", "--no-ff", "--no-edit", "side"]);   // HEAD is now a merge
+  execFileSync(process.execPath, [CLI, d, "-q"], { encoding: "utf8" }); // absorb side work
+  const reused = loadEvents(d, { max: 20000, since: null, until: null });
+  assert.ok(reused, "ledger reused under a merge HEAD");
+  assert.equal(reused.mode, "cached", "merge-HEAD hits the cached path, not incremental");
+  const shas8 = reused.events.map((e) => e.fullSha);
+  assert.equal(new Set(shas8).size, shas8.length, "no duplicates under merge HEAD");
 });
 
 test("chunked diff scan is equivalent to single-pass", () => {
