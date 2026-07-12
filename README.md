@@ -9,8 +9,8 @@ Every feature gets added by someone who can read the code but not the
 decisions behind it: the module that was rewritten three times, the approach
 that was tried and reverted, the "fix" last quarter that was actually a
 skipped test. AI assistants inherit that blindness on every session, in
-every repo. Code maps (Graphify and friends) tell them where things are;
-nothing tells them what happened. The logbook reads the whole history —
+every repo. Code maps (Graphify and friends) tell them where things are,
+not what happened. The logbook reads the whole history —
 every commit — and writes the short version: the file your agent reads
 first.
 
