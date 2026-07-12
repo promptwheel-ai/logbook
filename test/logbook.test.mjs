@@ -69,6 +69,24 @@ test("classifyFile buckets correctly", () => {
   assert.equal(classifyFile("README.md"), "doc");
   assert.equal(classifyFile("dist/bundle.js"), "gen");
   assert.equal(classifyFile("package-lock.json"), "gen");
+  assert.equal(classifyFile(".env.example"), "config");
+  assert.equal(classifyFile(".gitignore"), "config");
+  assert.equal(classifyFile("next.config.ts"), "config");
+  assert.equal(classifyFile("next-env.d.ts"), "gen");
+});
+
+test("signal grade: boundaries and driver-matched notes", () => {
+  const mk = (r, f, sp, w) => ({ reverts: Array(r), fragile: Array(f), suspEvents: Array(sp), weaken: Array(w) });
+  assert.equal(signalGrade(mk(0, 0, 0, 0)).level, "LOW");
+  assert.equal(signalGrade(mk(0, 0, 1, 1)).level, "LOW");
+  assert.equal(signalGrade(mk(1, 0, 2, 0)).level, "MEDIUM");
+  assert.equal(signalGrade(mk(3, 0, 0, 0)).level, "HIGH");
+  assert.equal(signalGrade(mk(0, 0, 10, 0)).level, "HIGH");
+  assert.equal(signalGrade(mk(0, 0, 0, 100)).level, "HIGH");
+  assert.match(signalGrade(mk(0, 0, 10, 0)).note, /audit/, "suppression HIGH points at audit, not do-not-retry");
+  assert.match(signalGrade(mk(3, 0, 0, 0)).note, /do-not-retry/);
+  assert.match(signalGrade(mk(0, 0, 0, 100)).note, /green|weakening/i);
+  assert.match(signalGrade(mk(0, 0, 0, 100)).parts, /100 weakening/);
 });
 
 test("signal grade: honest LOW on thin history, not LOW on the fixture", () => {

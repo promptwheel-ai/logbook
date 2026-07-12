@@ -90,8 +90,9 @@ history without being asked:
 
 ```markdown
 ## Repo memory
-Read LOGBOOK.md before proposing changes — especially the do-not-retry
-list and fragile areas. Refresh with: npx -y @promptwheel/logbook
+Read LOGBOOK.md before proposing changes. If its Historical signal is
+LOW, treat it as a hotspot map; otherwise check do-not-retry and fragile
+areas before any large change. Refresh with: npx -y @promptwheel/logbook
 Check what is still silenced: npx -y @promptwheel/logbook audit
 When you investigate WHY a listed commit happened, persist the finding:
 npx -y @promptwheel/logbook annotate SHA "one specific sentence" --by MODEL

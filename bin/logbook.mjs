@@ -21,10 +21,10 @@ import { resolve, join, basename } from "node:path";
 export const TEST_PAT =
   /(^|\/)(tests?|__tests__|spec|specs|fixtures?|snapshots?|__snapshots__|golden)\/|\.(test|spec)\.[jt]sx?$|_test\.(go|py|rb)$|conftest\.py$|(^|\/)(jest|vitest|playwright|cypress|karma)\.config/i;
 export const CONFIG_PAT =
-  /(^|\/)(\.eslintrc|eslint\.config|tsconfig[^/]*\.json|pytest\.ini|setup\.cfg|setup\.py|tox\.ini|\.rubocop|\.github\/|Dockerfile|docker-compose|vercel\.json|package\.json|Cargo\.toml|lerna\.json|nx\.json|turbo\.json|rush\.json|\.babelrc|babel\.config[^/]*|bower\.json|deno\.json[c]?|pyproject\.toml|go\.(mod|sum)|Gemfile|Rakefile|mix\.exs|composer\.json|CMakeLists\.txt|Makefile|\.pre-commit-config[^/]*|.*\.ya?ml)$/i;
+  /(^|\/)(\.eslintrc|eslint\.config|tsconfig[^/]*\.json|pytest\.ini|setup\.cfg|setup\.py|tox\.ini|\.rubocop|\.github\/|Dockerfile|docker-compose|vercel\.json|package\.json|Cargo\.toml|lerna\.json|nx\.json|turbo\.json|rush\.json|\.babelrc|babel\.config[^/]*|bower\.json|deno\.json[c]?|pyproject\.toml|go\.(mod|sum)|Gemfile|Rakefile|mix\.exs|composer\.json|CMakeLists\.txt|Makefile|\.pre-commit-config[^/]*|.*\.ya?ml|[^/]+\.config\.[cm]?[jt]s|\.[^/]+)$/i;
 export const DOC_PAT = /\.(md|txt|rst|adoc)$|(^|\/)(LICENSE|CHANGELOG|CHANGES|NEWS|AUTHORS|CONTRIBUTORS|HISTORY|COPYING)([^/]*)?$|^docs\//i;
 export const GEN_PAT =
-  /node_modules\/|\.map$|\.lock$|lock\.json$|\.gen\.|generated|dist\/|build\/|vendor\/|-?snapshot\.json$|\.snap$/i;
+  /node_modules\/|\.map$|\.lock$|lock\.json$|\.gen\.|generated|dist\/|build\/|vendor\/|-?snapshot\.json$|\.snap$|(^|\/)next-env\.d\.ts$/i;
 export const SUPPRESS_PAT =
   /@ts-nocheck|@ts-ignore|eslint-disable|# *noqa|# *type: *ignore|\bit\.skip\b|\btest\.skip\b|\bxit\(|\bxdescribe\(|describe\.skip\b|@pytest\.mark\.skip\b|@unittest\.skip\b|\bt\.Skip\(|@Disabled\b|@Ignore\b|\[Ignore\b|Skip\s*=\s*"|#\[ignore|markTestSkipped\(|markTestIncomplete\(|except[^:]*: *pass/g;
 export const ASSERT_PAT = /assert|expect\(|\.toBe|\.toEqual|t\.Error|t\.Fatal/;
@@ -994,7 +994,7 @@ async function main() {
   writeFileSync(join(outDir, "JOURNEY.md"), renderJourneyMd(name, A, o.compare));
 
   if (o.cmd === "init") {
-    const block = `\n## Repo memory\nRead LOGBOOK.md (at the repo root) before proposing changes — especially\nthe do-not-retry list and fragile areas. Refresh with:\nnpx -y @promptwheel/logbook\nCheck what is still silenced: npx -y @promptwheel/logbook audit\nWhen you investigate WHY a listed commit happened and verify it in the\ndiffs, persist it (replace SHA and the sentence; never annotate guesses):\nnpx -y @promptwheel/logbook annotate SHA "one specific sentence" --by codex\n`;
+    const block = `\n## Repo memory\nRead LOGBOOK.md (at the repo root) before proposing changes. If its\nHistorical signal is LOW, treat it as a hotspot map; otherwise check the\ndo-not-retry list and fragile areas before any large change. Refresh with:\nnpx -y @promptwheel/logbook\nCheck what is still silenced: npx -y @promptwheel/logbook audit\nWhen you investigate WHY a listed commit happened and verify it in the\ndiffs, persist it (replace SHA and the sentence; never annotate guesses):\nnpx -y @promptwheel/logbook annotate SHA "one specific sentence" --by codex\n`;
     // AGENTS.md is the cross-tool convention — always ensure it exists;
     // also wire tool-specific files that are present. AGENTS.override.md
     // SHADOWS AGENTS.md in Codex, so it must be wired too when it exists.
