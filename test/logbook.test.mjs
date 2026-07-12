@@ -657,3 +657,17 @@ test("init migrates the old --by codex block; user-edited blocks stay", () => {
   assert.equal(readFileSync(join(d, "AGENTS.md"), "utf8").split("## Repo memory").length - 1, 1);
   rmSync(d, { recursive: true, force: true });
 });
+
+test("audit on a suppression-free repo is clean, not an error", () => {
+  // regression: git() discarded the exit status, so grep's "no matches"
+  // (exit 1) was indistinguishable from a real failure and audit threw
+  const d = mkdtempSync(join(tmpdir(), "logbook-cleanaudit-"));
+  const g = (args) => execFileSync("git", ["-C", d, ...args], { env: { ...process.env,
+    GIT_AUTHOR_NAME: "H", GIT_AUTHOR_EMAIL: "h@x.io", GIT_COMMITTER_NAME: "H", GIT_COMMITTER_EMAIL: "h@x.io" } });
+  g(["init", "-q"]);
+  writeFileSync(join(d, "a.js"), "let x = 1;\n");
+  g(["add", "-A"]); g(["commit", "-q", "-m", "base"]);
+  const out = execFileSync(process.execPath, [CLI, "audit", d], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  assert.match(out, /clean — no live suppressions/);
+  rmSync(d, { recursive: true, force: true });
+});

@@ -28,7 +28,8 @@ export const GEN_PAT =
   /node_modules\/|\.map$|\.lock$|lock\.json$|\.gen\.|generated|dist\/|build\/|vendor\/|-?snapshot\.json$|\.snap$|(^|\/)next-env\.d\.ts$/i;
 // Bump whenever detector precision changes: a cached events.jsonl written by
 // an older extractor must trigger a full rebuild, not survive the upgrade.
-export const EXTRACTOR_VERSION = 2;
+// (3: 0.7.10 could persist a partial ledger after a failed diff scan)
+export const EXTRACTOR_VERSION = 3;
 // Default commit window (-n/--max). The ledger cache is only trusted at this
 // cap (or when it reaches a root commit), so the two sites must agree.
 export const DEFAULT_MAX = 20000;
@@ -103,7 +104,11 @@ function git(repo, args) {
     maxBuffer: 1 << 30,
   });
   if (r.error) throw r.error;
-  if (r.status !== 0) throw new Error(r.stderr.trim() || `git ${args[0]} failed`);
+  if (r.status !== 0) {
+    const err = new Error(r.stderr.trim() || `git ${args[0]} failed`);
+    err.status = r.status; // callers distinguish "no matches" (1) from real failures
+    throw err;
+  }
   return r.stdout;
 }
 
@@ -1005,12 +1010,20 @@ async function main() {
   }
 
   if (o.json) {
+    if (!scanOk) {
+      console.error("logbook: diff scan failed — the record would be incomplete, refusing to emit it as data");
+      process.exit(1);
+    }
     for (const e of events) console.log(JSON.stringify(e));
     return;
   }
   if (o.cmd === "journey") return console.log(renderJourneyAnsi(name, A, o.compare));
   if (o.cmd === "audit") return console.log(renderAudit(name, auditHead(repo, events)));
   if (o.cmd === "query") {
+    if (!scanOk) {
+      console.error("logbook: diff scan failed — the record would be incomplete, refusing to query it");
+      process.exit(1);
+    }
     const hits = queryEvents(events, o).slice(0, o.limit || 200);
     for (const e of hits) console.log(JSON.stringify(e));
     console.error(`  ${hits.length} matching events${hits.length === (o.limit || 200) ? " (limit reached)" : ""}`);
@@ -1025,7 +1038,9 @@ async function main() {
   mkdirSync(outDir, { recursive: true });
   const notes = loadAnnotations(outDir);
   writeFileSync(join(outDir, "LOGBOOK.md"), renderLogbookMd(name, A, shallow, capped, notes));
-  writeFileSync(join(outDir, "events.jsonl"), events.map((e) => JSON.stringify(e)).join("\n") + "\n");
+  // a failed scan must not persist: the next run would accept the partial
+  // ledger as valid and the degraded warning would silently disappear
+  if (scanOk) writeFileSync(join(outDir, "events.jsonl"), events.map((e) => JSON.stringify(e)).join("\n") + "\n");
   writeFileSync(join(outDir, "JOURNEY.md"), renderJourneyMd(name, A, o.compare));
 
   if (o.cmd === "init") {

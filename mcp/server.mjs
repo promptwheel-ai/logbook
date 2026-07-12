@@ -36,7 +36,9 @@ function pipeline(repoArg, onProgress) {
     events = reused.events;
   } else {
     events = collectEvents(repo, DEFAULTS);
-    diffScan(repo, events, DEFAULTS, onProgress);
+    // a failed scan must surface as an error, not as a zero-suppression record
+    if (!diffScan(repo, events, DEFAULTS, onProgress))
+      throw new Error("diff scan failed (git log -p errored) — history record incomplete; refusing to answer from partial data");
   }
   const A = analyze(events, hotspots(repo, DEFAULTS));
   const entry = { head, events, A };
@@ -54,7 +56,7 @@ function progressFor(extra) {
   }).catch(() => {});
 }
 
-const server = new McpServer({ name: "logbook", version: "0.3.3" });
+const server = new McpServer({ name: "logbook", version: "0.3.4" });
 
 server.registerTool(
   "logbook_digest",

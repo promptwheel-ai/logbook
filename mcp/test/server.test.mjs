@@ -100,3 +100,8 @@ test("digest renders through the same pipeline", async () => {
   assert.match(text, /The Logbook of/);
   assert.match(text, /Historical signal/);
 });
+
+test("audit on the clean fixture reports clean, not an error", async () => {
+  const text = await callTool("logbook_audit", { repo });
+  assert.match(text, /clean — no live suppressions/);
+});
