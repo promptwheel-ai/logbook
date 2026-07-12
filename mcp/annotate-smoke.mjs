@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 const repo = process.argv[2];
 const transport = new StdioClientTransport({
   command: process.execPath,
-  args: ["/home/wavecutter/IdeaProjects/logbook/mcp/server.mjs"],
+  args: [new URL("./server.mjs", import.meta.url).pathname],
 });
 const client = new Client({ name: "smoke", version: "0.0.0" });
 await client.connect(transport);
