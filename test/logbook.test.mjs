@@ -477,6 +477,12 @@ test("annotate: persists a why, merges into LOGBOOK.md with provenance, last wri
   assert.equal(notes.length, 1, "same commit annotated twice → one note");
   assert.equal(notes[0].why, "updated verdict");
   assert.equal(notes[0].sha, revertSha);
+  // identical annotation is idempotent: the FILE must not grow either
+  const linesBefore = readFileSync(join(repo, "annotations.jsonl"), "utf8").trim().split("\n").length;
+  saveAnnotation(repo, repo, { sha: revertSha.slice(0, 8), why: "updated verdict", by: "tester2" });
+  saveAnnotation(repo, repo, { sha: revertSha.slice(0, 8), why: "updated verdict", by: "tester2" });
+  const linesAfter = readFileSync(join(repo, "annotations.jsonl"), "utf8").trim().split("\n").length;
+  assert.equal(linesAfter, linesBefore, "identical writes are no-ops");
 
   // annotate merges into an existing LOGBOOK.md IMMEDIATELY (a later session
   // that finds fresh artifacts on disk may never re-run the CLI)

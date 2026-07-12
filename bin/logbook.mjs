@@ -772,6 +772,10 @@ export function saveAnnotation(repo, dir, { sha, why, by }) {
   const now = new Date();
   const local = new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
   const a = { sha: full, why: String(why).slice(0, 400), by: by || "agent", date: local };
+  // idempotent: an identical annotation (same sha+why+by) is a no-op, not
+  // a duplicate line — repeated MCP retries must not grow the file
+  const existing = loadAnnotations(dir).find((x) => x.sha === a.sha && x.why === a.why && x.by === a.by);
+  if (existing) return existing;
   writeFileSync(join(dir, "annotations.jsonl"), JSON.stringify(a) + "\n", { flag: "a" });
   return a;
 }
