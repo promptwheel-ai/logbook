@@ -276,8 +276,10 @@ export function loadEvents(repo, opts, onProgress) {
   // that contains a root commit of the repo (i.e. reaches the beginning).
   if (cached.length < opts.max) {
     try {
-      const roots = new Set(git(repo, ["rev-list", "--max-parents=0", "HEAD"]).split("\n").filter(Boolean));
-      if (!cached.some((e) => roots.has(e.fullSha))) return null;
+      // merged unrelated histories have MULTIPLE roots — a complete ledger
+      // must reach every beginning, not just one of them
+      const roots = git(repo, ["rev-list", "--max-parents=0", "HEAD"]).split("\n").filter(Boolean);
+      if (!roots.every((r) => seenSha.has(r))) return null;
     } catch { return null; }
   }
   // fresh if the ledger already contains the newest non-merge commit —

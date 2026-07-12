@@ -678,8 +678,11 @@ test("ticket-close pattern: annotating a MERGE commit renders in the digest", ()
   // In PR workflows that commit is a MERGE — which the ledger excludes
   // (--no-merges), so the why must surface via the leftover section.
   const d = mkdtempSync(join(tmpdir(), "logbook-ticket-"));
+  // identical timestamps PINNED — the scrambled-log-order behavior under test
+  // must not depend on the test outrunning the wall clock
   const g = (args) => execFileSync("git", ["-C", d, ...args], { env: { ...process.env,
-    GIT_AUTHOR_NAME: "H", GIT_AUTHOR_EMAIL: "h@x.io", GIT_COMMITTER_NAME: "H", GIT_COMMITTER_EMAIL: "h@x.io" } });
+    GIT_AUTHOR_NAME: "H", GIT_AUTHOR_EMAIL: "h@x.io", GIT_COMMITTER_NAME: "H", GIT_COMMITTER_EMAIL: "h@x.io",
+    GIT_AUTHOR_DATE: "2026-01-01T12:00:00", GIT_COMMITTER_DATE: "2026-01-01T12:00:00" } });
   g(["init", "-q"]);
   writeFileSync(join(d, "a.js"), "let x = 1;\n");
   g(["add", "-A"]); g(["commit", "-q", "-m", "base"]);
@@ -699,5 +702,36 @@ test("ticket-close pattern: annotating a MERGE commit renders in the digest", ()
   // and it survives a re-run (merge is not in the --no-merges ledger)
   execFileSync(process.execPath, [CLI, d, "-q"], { encoding: "utf8" });
   assert.match(readFileSync(join(d, "LOGBOOK.md"), "utf8"), /retry loop was env flake/);
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("multi-root history: a partial cache missing one root is rebuilt", () => {
+  const d = mkdtempSync(join(tmpdir(), "logbook-multiroot-"));
+  const g = (args) => execFileSync("git", ["-C", d, ...args], { env: { ...process.env,
+    GIT_AUTHOR_NAME: "H", GIT_AUTHOR_EMAIL: "h@x.io", GIT_COMMITTER_NAME: "H", GIT_COMMITTER_EMAIL: "h@x.io" } });
+  g(["init", "-q"]);
+  writeFileSync(join(d, "a.js"), "let x = 1;\n");
+  g(["add", "-A"]); g(["commit", "-q", "-m", "root A"]);
+  writeFileSync(join(d, "a.js"), "let x = 2;\n");
+  g(["add", "-A"]); g(["commit", "-q", "-m", "work on A"]);
+  g(["checkout", "-q", "--orphan", "side"]);
+  g(["rm", "-rf", "--cached", "."]);
+  rmSync(join(d, "a.js"));
+  writeFileSync(join(d, "b.js"), "let y = 1;\n");
+  g(["add", "-A"]); g(["commit", "-q", "-m", "root B"]);
+  g(["checkout", "-q", "-f", "master"]);
+  g(["merge", "-q", "--no-ff", "--no-edit", "--allow-unrelated-histories", "side"]);
+  execFileSync(process.execPath, [CLI, d, "-q"], { encoding: "utf8" });
+  const evPath = join(d, "events.jsonl");
+  const lines = readFileSync(evPath, "utf8").trim().split("\n");
+  assert.equal(lines.length, 3, "both roots and the A-side commit recorded");
+  // drop root B's event: the ledger still contains A's root, but no longer
+  // reaches every beginning — it must be rejected, not trusted
+  const partial = lines.filter((l) => !JSON.parse(l).subject.includes("root B"));
+  writeFileSync(evPath, partial.join("\n") + "\n");
+  assert.equal(loadEvents(d, { max: 20000, since: null, until: null }), null,
+    "partial multi-root cache rejected");
+  const rebuilt = execFileSync(process.execPath, [CLI, d, "--json"], { encoding: "utf8" }).trim().split("\n");
+  assert.equal(rebuilt.length, 3, "default run rebuilds all three events");
   rmSync(d, { recursive: true, force: true });
 });
