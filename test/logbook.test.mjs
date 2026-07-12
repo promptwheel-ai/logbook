@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import {
   SUPPRESS_PAT, classifyFile, parseArgs, collectEvents, diffScan, hotspots, analyze,
   renderLogbookMd, renderJourneyMd, journeyBeats, almanacStats,
-  loadAnnotations, saveAnnotation, loadEvents,
+  loadAnnotations, saveAnnotation, loadEvents, kindAllowedInFile,
 } from "../bin/logbook.mjs";
 
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "bin", "logbook.mjs");
@@ -69,6 +69,17 @@ test("classifyFile buckets correctly", () => {
   assert.equal(classifyFile("README.md"), "doc");
   assert.equal(classifyFile("dist/bundle.js"), "gen");
   assert.equal(classifyFile("package-lock.json"), "gen");
+});
+
+test("language-bound idioms only count in their own languages", () => {
+  assert.ok(kindAllowedInFile("@Disabled", "src/FooTest.java"));
+  assert.ok(kindAllowedInFile("t.Skip(", "pkg/x_test.go"));
+  assert.ok(kindAllowedInFile("#[ignore", "src/lib.rs"));
+  assert.ok(!kindAllowedInFile("@Disabled", "bin/logbook.mjs"), "Java idiom in JS = prose");
+  assert.ok(!kindAllowedInFile("[Ignore", "bin/logbook.mjs"));
+  assert.ok(!kindAllowedInFile("#[ignore", "notes.md"));
+  assert.ok(!kindAllowedInFile("t.Skip(", "scan.py"));
+  assert.ok(kindAllowedInFile("eslint-disable", "weird.xyz"), "original set stays ungated");
 });
 
 test("suppression idioms across languages match directives, not lookalikes", () => {

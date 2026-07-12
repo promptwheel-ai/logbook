@@ -60,6 +60,21 @@ export function isMention(line, idx) {
   return /(?:[=(,:[]|\breturn)\s*\/(?:[^/\\\n]|\\.)*$/.test(line.slice(0, idx));
 }
 
+// Language-bound idioms only count in their own languages: @Disabled in a
+// .mjs file is prose ABOUT Java, not a disabled test. The original
+// calibrated set (JS/py families) stays ungated — those idioms are the
+// lineage the fleet numbers were built on.
+export function kindAllowedInFile(kind, file) {
+  const ext = ((file || "").match(/\.([a-z0-9_]+)$/i) || [, ""])[1].toLowerCase();
+  const k = kind.trim();
+  if (k === "@Disabled" || k === "@Ignore") return ["java", "kt", "kts", "scala", "groovy"].includes(ext);
+  if (k.startsWith("[Ignore") || /^Skip\s*=\s*"?$/.test(k)) return ["cs", "fs", "vb"].includes(ext);
+  if (k === "#[ignore") return ext === "rs";
+  if (k.startsWith("markTest")) return ["php", "phtml"].includes(ext);
+  if (k === "t.Skip(") return ext === "go";
+  return true;
+}
+
 export function classifyFile(f) {
   if (GEN_PAT.test(f)) return "gen";
   if (DOC_PAT.test(f)) return "doc";
@@ -166,6 +181,7 @@ function scanWindow(patch, bySha, scanned) {
     // Track which file each hunk belongs to: asserts/suppressions in doc
     // examples or generated/vendored files are not evaluator changes.
     let counted = true;
+    let curFile = "";
     let strongRemoved = 0, weakAdded = 0;
     const flushDowngrades = () => {
       ev.downgrades += Math.min(strongRemoved, weakAdded);
@@ -178,13 +194,14 @@ function scanWindow(patch, bySha, scanned) {
         if (f !== "/dev/null") {
           const cls = classifyFile(f);
           counted = cls !== "doc" && cls !== "gen";
+          if (line.startsWith("+++ ")) curFile = f;
         }
         continue;
       }
       if (!counted) continue;
       if (line.startsWith("+") && !line.startsWith("+++")) {
         for (const m of line.matchAll(SUPPRESS_PAT)) {
-          if (!isMention(line, m.index)) supp.add(m[0].trim());
+          if (!isMention(line, m.index) && kindAllowedInFile(m[0], curFile)) supp.add(m[0].trim());
         }
         if (ASSERT_PAT.test(line)) ev.add_asserts++;
         if (WEAK_ASSERT_PAT.test(line)) weakAdded++;
@@ -592,6 +609,7 @@ export function auditHead(repo, events) {
     if (/(^|\/)(jasmine|mocha|chai|qunit|sinon)([-.][\w.]+)?\.js$/i.test(file)) continue;
     for (const hit of content.matchAll(SUPPRESS_PAT)) {
       if (isMention(content, hit.index)) continue;
+      if (!kindAllowedInFile(hit[0], file)) continue;
       live.push({ file, line: Number(lineNo), kind: hit[0].trim() });
     }
   }
