@@ -399,11 +399,18 @@ const fmt = (x) => x.toLocaleString("en-US");
 export function signalGrade(A) {
   const reverts = A.reverts.length, fragile = A.fragile.length,
     supp = A.suspEvents.length, weak = A.weaken.length;
-  const parts = `${reverts} revert${reverts === 1 ? "" : "s"} · ${fragile} repeated-fix area${fragile === 1 ? "" : "s"} · ${supp} suppression event${supp === 1 ? "" : "s"}`;
+  const parts = `${reverts} revert${reverts === 1 ? "" : "s"} · ${fragile} repeated-fix area${fragile === 1 ? "" : "s"} · ${supp} suppression event${supp === 1 ? "" : "s"} · ${weak} weakening event${weak === 1 ? "" : "s"}`;
   if (reverts === 0 && fragile === 0 && supp <= 1 && weak <= 1)
     return { level: "LOW", parts, note: "little recoverable decision history — the digest is mostly a hotspot map" };
-  if (reverts >= 3 || fragile >= 3 || supp >= 10)
-    return { level: "HIGH", parts, note: "rich decision history: check do-not-retry before any large change" };
+  // the note names what actually fired, so a suppression-driven HIGH does
+  // not send readers to an empty do-not-retry list
+  const rich = [];
+  if (reverts >= 3) rich.push("check do-not-retry before any large change");
+  if (fragile >= 3) rich.push("mind the repeated-fix areas");
+  if (supp >= 10) rich.push("run `logbook audit` — the suppression history is heavy");
+  if (weak >= 10) rich.push("treat green tests with suspicion (see assertion-weakening)");
+  if (rich.length)
+    return { level: "HIGH", parts, note: `rich history: ${rich.join("; ")}` };
   return { level: "MEDIUM", parts, note: "some decision history worth checking before refactors" };
 }
 
