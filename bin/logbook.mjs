@@ -29,6 +29,9 @@ export const GEN_PAT =
 // Bump whenever detector precision changes: a cached events.jsonl written by
 // an older extractor must trigger a full rebuild, not survive the upgrade.
 export const EXTRACTOR_VERSION = 2;
+// Default commit window (-n/--max). The ledger cache is only trusted at this
+// cap (or when it reaches a root commit), so the two sites must agree.
+export const DEFAULT_MAX = 20000;
 export const SUPPRESS_PAT =
   /@ts-nocheck|@ts-ignore|eslint-disable|# *noqa|# *type: *ignore|\bit\.skip\b|\btest\.skip\b|\bxit\(|\bxdescribe\(|describe\.skip\b|@pytest\.mark\.skip\b|@unittest\.skip\b|\bt\.Skip\(|@Disabled\b|@Ignore\b|\[Ignore\b|Skip\s*=\s*"|#\[ignore|markTestSkipped\(|markTestIncomplete\(|except[^:]*: *pass/g;
 export const ASSERT_PAT = /assert|expect\(|\.toBe|\.toEqual|t\.Error|t\.Fatal/;
@@ -234,7 +237,7 @@ function scanWindow(patch, bySha, scanned) {
 // ---------- ledger cache: reuse events.jsonl when fresh; append when stale ----------
 export function loadEvents(repo, opts, onProgress) {
   if (process.env.LOGBOOK_NO_CACHE) return null;
-  if (opts.max !== 20000 || opts.since || opts.until || opts.range) return null;
+  if (opts.max !== DEFAULT_MAX || opts.since || opts.until || opts.range) return null;
   let lines;
   try {
     lines = readFileSync(join(repo, "events.jsonl"), "utf8").split("\n").filter(Boolean);
@@ -864,7 +867,7 @@ function usage() {
     logbook [path] --json         structured events to stdout (writes nothing)
 
   options:
-    -n, --max N        commits to analyze (default 20000)
+    -n, --max N        commits to analyze (default ${DEFAULT_MAX})
     --compare          rank your almanac against the top 2,500 GitHub repos
     --since / --until  era-scoped archaeology (git date formats)
     --out DIR          write artifacts somewhere other than the repo root
@@ -876,7 +879,7 @@ function usage() {
 }
 
 export function parseArgs(argv) {
-  const o = { cmd: "run", repo: ".", max: 20000, since: null, until: null, json: false, quiet: false, out: null };
+  const o = { cmd: "run", repo: ".", max: DEFAULT_MAX, since: null, until: null, json: false, quiet: false, out: null };
   const rest = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
