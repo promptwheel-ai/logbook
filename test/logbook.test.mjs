@@ -10,6 +10,7 @@ import {
   SUPPRESS_PAT, classifyFile, parseArgs, collectEvents, diffScan, hotspots, analyze,
   renderLogbookMd, renderJourneyMd, journeyBeats, almanacStats,
   loadAnnotations, saveAnnotation, loadEvents, kindAllowedInFile, signalGrade,
+  EXTRACTOR_VERSION,
 } from "../bin/logbook.mjs";
 
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "bin", "logbook.mjs");
@@ -553,4 +554,87 @@ test("annotate: persists a why, merges into LOGBOOK.md with provenance, last wri
   writeFileSync(join(repo, "annotations.jsonl"), "not json\n", { flag: "a" });
   assert.equal(loadAnnotations(repo).length, 2);
   rmSync(join(repo, "annotations.jsonl"));
+});
+
+test("committing a detector regex table is not suppression history", () => {
+  const d = mkdtempSync(join(tmpdir(), "logbook-selfref-"));
+  const g = (args) => execFileSync("git", ["-C", d, ...args], { env: { ...process.env,
+    GIT_AUTHOR_NAME: "H", GIT_AUTHOR_EMAIL: "h@x.io", GIT_COMMITTER_NAME: "H", GIT_COMMITTER_EMAIL: "h@x.io" } });
+  g(["init", "-q"]);
+  writeFileSync(join(d, "a.js"), "let x = 1;\n");
+  g(["add", "-A"]); g(["commit", "-q", "-m", "base"]);
+  // a bare regex-literal continuation line — exactly how logbook's own
+  // SUPPRESS_PAT is committed; the diff's + prefix must not hide it from isMention
+  writeFileSync(join(d, "detect.js"),
+    "export const SUPPRESS_PAT =\n  /@ts-nocheck|@ts-ignore|eslint-disable|\\bit\\.skip\\b|\\btest\\.skip\\b/g;\n");
+  g(["add", "-A"]); g(["commit", "-q", "-m", "add detector patterns"]);
+  // comments ABOUT call-syntax idioms are prose, not directives
+  writeFileSync(join(d, "notes.js"),
+    "// never use describe.skip or xit( here\nlet ok = 1; // t.Skip( is Go-only\n");
+  writeFileSync(join(d, "notes.py"), "x = 1  # drop @pytest.mark.skip before merge\n");
+  g(["add", "-A"]); g(["commit", "-q", "-m", "document conventions"]);
+  // a REAL directive in the same repo must still count — including the
+  // comment-directive family, whose home IS a comment
+  writeFileSync(join(d, "a.js"), "/* eslint-disable no-console */\nlet x = 1;\n");
+  g(["add", "-A"]); g(["commit", "-q", "-m", "quiet header"]);
+  const out = execFileSync(process.execPath, [CLI, "query", d, "--suppress"],
+    { encoding: "utf8", env: { ...process.env, LOGBOOK_NO_CACHE: "1" } });
+  const evs = out.trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  assert.equal(evs.length, 1, "only the live directive counts, not the regex table");
+  assert.match(evs[0].subject, /quiet header/);
+  assert.deepEqual(evs[0].suppressions, ["eslint-disable"]);
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("extractor version gates the cache: stale ledgers rebuild clean", () => {
+  const d = mkdtempSync(join(tmpdir(), "logbook-xv-"));
+  const g = (args) => execFileSync("git", ["-C", d, ...args], { env: { ...process.env,
+    GIT_AUTHOR_NAME: "H", GIT_AUTHOR_EMAIL: "h@x.io", GIT_COMMITTER_NAME: "H", GIT_COMMITTER_EMAIL: "h@x.io" } });
+  g(["init", "-q"]);
+  writeFileSync(join(d, "a.js"), "let x = 1;\n");
+  g(["add", "-A"]); g(["commit", "-q", "-m", "base"]);
+  writeFileSync(join(d, "b.js"), "let y = 2;\n");
+  g(["add", "-A"]); g(["commit", "-q", "-m", "more"]);
+  execFileSync(process.execPath, [CLI, d, "-q"], { encoding: "utf8" });
+  const evPath = join(d, "events.jsonl");
+  const stamped = readFileSync(evPath, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  assert.ok(stamped.every((e) => e.xv === EXTRACTOR_VERSION), "every event carries the extractor version");
+  // simulate a pre-versioning ledger holding a stale false classification
+  const doctored = stamped.map((e) => {
+    const { xv, ...rest } = e;
+    return JSON.stringify({ ...rest, suppressions: ["@ts-nocheck"] });
+  });
+  writeFileSync(evPath, doctored.join("\n") + "\n");
+  assert.equal(loadEvents(d, { max: 20000, since: null, until: null }), null,
+    "old-extractor cache is rejected, not reused");
+  execFileSync(process.execPath, [CLI, d, "-q"], { encoding: "utf8" });
+  const rebuilt = readFileSync(evPath, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  assert.ok(rebuilt.every((e) => e.suppressions.length === 0), "stale classifications do not survive the upgrade");
+  assert.ok(rebuilt.every((e) => e.xv === EXTRACTOR_VERSION));
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("init migrates the old --by codex block; user-edited blocks stay", () => {
+  const d = mkdtempSync(join(tmpdir(), "logbook-migrate-"));
+  const g = (args) => execFileSync("git", ["-C", d, ...args], { env: { ...process.env,
+    GIT_AUTHOR_NAME: "H", GIT_AUTHOR_EMAIL: "h@x.io", GIT_COMMITTER_NAME: "H", GIT_COMMITTER_EMAIL: "h@x.io" } });
+  g(["init", "-q"]);
+  writeFileSync(join(d, "a.js"), "let x = 1;\n");
+  g(["add", "-A"]); g(["commit", "-q", "-m", "base"]);
+  const oldBlock = `\n## Repo memory\nRead LOGBOOK.md (at the repo root) before proposing changes. If its\nHistorical signal is LOW, treat it as a hotspot map; otherwise check the\ndo-not-retry list and fragile areas before any large change. Refresh with:\nnpx -y @promptwheel/logbook\nCheck what is still silenced: npx -y @promptwheel/logbook audit\nWhen you investigate WHY a listed commit happened and verify it in the\ndiffs, persist it (replace SHA and the sentence; never annotate guesses):\nnpx -y @promptwheel/logbook annotate SHA "one specific sentence" --by codex\n`;
+  writeFileSync(join(d, "AGENTS.md"), "# mine\n" + oldBlock);
+  writeFileSync(join(d, "CLAUDE.md"), "## Repo memory\nmy own custom wording — hands off\n");
+  const out = execFileSync(process.execPath, [CLI, "init", d], { encoding: "utf8" });
+  assert.match(out, /updated AGENTS\.md/);
+  const agents = readFileSync(join(d, "AGENTS.md"), "utf8");
+  assert.match(agents, /^# mine/, "user content above the block survives");
+  assert.doesNotMatch(agents, /--by codex/, "cross-agent misattribution migrated away");
+  assert.match(agents, /--by MODEL/);
+  assert.equal(agents.split("## Repo memory").length - 1, 1, "no duplicate block");
+  assert.equal(readFileSync(join(d, "CLAUDE.md"), "utf8"),
+    "## Repo memory\nmy own custom wording — hands off\n", "edited block untouched");
+  // a second init after migration is a no-op, not a re-migration
+  execFileSync(process.execPath, [CLI, "init", d], { encoding: "utf8" });
+  assert.equal(readFileSync(join(d, "AGENTS.md"), "utf8").split("## Repo memory").length - 1, 1);
+  rmSync(d, { recursive: true, force: true });
 });

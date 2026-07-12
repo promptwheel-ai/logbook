@@ -10,9 +10,9 @@ decisions behind it: the module that was rewritten three times, the approach
 that was tried and reverted, the "fix" last quarter that was actually a
 skipped test. AI assistants inherit that blindness on every session, in
 every repo. Code maps (Graphify and friends) tell them where things are,
-not what happened. The logbook reads the whole history —
-every commit — and writes the short version: the file your agent reads
-first.
+not what happened. The logbook mines the existing git history — up to the
+newest 20,000 commits — and writes the short version: the file your agent
+reads first.
 
 ```
 npx -y @promptwheel/logbook init
@@ -48,8 +48,8 @@ that matter.
 
 | File | What it is | Who it's for |
 |---|---|---|
-| `LOGBOOK.md` | The brief a fresh session needs: hotspots, **do-not-retry** (reverted approaches), the **suppression ledger** (every time a test was skipped or a warning hushed), assertion-weakening events, fragile areas | Your agent. Drop it in context — `CLAUDE.md` can point at it |
-| `events.jsonl` | One structured event per commit: shape (src/test/config/docs), adds/dels, suppressions found in the diff, assertion deltas | Your tools. The data layer |
+| `LOGBOOK.md` | The brief a fresh session needs: hotspots, **do-not-retry** (reverted approaches), the **suppression ledger** (the times a test was skipped or a warning hushed), assertion-weakening events, fragile areas | Your agent. Drop it in context — `CLAUDE.md` can point at it |
+| `events.jsonl` | One structured event per analyzed commit: shape (src/test/config/docs), adds/dels, suppressions found in the diff, assertion deltas | Your tools. The data layer |
 | `JOURNEY.md` | Your repo's history as a hero's journey: The Call, The Threshold, The Abyss, The Long Winter, the Whispered Bargains | You. Run `logbook journey` to see it in color |
 
 ## Usage
@@ -164,6 +164,11 @@ merged and reverted in 2024. The same agent with LOGBOOK.md in context
 started from the revert, inferred the repo's characteristic failure class
 from the do-not-retry list, and planned to pin the old failure with a test
 first. Full transcripts: [docs/does-it-change-agent-behavior.md](docs/does-it-change-agent-behavior.md).
+
+In a six-task internal experiment across history-dense planning tasks, the
+un-wired agent proposed already-reverted or already-rejected work in 4 of 6
+tasks; the wired agent in 0 of 6, for about +4.7k tokens of context. Method
+and honest scope: [docs/wrong-work-benchmark.md](docs/wrong-work-benchmark.md).
 
 ## Honest scope
 

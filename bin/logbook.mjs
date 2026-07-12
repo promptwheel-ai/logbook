@@ -3,7 +3,8 @@
 //
 // Nobody reads the git history: it's too big, and skimming a slice gives a
 // wrong picture. Code maps say where things are; nothing says what happened.
-// This reads a repo's whole history (read-only) and writes three artifacts:
+// This mines a repo's git history (read-only, newest 20k commits by default)
+// and writes three artifacts:
 //   LOGBOOK.md  — the digest a fresh agent session needs: hotspots,
 //                   do-not-retry (reverts), suppression ledger, fragile areas
 //   events.jsonl  — one structured event per commit (the data layer)
@@ -25,6 +26,9 @@ export const CONFIG_PAT =
 export const DOC_PAT = /\.(md|txt|rst|adoc)$|(^|\/)(LICENSE|CHANGELOG|CHANGES|NEWS|AUTHORS|CONTRIBUTORS|HISTORY|COPYING)([^/]*)?$|^docs\//i;
 export const GEN_PAT =
   /node_modules\/|\.map$|\.lock$|lock\.json$|\.gen\.|generated|dist\/|build\/|vendor\/|-?snapshot\.json$|\.snap$|(^|\/)next-env\.d\.ts$/i;
+// Bump whenever detector precision changes: a cached events.jsonl written by
+// an older extractor must trigger a full rebuild, not survive the upgrade.
+export const EXTRACTOR_VERSION = 2;
 export const SUPPRESS_PAT =
   /@ts-nocheck|@ts-ignore|eslint-disable|# *noqa|# *type: *ignore|\bit\.skip\b|\btest\.skip\b|\bxit\(|\bxdescribe\(|describe\.skip\b|@pytest\.mark\.skip\b|@unittest\.skip\b|\bt\.Skip\(|@Disabled\b|@Ignore\b|\[Ignore\b|Skip\s*=\s*"|#\[ignore|markTestSkipped\(|markTestIncomplete\(|except[^:]*: *pass/g;
 export const ASSERT_PAT = /assert|expect\(|\.toBe|\.toEqual|t\.Error|t\.Fatal/;
@@ -42,7 +46,11 @@ export const MENTOR_PAT = /claude\.md|\.claude|cursorrules|agents?\.md/i;
 // Inside a quoted string or regex-source it is a MENTION (pattern tables,
 // test fixtures, docs generators) — not a live directive. Approximate but
 // sound for directives: count unescaped quote chars before the match.
-export function isMention(line, idx) {
+// Directives that only function INSIDE a comment; every other idiom is call
+// or annotation syntax, so a match sitting after a comment opener is prose
+// ("// don't use describe.skip here"), not a live suppression.
+const COMMENT_DIRECTIVE = /@ts-nocheck|@ts-ignore|eslint-disable|noqa|type: *ignore/;
+export function isMention(line, idx, kind) {
   let sq = 0, dq = 0, bt = 0;
   for (let i = 0; i < idx; i++) {
     const c = line[i];
@@ -52,6 +60,8 @@ export function isMention(line, idx) {
     else if (c === "`") bt++;
   }
   if (sq % 2 === 1 || dq % 2 === 1 || bt % 2 === 1) return true;
+  if (kind !== undefined && !COMMENT_DIRECTIVE.test(kind) &&
+      /\/\/|\/\*|(^|\s)#(?!\[)|^\s*\*/.test(line.slice(0, idx))) return true;
   // a line that BEGINS with a bare regex literal (continuation of `X =` on
   // the previous line) — not // or /* comments
   const t = line.trimStart();
@@ -199,15 +209,19 @@ function scanWindow(patch, bySha, scanned) {
         continue;
       }
       if (!counted) continue;
+      // strip the diff +/- marker before matching: isMention's line-shape
+      // checks (bare regex literal at line start) never fire on a prefixed line
       if (line.startsWith("+") && !line.startsWith("+++")) {
-        for (const m of line.matchAll(SUPPRESS_PAT)) {
-          if (!isMention(line, m.index) && kindAllowedInFile(m[0], curFile)) supp.add(m[0].trim());
+        const body = line.slice(1);
+        for (const m of body.matchAll(SUPPRESS_PAT)) {
+          if (!isMention(body, m.index, m[0]) && kindAllowedInFile(m[0], curFile)) supp.add(m[0].trim());
         }
-        if (ASSERT_PAT.test(line)) ev.add_asserts++;
-        if (WEAK_ASSERT_PAT.test(line)) weakAdded++;
+        if (ASSERT_PAT.test(body)) ev.add_asserts++;
+        if (WEAK_ASSERT_PAT.test(body)) weakAdded++;
       } else if (line.startsWith("-") && !line.startsWith("---")) {
-        if (ASSERT_PAT.test(line)) ev.del_asserts++;
-        if (STRONG_ASSERT_PAT.test(line)) strongRemoved++;
+        const body = line.slice(1);
+        if (ASSERT_PAT.test(body)) ev.del_asserts++;
+        if (STRONG_ASSERT_PAT.test(body)) strongRemoved++;
       }
     }
     flushDowngrades();
@@ -235,6 +249,7 @@ export function loadEvents(repo, opts, onProgress) {
   cached = cached.filter((e) => !e.fullSha || (!seenSha.has(e.fullSha) && (seenSha.add(e.fullSha), true)));
   const newest = cached[0];
   if (!newest?.fullSha || newest.files === undefined || newest.downgrades === undefined) return null;
+  if (newest.xv !== EXTRACTOR_VERSION) return null; // stale extractor: full rebuild
   // compare against the newest NON-merge commit — the ledger records
   // --no-merges, so a merge commit at HEAD would otherwise force a pointless
   // incremental pass (and, pre-dedupe, compounding duplicates) on every load
@@ -389,9 +404,10 @@ export function analyze(events, touched) {
 function spanHuman(days) {
   if (days >= 365) return `${(days / 365).toFixed(1).replace(/\.0$/, "")} years`;
   if (days >= 60) return `${Math.round(days / 30)} months`;
-  return `${days} days`;
+  return `${days} day${days === 1 ? "" : "s"}`;
 }
 const fmt = (x) => x.toLocaleString("en-US");
+const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
 // Honest first-run expectation: a young or linear history has little
 // recoverable decision memory, and the digest should SAY so instead of
@@ -429,7 +445,7 @@ export function renderLogbookMd(name, A, shallow, capped, notes = []) {
     L.push(``, `_Historical signal: **${g.level}** (${g.parts}) — ${g.note}._`);
   }
   L.push(``);
-  L.push(`_${fmt(A.n)} commits (${A.spanStart} → ${A.spanEnd}), ${fmt(A.filesTouched)} files touched, ${A.authors} authors._`);
+  L.push(`_${fmt(A.n)} commit${A.n === 1 ? "" : "s"} (${A.spanStart} → ${A.spanEnd}), ${fmt(A.filesTouched)} file${A.filesTouched === 1 ? "" : "s"} touched, ${plural(A.authors, "author")}._`);
   if (shallow) L.push(`\n> ⚠️ Shallow clone — history is truncated. Run \`git fetch --unshallow\` for the full record.`);
   if (capped) L.push(`\n> ⚠️ Analysis capped at ${fmt(A.n)} commits (the repo has more). Re-run with \`-n <bigger>\` for the full record.`);
   L.push(``);
@@ -471,7 +487,7 @@ export function renderLogbookMd(name, A, shallow, capped, notes = []) {
     }
   }
   L.push(``);
-  L.push(`## Hotspots — source files (where the complexity lives)`);
+  L.push(`## Hotspots — most frequently changed source files`);
   for (const [f, c] of A.srcHot) L.push(`- ${f} — ${c} commits`);
   L.push(``);
   L.push(`## Hotspots — all files (incl. config/docs churn)`);
@@ -633,7 +649,7 @@ export function auditHead(repo, events) {
     if (/(^|\/)(third[-_]?party|externals?)(\/|$)/i.test(file)) continue;
     if (/(^|\/)(jasmine|mocha|chai|qunit|sinon)([-.][\w.]+)?\.js$/i.test(file)) continue;
     for (const hit of content.matchAll(SUPPRESS_PAT)) {
-      if (isMention(content, hit.index)) continue;
+      if (isMention(content, hit.index, hit[0])) continue;
       if (!kindAllowedInFile(hit[0], file)) continue;
       live.push({ file, line: Number(lineNo), kind: hit[0].trim() });
     }
@@ -990,11 +1006,17 @@ async function main() {
   mkdirSync(outDir, { recursive: true });
   const notes = loadAnnotations(outDir);
   writeFileSync(join(outDir, "LOGBOOK.md"), renderLogbookMd(name, A, shallow, capped, notes));
-  writeFileSync(join(outDir, "events.jsonl"), events.map((e) => JSON.stringify(e)).join("\n") + "\n");
+  writeFileSync(join(outDir, "events.jsonl"), events.map((e) => JSON.stringify({ ...e, xv: EXTRACTOR_VERSION })).join("\n") + "\n");
   writeFileSync(join(outDir, "JOURNEY.md"), renderJourneyMd(name, A, o.compare));
 
   if (o.cmd === "init") {
-    const block = `\n## Repo memory\nRead LOGBOOK.md (at the repo root) before proposing changes. If its\nHistorical signal is LOW, treat it as a hotspot map; otherwise check the\ndo-not-retry list and fragile areas before any large change. Refresh with:\nnpx -y @promptwheel/logbook\nCheck what is still silenced: npx -y @promptwheel/logbook audit\nWhen you investigate WHY a listed commit happened and verify it in the\ndiffs, persist it (replace SHA and the sentence; never annotate guesses):\nnpx -y @promptwheel/logbook annotate SHA "one specific sentence" --by codex\n`;
+    const block = `\n## Repo memory\nRead LOGBOOK.md (at the repo root) before proposing changes. If its\nHistorical signal is LOW, treat it as a hotspot map; otherwise check the\ndo-not-retry list and fragile areas before any large change. Refresh with:\nnpx -y @promptwheel/logbook\nCheck what is still silenced: npx -y @promptwheel/logbook audit\nWhen you investigate WHY a listed commit happened and verify it in the\ndiffs, persist it (replace SHA, the sentence, and MODEL with your own\nmodel name; never annotate guesses):\nnpx -y @promptwheel/logbook annotate SHA "one specific sentence" --by MODEL\n`;
+    // Earlier generated blocks hardcoded --by codex, which mis-attributes
+    // annotations from every other agent. Migrate ONLY on an exact match of
+    // the old generated text — a user-edited block is theirs, leave it alone.
+    const oldBlocks = [
+      `\n## Repo memory\nRead LOGBOOK.md (at the repo root) before proposing changes. If its\nHistorical signal is LOW, treat it as a hotspot map; otherwise check the\ndo-not-retry list and fragile areas before any large change. Refresh with:\nnpx -y @promptwheel/logbook\nCheck what is still silenced: npx -y @promptwheel/logbook audit\nWhen you investigate WHY a listed commit happened and verify it in the\ndiffs, persist it (replace SHA and the sentence; never annotate guesses):\nnpx -y @promptwheel/logbook annotate SHA "one specific sentence" --by codex\n`,
+    ];
     // AGENTS.md is the cross-tool convention — always ensure it exists;
     // also wire tool-specific files that are present. AGENTS.override.md
     // SHADOWS AGENTS.md in Codex, so it must be wired too when it exists.
@@ -1004,7 +1026,11 @@ async function main() {
       const p = join(repo, f);
       const cur = existsSync(p) ? readFileSync(p, "utf8") : "";
       if (cur.includes("## Repo memory")) {
-        if (!o.quiet) console.log(`  ${C.dim}=${C.r} ${f} already wired`);
+        const old = oldBlocks.find((b) => cur.includes(b));
+        if (old) {
+          writeFileSync(p, cur.replace(old, block));
+          if (!o.quiet) console.log(`  ${C.good}✓${C.r} updated ${C.bold}${f}${C.r}   ${C.dim}annotation attribution now uses your agent's own name${C.r}`);
+        } else if (!o.quiet) console.log(`  ${C.dim}=${C.r} ${f} already wired`);
       } else {
         writeFileSync(p, cur + (cur && !cur.endsWith("\n") ? "\n" : "") + block);
         if (!o.quiet) console.log(`  ${C.good}✓${C.r} wired ${C.bold}${f}${C.r}   ${C.dim}your agent reads the history from now on${C.r}`);
@@ -1013,7 +1039,7 @@ async function main() {
   }
   if (!o.quiet) {
     const g = signalGrade(A);
-    console.log(`  ${fmt(A.n)} commits${capped ? ` (capped — use -n for more)` : ""} · ${fmt(A.filesTouched)} files · ${spanHuman(A.spanDays)} · ${A.authors} authors`);
+    console.log(`  ${fmt(A.n)} commit${A.n === 1 ? "" : "s"}${capped ? ` (capped — use -n for more)` : ""} · ${fmt(A.filesTouched)} file${A.filesTouched === 1 ? "" : "s"} · ${spanHuman(A.spanDays)} · ${plural(A.authors, "author")}`);
     console.log(`  historical signal: ${g.level === "LOW" ? C.dim : g.level === "HIGH" ? C.good : ""}${g.level}${C.r} ${C.dim}(${g.parts})${C.r}\n`);
     if (g.level === "LOW" && o.cmd === "init")
       console.log(`  ${C.dim}note: ${g.note} — the wiring stays useful, but expect hotspots, not war stories, until this repo has more history${C.r}\n`);

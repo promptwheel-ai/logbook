@@ -1,8 +1,11 @@
-# The wrong-work benchmark
+# The wrong-work experiment
 
-Six repos (express, flask, zustand, fastify, svelte, axios), four context
-conditions (no context / structure map / LOGBOOK.md / both), identical
-planning tasks per repo, Sonnet agents, context supplied only via files.
+An internal six-task experiment. Six repos (express, flask, zustand,
+fastify, svelte, axios), four context conditions (no context / structure
+map / LOGBOOK.md / both), identical planning tasks per repo, Sonnet agents,
+context supplied only via files. The tasks were deliberately history-dense:
+each repo was chosen because its history contains a revert, a finished
+migration, or a rejected approach that a plan could collide with.
 Scoring: pre-registered 6-item checklists per repo — 3 history items
 (cites the relevant reverts; distrusts green where the ledger says to;
 avoids re-attempting reverted or already-finished work), 2 structure items,
@@ -32,17 +35,15 @@ With LOGBOOK.md in context: 0 of 6, at ~4.7k additional plan tokens.
 
 ## Honest scope
 
-n=6 repos, planning tasks (not merged code), famous repos — which
-understates the private-repo case, where model priors are near zero and
-the history file is the only source of these facts. Structure arm is a
+This is a summary of an internal experiment, not a reproducible benchmark
+release: the raw transcripts, per-repo prompts, checklists, and scoring
+artifacts are not currently published. n=6 repos, planning tasks (not
+merged code), tasks selected for history density — a repo without collisions
+in its history has nothing here to catch. All six are famous repos; whether
+the effect transfers to private repos is unknown — models have fewer priors
+about them (which should favor the history file), but their histories may
+also be thinner or noisier (which should weaken it). Structure arm is a
 deterministic surrogate for structure-mapping tools. Single grader against
 pre-registered criteria; a cross-vendor re-grade is planned. A full run
 was repeated end-to-end once: 27 of 28 arm-level scores reproduced; the
 one change was an improvement caused by a digest-ordering fix.
-
-Cross-vendor spot-check (Codex CLI, gpt-5.6-sol): with one AGENTS.md line
-and no mention of the logbook, its plan opened with "read LOGBOOK.md —
-especially do-not-retry" in 4 of 4 runs across effort tiers; without the
-file, 0 of 4 runs consulted the history at any effort, including a 191k-token
-maximum-effort run that read code, tests, and build configs but never ran
-git log.
