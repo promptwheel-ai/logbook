@@ -181,6 +181,11 @@ and honest scope: [docs/wrong-work-benchmark.md](docs/wrong-work-benchmark.md).
   zero-dependency tool that runs in seconds — and it's a deliberate division
   of labor: the logbook is the cheap, deterministic recall layer; the agent
   reading it is the precision layer that triages leads against the task.
+- It reads what survived. Squash and rebase erase in-branch attempts (a
+  tried-then-reverted change nets to zero in the squashed diff), and
+  uncommitted experiments were never visible at all. The logbook
+  complements an agent journaling during the work — `annotate` is the
+  bridge for exactly that — it does not replace it.
 - Shallow clones starve the analysis — the logbook will tell you to
   `git fetch --unshallow`.
 
