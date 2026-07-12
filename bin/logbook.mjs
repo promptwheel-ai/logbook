@@ -783,6 +783,8 @@ function usage() {
   ${C.bold}logbook${C.r} — turn git history into memory an agent can use
 
   usage:
+    logbook init [path]           analyze + wire AGENTS.md/CLAUDE.md/.cursorrules
+                                  so your agent reads the history every session
     logbook [path]                analyze repo → LOGBOOK.md, events.jsonl, JOURNEY.md
     logbook journey [path]        the repo's story, in color (writes nothing)
     logbook audit [path]          what is STILL suppressed in HEAD, and since when
@@ -812,6 +814,7 @@ export function parseArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "journey") o.cmd = "journey";
+    else if (a === "init") o.cmd = "init";
     else if (a === "audit") o.cmd = "audit";
     else if (a === "query") o.cmd = "query";
     else if (a === "annotate") o.cmd = "annotate";
@@ -929,6 +932,21 @@ async function main() {
   writeFileSync(join(outDir, "events.jsonl"), events.map((e) => JSON.stringify(e)).join("\n") + "\n");
   writeFileSync(join(outDir, "JOURNEY.md"), renderJourneyMd(name, A, o.compare));
 
+  if (o.cmd === "init") {
+    const block = `\n## Repo memory\nRead LOGBOOK.md before proposing changes — especially the do-not-retry\nlist and fragile areas. Refresh with: npx -y @promptwheel/logbook\nCheck what is still silenced: npx -y @promptwheel/logbook audit\nWhen you investigate WHY a listed commit happened, persist the finding:\nnpx -y @promptwheel/logbook annotate <sha> "<why>" --by <model>\n`;
+    const targets = ["AGENTS.md", "CLAUDE.md", ".cursorrules"].filter((f) => existsSync(join(repo, f)));
+    if (!targets.length) targets.push("AGENTS.md");
+    for (const f of targets) {
+      const p = join(repo, f);
+      const cur = existsSync(p) ? readFileSync(p, "utf8") : "";
+      if (cur.includes("LOGBOOK.md")) {
+        if (!o.quiet) console.log(`  ${C.dim}=${C.r} ${f} already wired`);
+      } else {
+        writeFileSync(p, cur + (cur && !cur.endsWith("\n") ? "\n" : "") + block);
+        if (!o.quiet) console.log(`  ${C.good}✓${C.r} wired ${C.bold}${f}${C.r}   ${C.dim}your agent reads the history from now on${C.r}`);
+      }
+    }
+  }
   if (!o.quiet) {
     console.log(`  ${fmt(A.n)} commits${capped ? ` (capped — use -n for more)` : ""} · ${fmt(A.filesTouched)} files · ${spanHuman(A.spanDays)} · ${A.authors} authors\n`);
     console.log(`  ${C.good}✓${C.r} wrote ${C.bold}LOGBOOK.md${C.r}   ${C.dim}hotspots · do-not-retry · suppression ledger${notes.length ? ` · ${notes.length} why${notes.length === 1 ? "" : "s"}` : ""}${C.r}`);

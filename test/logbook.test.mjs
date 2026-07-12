@@ -414,6 +414,31 @@ test("chunked diff scan is equivalent to single-pass", () => {
   assert.equal(out1, out2, "window size must not change results");
 });
 
+test("init wires the repo once, idempotently, into existing agent files", () => {
+  const d = mkdtempSync(join(tmpdir(), "logbook-init-"));
+  const g = (args) => execFileSync("git", ["-C", d, ...args], { env: { ...process.env,
+    GIT_AUTHOR_NAME: "H", GIT_AUTHOR_EMAIL: "h@x.io", GIT_COMMITTER_NAME: "H", GIT_COMMITTER_EMAIL: "h@x.io" } });
+  g(["init", "-q"]);
+  writeFileSync(join(d, "a.js"), "let x = 1;\n");
+  g(["add", "-A"]); g(["commit", "-q", "-m", "first"]);
+  // no agent files → creates AGENTS.md
+  const out = execFileSync(process.execPath, [CLI, "init", d], { encoding: "utf8" });
+  assert.match(out, /wired AGENTS\.md/);
+  const agents = readFileSync(join(d, "AGENTS.md"), "utf8");
+  assert.match(agents, /Repo memory/);
+  assert.match(agents, /do-not-retry/);
+  // second init → no duplicate block
+  execFileSync(process.execPath, [CLI, "init", d], { encoding: "utf8" });
+  assert.equal(readFileSync(join(d, "AGENTS.md"), "utf8").split("Repo memory").length - 1, 1, "idempotent");
+  // existing CLAUDE.md gets appended without touching its content
+  writeFileSync(join(d, "CLAUDE.md"), "# My rules\nBe nice.\n");
+  execFileSync(process.execPath, [CLI, "init", d], { encoding: "utf8" });
+  const claude = readFileSync(join(d, "CLAUDE.md"), "utf8");
+  assert.match(claude, /^# My rules/);
+  assert.match(claude, /Repo memory/);
+  rmSync(d, { recursive: true, force: true });
+});
+
 test("annotate: persists a why, merges into LOGBOOK.md with provenance, last write wins", () => {
   const o = parseArgs(["annotate", "abc123", "because reasons", repo, "--by", "tester"]);
   assert.equal(o.cmd, "annotate");

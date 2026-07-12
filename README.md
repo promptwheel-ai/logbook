@@ -15,8 +15,11 @@ every commit — and writes the short version: the file your agent reads
 first.
 
 ```
-npx @promptwheel/logbook
+npx -y @promptwheel/logbook init
 ```
+
+One line: it reads the history, writes the brief, and wires your agent
+(AGENTS.md, CLAUDE.md, or .cursorrules) to read it every session.
 
 ```
   1,326 commits · 322 files · 7.3 years · 354 authors
@@ -77,10 +80,11 @@ scan window.
 `--compare` uses a percentile table baked into the CLI from a 1,000-repo fleet
 run — still zero dependencies and zero network calls.
 
-## Wire it into your agent (30 seconds)
+## Wire it into your agent
 
-Commit LOGBOOK.md, then add this to your CLAUDE.md (or AGENTS.md /
-.cursorrules) so every fresh session reads the history without being asked:
+`logbook init` does this for you. Manually, it's one block in your
+CLAUDE.md (or AGENTS.md / .cursorrules) so every fresh session reads the
+history without being asked:
 
 ```markdown
 ## Repo memory
