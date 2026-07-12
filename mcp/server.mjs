@@ -54,7 +54,7 @@ function progressFor(extra) {
   }).catch(() => {});
 }
 
-const server = new McpServer({ name: "logbook", version: "0.3.1" });
+const server = new McpServer({ name: "logbook", version: "0.3.2" });
 
 server.registerTool(
   "logbook_digest",

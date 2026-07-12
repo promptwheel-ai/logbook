@@ -1,24 +1,32 @@
 {
   "name": "@promptwheel/logbook-mcp",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "MCP server for @promptwheel/logbook \u2014 git history as agent memory for MCP clients (Claude Desktop, Cursor, and any shell-less agent).",
   "type": "module",
   "bin": {
     "logbook-mcp": "server.mjs"
   },
   "files": [
-    "server.mjs"
+    "server.mjs",
+    "LICENSE"
   ],
   "engines": {
     "node": ">=18"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
-    "@promptwheel/logbook": "^0.7.3",
+    "@promptwheel/logbook": ">=0.7.3 <1",
     "zod": "^3.23.0"
   },
   "publishConfig": {
     "access": "public"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/promptwheel-ai/logbook.git",
+    "directory": "mcp"
+  },
+  "homepage": "https://github.com/promptwheel-ai/logbook/tree/master/mcp#readme",
+  "bugs": "https://github.com/promptwheel-ai/logbook/issues"
 }
