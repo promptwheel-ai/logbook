@@ -1,6 +1,6 @@
 # logbook
 
-[![ci](https://github.com/promptwheel-ai/logbook/actions/workflows/ci.yml/badge.svg)](https://github.com/promptwheel-ai/logbook/actions/workflows/ci.yml)
+[![ci](https://github.com/promptwheel-ai/logbook/actions/workflows/ci.yml/badge.svg)](https://github.com/promptwheel-ai/logbook/actions/workflows/ci.yml) [![npm](https://img.shields.io/npm/v/%40promptwheel%2Flogbook)](https://www.npmjs.com/package/@promptwheel/logbook)
 
 **Nobody reads the git history. It's too big — and skimming a slice gives
 you the wrong picture.**
