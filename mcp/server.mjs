@@ -56,10 +56,13 @@ function progressFor(extra) {
 
 const server = new McpServer({ name: "logbook", version: "0.3.0" });
 
-server.tool(
+server.registerTool(
   "logbook_digest",
-  "The repo's history digest: hotspots, do-not-retry reverts, suppression ledger, fragile areas, notable events, per-file history. Use when starting work in an unfamiliar repo, before a refactor or large change, or when deciding whether green tests can be trusted.",
-  { repo: z.string().describe("absolute path to the git repository") },
+  {
+    description: "The repo's history digest: hotspots, do-not-retry reverts, suppression ledger, fragile areas, notable events, per-file history. Use when starting work in an unfamiliar repo, before a refactor or large change, or when deciding whether green tests can be trusted.",
+    inputSchema: { repo: z.string().describe("absolute path to the git repository") },
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+  },
   async ({ repo }, extra) => {
     const { A } = pipeline(repo, progressFor(extra));
     // annotations load per-call (cheap file read) so fresh whys appear without
@@ -69,14 +72,17 @@ server.tool(
   }
 );
 
-server.tool(
+server.registerTool(
   "logbook_annotate",
-  "Persist WHY a commit happened (lazy enrichment). When you investigate a do-not-retry revert or a suppression — its failure mode, its cause — save the finding so the next session gets it for free instead of re-investigating. Judgments, not records: attributed and dated.",
   {
+    description: "Persist WHY a commit happened (lazy enrichment). When you investigate a do-not-retry revert or a suppression — its failure mode, its cause — save the finding so the next session gets it for free instead of re-investigating. Judgments, not records: attributed and dated.",
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    inputSchema: {
     repo: z.string().describe("absolute path to the git repository"),
     sha: z.string().describe("the commit being explained (any unique prefix)"),
     why: z.string().describe("the inferred cause, one sentence, specific (max 400 chars)"),
     by: z.string().optional().describe("who inferred it (model/agent name)"),
+    },
   },
   async ({ repo: repoArg, sha, why, by }) => {
     const repo = rootOf(repoArg);
@@ -86,10 +92,13 @@ server.tool(
   }
 );
 
-server.tool(
+server.registerTool(
   "logbook_audit",
-  "What is STILL suppressed in HEAD and since when (blame-dated), with re-silencing fight logs. Use when asked what tests are skipped, what debt is live, or whether a suppression keeps coming back.",
-  { repo: z.string().describe("absolute path to the git repository") },
+  {
+    description: "What is STILL suppressed in HEAD and since when (blame-dated), with re-silencing fight logs. Use when asked what tests are skipped, what debt is live, or whether a suppression keeps coming back.",
+    inputSchema: { repo: z.string().describe("absolute path to the git repository") },
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+  },
   async ({ repo }, extra) => {
     const { events } = pipeline(repo, progressFor(extra));
     const live = auditHead(rootOf(repo), events);
@@ -99,10 +108,12 @@ server.tool(
   }
 );
 
-server.tool(
+server.registerTool(
   "logbook_query",
-  "Filter the full commit-event record with precision (the digest truncates; this does not). Use for completeness questions: every revert touching a file, all assertion-weakening events since a date, etc.",
   {
+    description: "Filter the full commit-event record with precision (the digest truncates; this does not). Use for completeness questions: every revert touching a file, all assertion-weakening events since a date, etc.",
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    inputSchema: {
     repo: z.string().describe("absolute path to the git repository"),
     file: z.string().optional().describe("substring match against files touched"),
     revert: z.boolean().optional(),
@@ -112,6 +123,7 @@ server.tool(
     grep: z.string().optional().describe("substring match against commit subject"),
     since: z.string().optional(), until: z.string().optional(),
     limit: z.number().optional(),
+    },
   },
   async ({ repo, ...f }, extra) => {
     const { events } = pipeline(repo, progressFor(extra));
