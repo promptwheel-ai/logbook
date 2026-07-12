@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // @promptwheel/logbook — turn git history into memory an agent can use.
 //
-// Graphify maps where the code is; the logbook records what happened and why.
-// Reads a repo's git history (read-only) and writes three artifacts:
+// Nobody reads the git history: it's too big, and skimming a slice gives a
+// wrong picture. Code maps say where things are; nothing says what happened.
+// This reads a repo's whole history (read-only) and writes three artifacts:
 //   LOGBOOK.md  — the digest a fresh agent session needs: hotspots,
 //                   do-not-retry (reverts), suppression ledger, fragile areas
 //   events.jsonl  — one structured event per commit (the data layer)
