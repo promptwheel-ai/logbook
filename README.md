@@ -31,7 +31,9 @@ One line: it reads the history, writes the brief, and wires your agent
 
 ![logbook running on zustand: files written, then the colorized journey and Almanac](https://raw.githubusercontent.com/promptwheel-ai/logbook/master/logbook-journey.gif)
 
-Single file. Zero dependencies. Read-only — it never mutates your repo.
+Single file. Zero dependencies. It never touches your source code or git
+history — it writes only its own brief files (and `init` adds a block to
+your agent config).
 
 ## Why "logbook"
 

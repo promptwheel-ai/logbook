@@ -854,10 +854,16 @@ async function main() {
     return console.log(pkg.version);
   }
 
-  const repo = resolve(o.repo);
-  if (!existsSync(join(repo, ".git")) && !existsSync(join(repo, "HEAD"))) {
-    console.error(`  not a git repository: ${repo}`);
-    process.exit(1);
+  // resolve to the repo ROOT so running from a nested package dir works
+  // (and artifacts land at the root, where agents look for them)
+  let repo = resolve(o.repo);
+  {
+    const r = spawnSync("git", ["-C", repo, "rev-parse", "--show-toplevel"], { encoding: "utf8" });
+    if (r.status === 0 && r.stdout.trim()) repo = r.stdout.trim();
+    else if (!existsSync(join(repo, "HEAD"))) { // bare repos pass through
+      console.error(`  not a git repository: ${repo}`);
+      process.exit(1);
+    }
   }
   const name = basename(repo);
   const shallow = existsSync(join(repo, ".git", "shallow"));
@@ -934,8 +940,10 @@ async function main() {
 
   if (o.cmd === "init") {
     const block = `\n## Repo memory\nRead LOGBOOK.md before proposing changes — especially the do-not-retry\nlist and fragile areas. Refresh with: npx -y @promptwheel/logbook\nCheck what is still silenced: npx -y @promptwheel/logbook audit\nWhen you investigate WHY a listed commit happened, persist the finding:\nnpx -y @promptwheel/logbook annotate <sha> "<why>" --by <model>\n`;
-    const targets = ["AGENTS.md", "CLAUDE.md", ".cursorrules"].filter((f) => existsSync(join(repo, f)));
-    if (!targets.length) targets.push("AGENTS.md");
+    // AGENTS.md is the cross-tool convention — always ensure it exists;
+    // also wire whatever tool-specific files are already present
+    const targets = ["CLAUDE.md", ".cursorrules"].filter((f) => existsSync(join(repo, f)));
+    targets.unshift("AGENTS.md");
     for (const f of targets) {
       const p = join(repo, f);
       const cur = existsSync(p) ? readFileSync(p, "utf8") : "";

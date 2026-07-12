@@ -17,7 +17,9 @@ Cursor, and any MCP client).
   sha-keyed, attributed, dated — and merged into future digests as
   "why (inferred)" lines instead of being re-derived every session.
 
-## Setup (Claude Desktop / any MCP client)
+## Setup
+
+Claude Desktop (JSON config):
 
 ```json
 {
@@ -26,6 +28,18 @@ Cursor, and any MCP client).
   }
 }
 ```
+
+Codex CLI (TOML — `~/.codex/config.toml`, or per-project `.codex/config.toml`):
+
+```toml
+[mcp_servers.logbook]
+command = "npx"
+args = ["-y", "@promptwheel/logbook-mcp"]
+```
+
+or the one-liner: `codex mcp add logbook -- npx -y @promptwheel/logbook-mcp`.
+Exposing tools is not the same as using them — keep an AGENTS.md line telling
+the agent when to call logbook_digest.
 
 ## Performance
 
