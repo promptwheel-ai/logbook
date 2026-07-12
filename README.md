@@ -27,16 +27,12 @@ Single file. Zero dependencies. Read-only — it never mutates your repo.
 
 ## Why "logbook"
 
-A ship's logbook is the record of the voyage — every course change, every
-storm, every reef the crew found the hard way — kept so the next watch
-doesn't find it again. Your repo has been keeping one for years: it's the
-git history, and almost nobody reads it. This reads it back, and hands you
-the two pages that matter.
-
-(The word really is nautical: sailors measured speed by tossing a wooden log
-off the stern and counting the knots in the line as it paid out. The readings
-went in the log-book. That's why speed is in knots, and why programmers call
-them logs.)
+Because you need the SparkNotes of every decision that mattered in your git
+history, without pulling every book out of the library. And you couldn't
+anyway — for a third of the top repos on GitHub, the full log doesn't even
+fit in a context window. Your repo has been keeping the record for years;
+almost nobody reads it. This reads it back, and hands you the two pages
+that matter.
 
 ## The three artifacts
 
