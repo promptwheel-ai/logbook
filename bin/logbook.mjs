@@ -983,6 +983,10 @@ async function main() {
     console.error("  no commits found (empty repo, or --since/--until excluded everything)");
     process.exit(1);
   }
+  // one shape everywhere: cached events arrive stamped from disk, fresh ones
+  // don't — normalize before --json, query, analysis, and the ledger write,
+  // so the public JSON is identical regardless of cache state
+  events = events.map((e) => ({ ...e, xv: EXTRACTOR_VERSION }));
   const capped = events.length >= o.max;
   if (!reused) diffScan(repo, events, o);
   const touched = hotspots(repo, o);
@@ -1009,7 +1013,7 @@ async function main() {
   mkdirSync(outDir, { recursive: true });
   const notes = loadAnnotations(outDir);
   writeFileSync(join(outDir, "LOGBOOK.md"), renderLogbookMd(name, A, shallow, capped, notes));
-  writeFileSync(join(outDir, "events.jsonl"), events.map((e) => JSON.stringify({ ...e, xv: EXTRACTOR_VERSION })).join("\n") + "\n");
+  writeFileSync(join(outDir, "events.jsonl"), events.map((e) => JSON.stringify(e)).join("\n") + "\n");
   writeFileSync(join(outDir, "JOURNEY.md"), renderJourneyMd(name, A, o.compare));
 
   if (o.cmd === "init") {

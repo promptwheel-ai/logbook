@@ -611,6 +611,14 @@ test("extractor version gates the cache: stale ledgers rebuild clean", () => {
   const rebuilt = readFileSync(evPath, "utf8").trim().split("\n").map((l) => JSON.parse(l));
   assert.ok(rebuilt.every((e) => e.suppressions.length === 0), "stale classifications do not survive the upgrade");
   assert.ok(rebuilt.every((e) => e.xv === EXTRACTOR_VERSION));
+  // public JSON is cache-invariant: same repo + HEAD must serialize
+  // identically whether events come from the ledger or a fresh scan
+  const jCached = execFileSync(process.execPath, [CLI, d, "--json"], { encoding: "utf8" });
+  const jFresh = execFileSync(process.execPath, [CLI, d, "--json"],
+    { encoding: "utf8", env: { ...process.env, LOGBOOK_NO_CACHE: "1" } });
+  assert.equal(jCached, jFresh, "cached and no-cache --json are byte-identical");
+  const q = execFileSync(process.execPath, [CLI, "query", d, "--grep", "base"], { encoding: "utf8" });
+  assert.equal(JSON.parse(q.trim()).xv, EXTRACTOR_VERSION, "query events carry the schema version");
   rmSync(d, { recursive: true, force: true });
 });
 
