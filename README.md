@@ -27,10 +27,16 @@ Single file. Zero dependencies. Read-only — it never mutates your repo.
 
 ## Why "logbook"
 
-Sailors measured speed by throwing a wooden log off the stern and counting the
-knots in the line as it paid out. The record of those readings became the
-ship's log. That's why speed is in knots, and that's why programmers call them
-logs. Your repo has been keeping one for years. This reads it back.
+A ship's logbook is the record of the voyage — every course change, every
+storm, every reef the crew found the hard way — kept so the next watch
+doesn't find it again. Your repo has been keeping one for years: it's the
+git history, and almost nobody reads it. This reads it back, and hands you
+the two pages that matter.
+
+(The word really is nautical: sailors measured speed by tossing a wooden log
+off the stern and counting the knots in the line as it paid out. The readings
+went in the log-book. That's why speed is in knots, and why programmers call
+them logs.)
 
 ## The three artifacts
 
