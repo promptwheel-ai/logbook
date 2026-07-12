@@ -2,12 +2,17 @@
 
 [![ci](https://github.com/promptwheel-ai/logbook/actions/workflows/ci.yml/badge.svg)](https://github.com/promptwheel-ai/logbook/actions/workflows/ci.yml)
 
-**Graphify maps where the code is. The logbook records what happened and why.**
+**Nobody reads the git history. It's too big — and skimming a slice gives
+you the wrong picture.**
 
-A code graph can't tell you that the payments module was rewritten three times,
-that the auth approach was tried and reverted, or that a "fix" last quarter was
-actually a skipped test. That's the decision layer — the thing agents most need
-and least have. The logbook reads your git history and writes it down.
+Every feature gets added by someone who can read the code but not the
+decisions behind it: the module that was rewritten three times, the approach
+that was tried and reverted, the "fix" last quarter that was actually a
+skipped test. AI assistants inherit that blindness on every session, in
+every repo. Code maps (Graphify and friends) tell them where things are;
+nothing tells them what happened. The logbook reads the whole history —
+every commit — and writes the short version: the file your agent reads
+first.
 
 ```
 npx @promptwheel/logbook
