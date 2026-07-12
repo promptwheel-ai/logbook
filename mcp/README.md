@@ -44,10 +44,14 @@ the agent when to call logbook_digest.
 ## Performance
 
 Three cache layers: session memo per HEAD (repeat calls: 4ms), disk reuse
-of events.jsonl with incremental append (0.4s on a 20k-commit repo after
-any prior run), and windowed cold builds that emit MCP progress
-notifications — compliant clients reset their timeout on progress, so even
-the ~43s worst-case cold build cannot time out. Zero network calls; the
-analysis is git, running locally.
+of events.jsonl with incremental append (0.4s on the 20k-commit repo we
+measured — the ledger must exist, i.e. a CLI run wrote it; the MCP server
+itself keeps its cache in memory and does not write events.jsonl), and
+windowed cold builds that emit MCP progress notifications. Clients can opt
+in to resetting their timeout on progress (the official TypeScript SDK
+uses `resetTimeoutOnProgress: true`); without that opt-in, a cold build on
+a large repo can still hit the client's timeout — run the CLI once to
+create the ledger if that bites. Zero network calls; the analysis is git,
+running locally.
 
 MIT. The logbook records; the referee judges.

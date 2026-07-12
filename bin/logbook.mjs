@@ -148,6 +148,9 @@ export function collectEvents(repo, opts) {
       revert: REVERT_PAT.test(subject),
       fix: FIX_PAT.test(subject),
       suppressions: [], del_asserts: 0, add_asserts: 0, downgrades: 0,
+      // stamped at birth so every consumer (CLI, MCP, library callers) emits
+      // one schema regardless of cache state; kept last to match disk order
+      xv: EXTRACTOR_VERSION,
     });
   }
   return events;
@@ -159,7 +162,9 @@ export function diffScan(repo, events, opts, onProgress) {
   // The -p pass is the expensive phase. Run it in commit WINDOWS so memory is
   // bounded and long builds can report progress (MCP clients reset their
   // timeout on progress notifications).
-  const WINDOW = Number(process.env.LOGBOOK_WINDOW) || 4000;
+  // validate: a non-numeric, zero, or negative window would loop forever
+  const winEnv = Math.floor(Number(process.env.LOGBOOK_WINDOW));
+  const WINDOW = winEnv >= 1 ? winEnv : 4000;
   const total = events.length;
   let scanned = 0;
   const windows = [];
@@ -451,6 +456,7 @@ export function renderLogbookMd(name, A, shallow, capped, notes = []) {
   L.push(`_${fmt(A.n)} commit${A.n === 1 ? "" : "s"} (${A.spanStart} → ${A.spanEnd}), ${fmt(A.filesTouched)} file${A.filesTouched === 1 ? "" : "s"} touched, ${plural(A.authors, "author")}._`);
   if (shallow) L.push(`\n> ⚠️ Shallow clone — history is truncated. Run \`git fetch --unshallow\` for the full record.`);
   if (capped) L.push(`\n> ⚠️ Analysis capped at ${fmt(A.n)} commits (the repo has more). Re-run with \`-n <bigger>\` for the full record.`);
+  if (A.degraded) L.push(`\n> ⚠️ Diff-level scan FAILED (git log -p errored) — suppression and assertion columns are unmeasured, not clean. Subject-level signals only.`);
   L.push(``);
   L.push(`## What a fresh session should know`);
   if (A.srcHot.length)
@@ -460,7 +466,7 @@ export function renderLogbookMd(name, A, shallow, capped, notes = []) {
     L.push(`- ${A.reverts.length} reverted approaches — check the do-not-retry list before proposing big changes`);
   if (A.fragile.length)
     L.push(`- Fragile areas (fixed 2+ times): ${A.fragile.slice(0, 3).map(([k]) => k.trim()).join("; ")}`);
-  L.push(`- Oversight ledger: ${A.suspEvents.length} suppression commits, ${A.weaken.length} assertion-weakening commits`);
+  L.push(`- Oversight ledger: ${plural(A.suspEvents.length, "suppression commit")}, ${plural(A.weaken.length, "assertion-weakening commit")}`);
   if (A.notable.length) {
     L.push(``);
     L.push(`## Notable events (outliers a reader should see)`);
@@ -491,10 +497,10 @@ export function renderLogbookMd(name, A, shallow, capped, notes = []) {
   }
   L.push(``);
   L.push(`## Hotspots — most frequently changed source files`);
-  for (const [f, c] of A.srcHot) L.push(`- ${f} — ${c} commits`);
+  for (const [f, c] of A.srcHot) L.push(`- ${f} — ${plural(c, "commit")}`);
   L.push(``);
   L.push(`## Hotspots — all files (incl. config/docs churn)`);
-  for (const [f, c] of A.allHot) L.push(`- ${f} — ${c} commits`);
+  for (const [f, c] of A.allHot) L.push(`- ${f} — ${plural(c, "commit")}`);
   L.push(``);
   L.push(`## Do-not-retry: reverts / rollbacks (${A.reverts.length})`);
   if (notes.length)
@@ -503,7 +509,7 @@ export function renderLogbookMd(name, A, shallow, capped, notes = []) {
   if (A.reverts.length > 20) L.push(`- …${A.reverts.length - 20} earlier — full record in events.jsonl`);
   for (const e of A.reverts.slice(-20)) L.push(`- ${e.date} ${e.sha} ${e.subject}`, ...why(e));
   L.push(``);
-  L.push(`## Suppression ledger (${A.suspEvents.length} commits)`);
+  L.push(`## Suppression ledger (${plural(A.suspEvents.length, "commit")})`);
   if (A.suspEvents.length > 20) L.push(`- …${A.suspEvents.length - 20} earlier — full record in events.jsonl`);
   for (const e of A.suspEvents.slice(-20))
     L.push(`- ${e.date} ${e.sha} [${e.suppressions.slice(0, 3).join(" + ")}] ${e.subject}`, ...why(e));
@@ -554,7 +560,7 @@ export function journeyBeats(name, A) {
   if (A.reverts.length)
     B.push(["VIII", "Paths Unwalked", `${A.reverts.length} roads taken then untaken — first: "${A.reverts[0].subject.slice(0, 64)}"`, "info"]);
   if (A.last)
-    B.push(["IX", "The Road Goes On", `${A.last.date} — "${A.last.subject.slice(0, 64)}". ${fmt(A.n)} commits and counting.`, "good"]);
+    B.push(["IX", "The Road Goes On", `${A.last.date} — "${A.last.subject.slice(0, 64)}". ${fmt(A.n)} commit${A.n === 1 ? "" : "s"} and counting.`, "good"]);
   return B;
 }
 
@@ -591,7 +597,7 @@ export function almanacStats(A) {
 }
 
 export function renderJourneyMd(name, A, compare) {
-  const L = [`# ⚔️ The Journey of ${name}`, ``, `_An epic in ${fmt(A.n)} commits, as entered in the logbook._`, ``];
+  const L = [`# ⚔️ The Journey of ${name}`, ``, `_An epic in ${fmt(A.n)} commit${A.n === 1 ? "" : "s"}, as entered in the logbook._`, ``];
   for (const [num, title, body] of journeyBeats(name, A)) L.push(`**${num}. ${title}.** ${body}`, ``);
   L.push(`---`);
   const pcts = compare ? almanacPcts(A) : {};
@@ -608,7 +614,7 @@ const C = process.stdout.isTTY || process.env.FORCE_COLOR
 export function renderJourneyAnsi(name, A, compare) {
   const L = [];
   L.push(`\n  ${C.gold}${C.bold}⚔  The Journey of ${name}${C.r}`);
-  L.push(`  ${C.dim}an epic in ${fmt(A.n)} commits, as entered in the logbook${C.r}`);
+  L.push(`  ${C.dim}an epic in ${fmt(A.n)} commit${A.n === 1 ? "" : "s"}, as entered in the logbook${C.r}`);
   for (const [num, title, body, tone] of journeyBeats(name, A))
     L.push(`\n  ${C[tone]}${C.bold}${num}. ${title}${C.r}\n  ${C.dim}${body}${C.r}`);
   const stats = almanacStats(A);
@@ -635,8 +641,9 @@ export function auditHead(repo, events) {
     // one C-speed pass over the whole tree; PCRE shares the JS pattern source
     grep = git(repo, ["grep", "-nP", SUPPRESS_PAT.source, "HEAD"]);
   } catch (e) {
-    // exit 1 = no matches (fine); other failures leave grep empty
-    if (!/exit|no match/i.test(String(e.message))) grep = "";
+    // exit 1 = no matches: genuinely clean. Anything else (git without PCRE
+    // support, corrupt repo) must SURFACE — "unmeasurable" is not "clean".
+    if (e?.status !== 1) throw new Error(`audit: git grep failed — ${String(e?.message).split("\n")[0]}`);
   }
   for (const row of grep.split("\n")) {
     if (!row) continue;
@@ -988,9 +995,14 @@ async function main() {
   // so the public JSON is identical regardless of cache state
   events = events.map((e) => ({ ...e, xv: EXTRACTOR_VERSION }));
   const capped = events.length >= o.max;
-  if (!reused) diffScan(repo, events, o);
+  let scanOk = true;
+  if (!reused) scanOk = diffScan(repo, events, o);
   const touched = hotspots(repo, o);
   const A = analyze(events, touched);
+  if (!scanOk) {
+    A.degraded = true;
+    console.error("  ⚠ diff scan failed — suppression/assertion columns are unmeasured, not clean");
+  }
 
   if (o.json) {
     for (const e of events) console.log(JSON.stringify(e));
@@ -1032,6 +1044,12 @@ async function main() {
     for (const f of targets) {
       const p = join(repo, f);
       const cur = existsSync(p) ? readFileSync(p, "utf8") : "";
+      // a CLAUDE.md that imports AGENTS.md is wired through the import —
+      // appending the block would duplicate it in Claude's context
+      if (f === "CLAUDE.md" && !cur.includes("## Repo memory") && /(^|\n)@AGENTS\.md\s*(\n|$)/.test(cur)) {
+        if (!o.quiet) console.log(`  ${C.dim}=${C.r} ${f} already wired (imports AGENTS.md)`);
+        continue;
+      }
       if (cur.includes("## Repo memory")) {
         const old = oldBlocks.find((b) => cur.includes(b));
         if (old) {
@@ -1043,6 +1061,14 @@ async function main() {
         if (!o.quiet) console.log(`  ${C.good}✓${C.r} wired ${C.bold}${f}${C.r}   ${C.dim}your agent reads the history from now on${C.r}`);
       }
     }
+    // Claude Code reads CLAUDE.md, not AGENTS.md. A fresh repo gets the
+    // documented bridge (an @AGENTS.md import) so the wiring actually loads:
+    // https://docs.anthropic.com/en/docs/claude-code/memory
+    const claudePath = join(repo, "CLAUDE.md");
+    if (!existsSync(claudePath)) {
+      writeFileSync(claudePath, "@AGENTS.md\n");
+      if (!o.quiet) console.log(`  ${C.good}✓${C.r} wired ${C.bold}CLAUDE.md${C.r}   ${C.dim}bridges Claude Code to AGENTS.md${C.r}`);
+    }
   }
   if (!o.quiet) {
     const g = signalGrade(A);
@@ -1051,7 +1077,7 @@ async function main() {
     if (g.level === "LOW" && o.cmd === "init")
       console.log(`  ${C.dim}note: ${g.note} — the wiring stays useful, but expect hotspots, not war stories, until this repo has more history${C.r}\n`);
     console.log(`  ${C.good}✓${C.r} wrote ${C.bold}LOGBOOK.md${C.r}   ${C.dim}hotspots · do-not-retry · suppression ledger${notes.length ? ` · ${notes.length} why${notes.length === 1 ? "" : "s"}` : ""}${C.r}`);
-    console.log(`  ${C.good}✓${C.r} wrote ${C.bold}events.jsonl${C.r}   ${C.dim}${fmt(A.n)} structured events${C.r}`);
+    console.log(`  ${C.good}✓${C.r} wrote ${C.bold}events.jsonl${C.r}   ${C.dim}${fmt(A.n)} structured event${A.n === 1 ? "" : "s"}${C.r}`);
     console.log(`  ${C.good}✓${C.r} wrote ${C.bold}JOURNEY.md${C.r}     ${C.dim}the repo's story, told back to you${C.r}\n`);
     if (shallow) console.log(`  ${C.bad}⚠${C.r} ${C.dim}shallow clone — run git fetch --unshallow for the full record${C.r}\n`);
     console.log(`  ${C.dim}next:${C.r} logbook journey   ${C.dim}(see it in color)${C.r}\n`);

@@ -455,6 +455,10 @@ test("chunked diff scan is equivalent to single-pass", () => {
   const out2 = execFileSync(process.execPath, [CLI, "query", repo, "--suppress"],
     { encoding: "utf8", env: { ...process.env, LOGBOOK_NO_CACHE: "1", LOGBOOK_WINDOW: "100000" } });
   assert.equal(out1, out2, "window size must not change results");
+  // a bogus window must fall back to the default, not hang or change output
+  const out3 = execFileSync(process.execPath, [CLI, "query", repo, "--suppress"],
+    { encoding: "utf8", env: { ...process.env, LOGBOOK_NO_CACHE: "1", LOGBOOK_WINDOW: "-5" }, timeout: 30000 });
+  assert.equal(out1, out3, "invalid LOGBOOK_WINDOW falls back to default");
 });
 
 test("init wires the repo once, idempotently, into existing agent files", () => {
@@ -464,15 +468,19 @@ test("init wires the repo once, idempotently, into existing agent files", () => 
   g(["init", "-q"]);
   writeFileSync(join(d, "a.js"), "let x = 1;\n");
   g(["add", "-A"]); g(["commit", "-q", "-m", "first"]);
-  // no agent files → creates AGENTS.md
+  // no agent files → creates AGENTS.md + the Claude Code bridge
   const out = execFileSync(process.execPath, [CLI, "init", d], { encoding: "utf8" });
   assert.match(out, /wired AGENTS\.md/);
   const agents = readFileSync(join(d, "AGENTS.md"), "utf8");
   assert.match(agents, /Repo memory/);
   assert.match(agents, /do-not-retry/);
-  // second init → no duplicate block
+  // Claude Code reads CLAUDE.md, not AGENTS.md — fresh repos get the import bridge
+  assert.equal(readFileSync(join(d, "CLAUDE.md"), "utf8"), "@AGENTS.md\n", "bridge created");
+  // second init → no duplicate block, bridge untouched (wired via import)
   execFileSync(process.execPath, [CLI, "init", d], { encoding: "utf8" });
   assert.equal(readFileSync(join(d, "AGENTS.md"), "utf8").split("Repo memory").length - 1, 1, "idempotent");
+  assert.equal(readFileSync(join(d, "CLAUDE.md"), "utf8"), "@AGENTS.md\n", "bridge not re-blocked");
+  rmSync(join(d, "CLAUDE.md"));
   // existing CLAUDE.md gets appended without touching its content
   writeFileSync(join(d, "CLAUDE.md"), "# My rules\nBe nice.\n");
   execFileSync(process.execPath, [CLI, "init", d], { encoding: "utf8" });
@@ -599,6 +607,9 @@ test("extractor version gates the cache: stale ledgers rebuild clean", () => {
   const evPath = join(d, "events.jsonl");
   const stamped = readFileSync(evPath, "utf8").trim().split("\n").map((l) => JSON.parse(l));
   assert.ok(stamped.every((e) => e.xv === EXTRACTOR_VERSION), "every event carries the extractor version");
+  // stamped at BIRTH, not at write: library consumers (MCP) skip the CLI entrypoint
+  const born = collectEvents(d, { max: 20000, since: null, until: null });
+  assert.ok(born.every((e) => e.xv === EXTRACTOR_VERSION), "collectEvents stamps events directly");
   // simulate a pre-versioning ledger holding a stale false classification
   const doctored = stamped.map((e) => {
     const { xv, ...rest } = e;

@@ -54,7 +54,7 @@ function progressFor(extra) {
   }).catch(() => {});
 }
 
-const server = new McpServer({ name: "logbook", version: "0.3.2" });
+const server = new McpServer({ name: "logbook", version: "0.3.3" });
 
 server.registerTool(
   "logbook_digest",
@@ -111,7 +111,7 @@ server.registerTool(
 server.registerTool(
   "logbook_query",
   {
-    description: "Filter the full commit-event record with precision (the digest truncates; this does not). Use for completeness questions: every revert touching a file, all assertion-weakening events since a date, etc.",
+    description: "Filter the full commit-event record with precision (the digest truncates aggressively; this returns up to `limit` matches, default 100, with a count line that says when more exist). Use for completeness questions: every revert touching a file, all assertion-weakening events since a date, etc.",
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     inputSchema: {
     repo: z.string().describe("absolute path to the git repository"),
@@ -127,8 +127,13 @@ server.registerTool(
   },
   async ({ repo, ...f }, extra) => {
     const { events } = pipeline(repo, progressFor(extra));
-    const hits = queryEvents(events, f).slice(0, f.limit || 100);
-    return { content: [{ type: "text", text: hits.map((e) => JSON.stringify(e)).join("\n") || "no matching events" }] };
+    const all = queryEvents(events, f);
+    const hits = all.slice(0, f.limit || 100);
+    if (!hits.length) return { content: [{ type: "text", text: "no matching events" }] };
+    // never truncate silently: the count line is the contract
+    const note = `${all.length} matching event${all.length === 1 ? "" : "s"}, returned ${hits.length}` +
+      (all.length > hits.length ? " — TRUNCATED: pass a higher limit or narrower filters for the rest" : "");
+    return { content: [{ type: "text", text: note + "\n" + hits.map((e) => JSON.stringify(e)).join("\n") }] };
   }
 );
 

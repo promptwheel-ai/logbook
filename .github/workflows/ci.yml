@@ -22,3 +22,9 @@ jobs:
           node-version: ${{ matrix.node }}
       - run: git config --global user.email ci@test && git config --global user.name ci
       - run: npm test
+      # MCP behavioral test against THIS commit's core (.. installs the
+      # workspace package over the registry pin)
+      - run: npm i --no-save --no-audit --no-fund ..
+        working-directory: mcp
+      - run: npm test
+        working-directory: mcp
