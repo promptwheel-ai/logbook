@@ -58,9 +58,9 @@ that matter.
 npx @promptwheel/logbook              # analyze the current repo
 npx @promptwheel/logbook path/to/repo # or any repo
 npx @promptwheel/logbook journey      # the story, in color (writes nothing)
-npx @promptwheel/logbook journey --compare  # rank your almanac vs the top 1,000 GitHub repos
+npx @promptwheel/logbook journey --compare  # rank your almanac vs the top 2,500 GitHub repos
 npx @promptwheel/logbook audit        # what is STILL suppressed in HEAD, and since when
-npx @promptwheel/logbook annotate <sha> "<why>" --by <who>   # persist WHY a commit happened
+npx @promptwheel/logbook annotate SHA "why it happened" --by WHO   # persist WHY a commit happened
 npx @promptwheel/logbook --json       # events to stdout (writes nothing)
 
 # era-scoped archaeology
@@ -79,7 +79,7 @@ prior run on disk, 4ms on repeat calls in an MCP session. Escape hatches:
 `LOGBOOK_NO_CACHE=1` forces a full rebuild; `LOGBOOK_WINDOW=N` tunes the
 scan window.
 
-`--compare` uses a percentile table baked into the CLI from a 1,000-repo fleet
+`--compare` uses a percentile table baked into the CLI from a 2,500-repo fleet
 run — still zero dependencies and zero network calls.
 
 ## Wire it into your agent
@@ -94,7 +94,7 @@ Read LOGBOOK.md before proposing changes — especially the do-not-retry
 list and fragile areas. Refresh with: npx -y @promptwheel/logbook
 Check what is still silenced: npx -y @promptwheel/logbook audit
 When you investigate WHY a listed commit happened, persist the finding:
-npx -y @promptwheel/logbook annotate <sha> "<why>" --by <model>
+npx -y @promptwheel/logbook annotate SHA "one specific sentence" --by MODEL
 ```
 
 Passive beats invoked: the agent doesn't have to decide to look — the

@@ -614,8 +614,10 @@ export function auditHead(repo, events) {
       const b = git(repo, ["blame", "-L", `${item.line},${item.line}`, "--porcelain", "HEAD", "--", item.file]);
       const sha = b.slice(0, 8);
       const t = /author-time (\d+)/.exec(b);
+      const tz = /author-tz ([+-]\d{4})/.exec(b);
       if (t) {
-        item.since = new Date(Number(t[1]) * 1000).toISOString().slice(0, 10);
+        const off = tz ? (Number(tz[1].slice(0, 3)) * 60 + Number(tz[1][0] + tz[1].slice(3))) * 60000 : 0;
+        item.since = new Date(Number(t[1]) * 1000 + off).toISOString().slice(0, 10);
         item.sha = sha;
         return true;
       }
@@ -767,7 +769,9 @@ export function saveAnnotation(repo, dir, { sha, why, by }) {
   const r = spawnSync("git", ["-C", repo, "rev-parse", "--verify", "--quiet", `${sha}^{commit}`], { encoding: "utf8" });
   const full = (r.stdout || "").trim();
   if (r.status !== 0 || !full) return null;
-  const a = { sha: full, why: String(why).slice(0, 400), by: by || "agent", date: new Date().toISOString().slice(0, 10) };
+  const now = new Date();
+  const local = new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+  const a = { sha: full, why: String(why).slice(0, 400), by: by || "agent", date: local };
   writeFileSync(join(dir, "annotations.jsonl"), JSON.stringify(a) + "\n", { flag: "a" });
   return a;
 }
@@ -931,6 +935,10 @@ async function main() {
     return;
   }
 
+  if (o.cmd === "init" && o.out) {
+    console.error(`  init ignores --out: the wiring points agents at the repo root`);
+    o.out = null;
+  }
   const outDir = o.out ? resolve(o.out) : repo;
   mkdirSync(outDir, { recursive: true });
   const notes = loadAnnotations(outDir);
@@ -939,15 +947,16 @@ async function main() {
   writeFileSync(join(outDir, "JOURNEY.md"), renderJourneyMd(name, A, o.compare));
 
   if (o.cmd === "init") {
-    const block = `\n## Repo memory\nRead LOGBOOK.md before proposing changes — especially the do-not-retry\nlist and fragile areas. Refresh with: npx -y @promptwheel/logbook\nCheck what is still silenced: npx -y @promptwheel/logbook audit\nWhen you investigate WHY a listed commit happened, persist the finding:\nnpx -y @promptwheel/logbook annotate <sha> "<why>" --by <model>\n`;
+    const block = `\n## Repo memory\nRead LOGBOOK.md (at the repo root) before proposing changes — especially\nthe do-not-retry list and fragile areas. Refresh with:\nnpx -y @promptwheel/logbook\nCheck what is still silenced: npx -y @promptwheel/logbook audit\nWhen you investigate WHY a listed commit happened and verify it in the\ndiffs, persist it (replace SHA and the sentence; never annotate guesses):\nnpx -y @promptwheel/logbook annotate SHA "one specific sentence" --by codex\n`;
     // AGENTS.md is the cross-tool convention — always ensure it exists;
-    // also wire whatever tool-specific files are already present
-    const targets = ["CLAUDE.md", ".cursorrules"].filter((f) => existsSync(join(repo, f)));
+    // also wire tool-specific files that are present. AGENTS.override.md
+    // SHADOWS AGENTS.md in Codex, so it must be wired too when it exists.
+    const targets = ["AGENTS.override.md", "CLAUDE.md", ".cursorrules"].filter((f) => existsSync(join(repo, f)));
     targets.unshift("AGENTS.md");
     for (const f of targets) {
       const p = join(repo, f);
       const cur = existsSync(p) ? readFileSync(p, "utf8") : "";
-      if (cur.includes("LOGBOOK.md")) {
+      if (cur.includes("## Repo memory")) {
         if (!o.quiet) console.log(`  ${C.dim}=${C.r} ${f} already wired`);
       } else {
         writeFileSync(p, cur + (cur && !cur.endsWith("\n") ? "\n" : "") + block);

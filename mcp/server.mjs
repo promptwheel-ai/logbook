@@ -15,7 +15,18 @@ const DEFAULTS = { max: 20000, since: null, until: null };
 // via loadEvents; windowed full builds that report progress (clients reset
 // their timeout on progress notifications).
 const cache = new Map();
-function pipeline(repo, onProgress) {
+// every tool call resolves to the repo ROOT — nested paths otherwise write
+// artifacts (and annotations) into subdirectories and title the digest
+// after the subfolder
+function rootOf(repo) {
+  try {
+    const r = execFileSync("git", ["-C", repo, "rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim();
+    if (r) return r;
+  } catch { /* fall through */ }
+  return repo;
+}
+function pipeline(repoArg, onProgress) {
+  const repo = rootOf(repoArg);
   const head = execFileSync("git", ["-C", repo, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
   const hit = cache.get(repo);
   if (hit && hit.head === head) return hit;
@@ -43,7 +54,7 @@ function progressFor(extra) {
   }).catch(() => {});
 }
 
-const server = new McpServer({ name: "logbook", version: "0.2.0" });
+const server = new McpServer({ name: "logbook", version: "0.3.0" });
 
 server.tool(
   "logbook_digest",
@@ -53,7 +64,8 @@ server.tool(
     const { A } = pipeline(repo, progressFor(extra));
     // annotations load per-call (cheap file read) so fresh whys appear without
     // invalidating the HEAD-keyed event cache
-    return { content: [{ type: "text", text: renderLogbookMd(repo.split("/").pop(), A, false, A.n >= DEFAULTS.max, loadAnnotations(repo)) }] };
+    const root = rootOf(repo);
+    return { content: [{ type: "text", text: renderLogbookMd(root.split("/").pop(), A, false, A.n >= DEFAULTS.max, loadAnnotations(root)) }] };
   }
 );
 
@@ -66,7 +78,8 @@ server.tool(
     why: z.string().describe("the inferred cause, one sentence, specific (max 400 chars)"),
     by: z.string().optional().describe("who inferred it (model/agent name)"),
   },
-  async ({ repo, sha, why, by }) => {
+  async ({ repo: repoArg, sha, why, by }) => {
+    const repo = rootOf(repoArg);
     const a = saveAnnotation(repo, repo, { sha, why, by });
     if (!a) return { content: [{ type: "text", text: `not a commit in this repo: ${sha}` }], isError: true };
     return { content: [{ type: "text", text: `annotated ${a.sha.slice(0, 8)} (by ${a.by}, ${a.date}) — merged into future digests` }] };
@@ -79,7 +92,7 @@ server.tool(
   { repo: z.string().describe("absolute path to the git repository") },
   async ({ repo }, extra) => {
     const { events } = pipeline(repo, progressFor(extra));
-    const live = auditHead(repo, events);
+    const live = auditHead(rootOf(repo), events);
     const lines = live.slice(0, 40).map((x) =>
       `${x.kind}  ${x.file}:${x.line}  since ${x.since || "?"}${x.resilenced ? `  re-silenced x${x.resilenced} (${x.fight})` : ""}`);
     return { content: [{ type: "text", text: lines.length ? `${live.length} live suppressions\n` + lines.join("\n") : "clean — no live suppressions in src/test/config files" }] };

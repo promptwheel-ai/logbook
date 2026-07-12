@@ -436,6 +436,20 @@ test("init wires the repo once, idempotently, into existing agent files", () => 
   const claude = readFileSync(join(d, "CLAUDE.md"), "utf8");
   assert.match(claude, /^# My rules/);
   assert.match(claude, /Repo memory/);
+  // AGENTS.override.md shadows AGENTS.md in Codex — must get wired too
+  writeFileSync(join(d, "AGENTS.override.md"), "override rules\n");
+  execFileSync(process.execPath, [CLI, "init", d], { encoding: "utf8" });
+  assert.match(readFileSync(join(d, "AGENTS.override.md"), "utf8"), /Repo memory/);
+  // sentinel is the block header, not any LOGBOOK.md mention
+  writeFileSync(join(d, "AGENTS.md"), "Do not commit LOGBOOK.md\n");
+  execFileSync(process.execPath, [CLI, "init", d], { encoding: "utf8" });
+  assert.match(readFileSync(join(d, "AGENTS.md"), "utf8"), /Repo memory/,
+    "unrelated LOGBOOK.md mention must not suppress wiring");
+  // nested CWD: analysis resolves to the git root, artifacts land there
+  mkdirSync(join(d, "pkg", "sub"), { recursive: true });
+  execFileSync(process.execPath, [CLI, "."], { encoding: "utf8", cwd: join(d, "pkg", "sub") });
+  assert.ok(existsSync(join(d, "LOGBOOK.md")), "artifacts at root from nested cwd");
+  assert.ok(!existsSync(join(d, "pkg", "sub", "LOGBOOK.md")), "nothing written in nested dir");
   rmSync(d, { recursive: true, force: true });
 });
 
