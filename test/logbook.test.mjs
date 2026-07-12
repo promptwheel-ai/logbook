@@ -671,3 +671,33 @@ test("audit on a suppression-free repo is clean, not an error", () => {
   assert.match(out, /clean — no live suppressions/);
   rmSync(d, { recursive: true, force: true });
 });
+
+test("ticket-close pattern: annotating a MERGE commit renders in the digest", () => {
+  // two users on launch day described the same workflow: a reviewed
+  // lessons-learned line at ticket close, annotated onto the final commit.
+  // In PR workflows that commit is a MERGE — which the ledger excludes
+  // (--no-merges), so the why must surface via the leftover section.
+  const d = mkdtempSync(join(tmpdir(), "logbook-ticket-"));
+  const g = (args) => execFileSync("git", ["-C", d, ...args], { env: { ...process.env,
+    GIT_AUTHOR_NAME: "H", GIT_AUTHOR_EMAIL: "h@x.io", GIT_COMMITTER_NAME: "H", GIT_COMMITTER_EMAIL: "h@x.io" } });
+  g(["init", "-q"]);
+  writeFileSync(join(d, "a.js"), "let x = 1;\n");
+  g(["add", "-A"]); g(["commit", "-q", "-m", "base"]);
+  g(["checkout", "-q", "-b", "ticket-42"]);
+  writeFileSync(join(d, "a.js"), "let x = 2;\n");
+  g(["add", "-A"]); g(["commit", "-q", "-m", "fix ticket 42"]);
+  g(["checkout", "-q", "-"]);
+  g(["merge", "-q", "--no-ff", "--no-edit", "ticket-42"]);
+  const mergeSha = g(["rev-parse", "HEAD"]).toString().trim();
+  execFileSync(process.execPath, [CLI, d, "-q"], { encoding: "utf8" });
+  execFileSync(process.execPath,
+    [CLI, "annotate", mergeSha.slice(0, 12), "retry loop was env flake, not code — see ticket 42", d, "--by", "tester"],
+    { encoding: "utf8" });
+  const md = readFileSync(join(d, "LOGBOOK.md"), "utf8");
+  assert.match(md, /retry loop was env flake/, "merge-commit why renders");
+  assert.match(md, /Annotated commits/, "surfaces via the leftover section");
+  // and it survives a re-run (merge is not in the --no-merges ledger)
+  execFileSync(process.execPath, [CLI, d, "-q"], { encoding: "utf8" });
+  assert.match(readFileSync(join(d, "LOGBOOK.md"), "utf8"), /retry loop was env flake/);
+  rmSync(d, { recursive: true, force: true });
+});

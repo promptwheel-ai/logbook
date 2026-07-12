@@ -268,16 +268,21 @@ export function loadEvents(repo, opts, onProgress) {
   // incremental pass (and, pre-dedupe, compounding duplicates) on every load
   let head;
   try { head = git(repo, ["log", "-1", "--no-merges", "--pretty=%H"]).trim(); } catch { return null; }
+  // POSITION IS NOT TRUSTWORTHY: same-second commits (squash trains, agent
+  // bursts) make git log's traversal order deviate from newest-first, so the
+  // freshness and completeness checks test MEMBERSHIP, never array position.
   // completeness: a record written with a smaller -n window must not
   // masquerade as the full ledger — accept only cache-at-cap, or a cache
-  // whose oldest event is a root commit of the repo.
+  // that contains a root commit of the repo (i.e. reaches the beginning).
   if (cached.length < opts.max) {
     try {
-      const roots = git(repo, ["rev-list", "--max-parents=0", "HEAD"]).split("\n").filter(Boolean);
-      if (!roots.includes(cached[cached.length - 1].fullSha)) return null;
+      const roots = new Set(git(repo, ["rev-list", "--max-parents=0", "HEAD"]).split("\n").filter(Boolean));
+      if (!cached.some((e) => roots.has(e.fullSha))) return null;
     } catch { return null; }
   }
-  if (newest.fullSha === head) return { events: cached, mode: "cached" };
+  // fresh if the ledger already contains the newest non-merge commit —
+  // anything above it in the log is merges, which the ledger excludes
+  if (seenSha.has(head)) return { events: cached, mode: "cached" };
   // stale: try incremental append of only the new commits
   try {
     const fresh = collectEvents(repo, { ...opts, range: `${newest.fullSha}..HEAD` });
