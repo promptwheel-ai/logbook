@@ -26,6 +26,11 @@ npx — npm prefers the same-name local package and shadows the registry.
    `A.degraded` (surfaced in LOGBOOK.md); a failed `git grep` in audit
    throws instead of reporting clean.
 
+## Release policy
+
+Changes are caused by evidence, not comment velocity. Blockers ship
+immediately; noncritical fixes batch; features remain demand-gated.
+
 ## Release gate
 
 Root + mcp tests green → fresh self-run 0 suppressions → stale-ledger
