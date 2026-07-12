@@ -393,6 +393,20 @@ function spanHuman(days) {
 }
 const fmt = (x) => x.toLocaleString("en-US");
 
+// Honest first-run expectation: a young or linear history has little
+// recoverable decision memory, and the digest should SAY so instead of
+// letting "memory" overclaim a hotspot map.
+export function signalGrade(A) {
+  const reverts = A.reverts.length, fragile = A.fragile.length,
+    supp = A.suspEvents.length, weak = A.weaken.length;
+  const parts = `${reverts} revert${reverts === 1 ? "" : "s"} · ${fragile} repeated-fix area${fragile === 1 ? "" : "s"} · ${supp} suppression event${supp === 1 ? "" : "s"}`;
+  if (reverts === 0 && fragile === 0 && supp <= 1 && weak <= 1)
+    return { level: "LOW", parts, note: "little recoverable decision history — the digest is mostly a hotspot map" };
+  if (reverts >= 3 || fragile >= 3 || supp >= 10)
+    return { level: "HIGH", parts, note: "rich decision history: check do-not-retry before any large change" };
+  return { level: "MEDIUM", parts, note: "some decision history worth checking before refactors" };
+}
+
 export function renderLogbookMd(name, A, shallow, capped, notes = []) {
   const usedNotes = new Set();
   const why = (e) => {
@@ -403,6 +417,10 @@ export function renderLogbookMd(name, A, shallow, capped, notes = []) {
   };
   const L = [];
   L.push(`# The Logbook of ${name}`);
+  {
+    const g = signalGrade(A);
+    L.push(``, `_Historical signal: **${g.level}** (${g.parts}) — ${g.note}._`);
+  }
   L.push(``);
   L.push(`_${fmt(A.n)} commits (${A.spanStart} → ${A.spanEnd}), ${fmt(A.filesTouched)} files touched, ${A.authors} authors._`);
   if (shallow) L.push(`\n> ⚠️ Shallow clone — history is truncated. Run \`git fetch --unshallow\` for the full record.`);
@@ -987,7 +1005,11 @@ async function main() {
     }
   }
   if (!o.quiet) {
-    console.log(`  ${fmt(A.n)} commits${capped ? ` (capped — use -n for more)` : ""} · ${fmt(A.filesTouched)} files · ${spanHuman(A.spanDays)} · ${A.authors} authors\n`);
+    const g = signalGrade(A);
+    console.log(`  ${fmt(A.n)} commits${capped ? ` (capped — use -n for more)` : ""} · ${fmt(A.filesTouched)} files · ${spanHuman(A.spanDays)} · ${A.authors} authors`);
+    console.log(`  historical signal: ${g.level === "LOW" ? C.dim : g.level === "HIGH" ? C.good : ""}${g.level}${C.r} ${C.dim}(${g.parts})${C.r}\n`);
+    if (g.level === "LOW" && o.cmd === "init")
+      console.log(`  ${C.dim}note: ${g.note} — the wiring stays useful, but expect hotspots, not war stories, until this repo has more history${C.r}\n`);
     console.log(`  ${C.good}✓${C.r} wrote ${C.bold}LOGBOOK.md${C.r}   ${C.dim}hotspots · do-not-retry · suppression ledger${notes.length ? ` · ${notes.length} why${notes.length === 1 ? "" : "s"}` : ""}${C.r}`);
     console.log(`  ${C.good}✓${C.r} wrote ${C.bold}events.jsonl${C.r}   ${C.dim}${fmt(A.n)} structured events${C.r}`);
     console.log(`  ${C.good}✓${C.r} wrote ${C.bold}JOURNEY.md${C.r}     ${C.dim}the repo's story, told back to you${C.r}\n`);

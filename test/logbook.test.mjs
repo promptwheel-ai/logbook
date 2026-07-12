@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import {
   SUPPRESS_PAT, classifyFile, parseArgs, collectEvents, diffScan, hotspots, analyze,
   renderLogbookMd, renderJourneyMd, journeyBeats, almanacStats,
-  loadAnnotations, saveAnnotation, loadEvents, kindAllowedInFile,
+  loadAnnotations, saveAnnotation, loadEvents, kindAllowedInFile, signalGrade,
 } from "../bin/logbook.mjs";
 
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "bin", "logbook.mjs");
@@ -69,6 +69,19 @@ test("classifyFile buckets correctly", () => {
   assert.equal(classifyFile("README.md"), "doc");
   assert.equal(classifyFile("dist/bundle.js"), "gen");
   assert.equal(classifyFile("package-lock.json"), "gen");
+});
+
+test("signal grade: honest LOW on thin history, not LOW on the fixture", () => {
+  const opts = { max: 5000, since: null, until: null };
+  const events = collectEvents(repo, opts);
+  diffScan(repo, events, opts);
+  const A = analyze(events, hotspots(repo, opts));
+  assert.notEqual(signalGrade(A).level, "LOW", "fixture has reverts+fragile areas");
+  const thin = { reverts: [], fragile: [], suspEvents: [], weaken: [] };
+  const g = signalGrade(thin);
+  assert.equal(g.level, "LOW");
+  assert.match(renderLogbookMd("x", { ...A, reverts: [], fragile: [], suspEvents: [], weaken: [] },
+    false, false), /Historical signal: \*\*LOW\*\*/);
 });
 
 test("language-bound idioms only count in their own languages", () => {
