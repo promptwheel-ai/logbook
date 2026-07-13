@@ -12,14 +12,14 @@ skipped test. AI assistants inherit that blindness on every session, in
 every repo. Code maps (Graphify and friends) tell them where things are,
 not what happened. The logbook mines the existing git history — up to the
 newest 20,000 commits — and writes the short version: the file your agent
-reads first.
+is told to read first.
 
 ```
 npx -y @promptwheel/logbook init
 ```
 
-One line: it reads the history, writes the brief, and wires your agent
-(AGENTS.md, CLAUDE.md, or .cursorrules) to read it every session.
+One line: it reads the history, writes the brief, and wires your agent config
+(AGENTS.md, CLAUDE.md, or .cursorrules) so reading it is the default first step.
 
 ```
   1,326 commits · 322 files · 7.3 years · 354 authors
@@ -85,21 +85,31 @@ run — still zero dependencies and zero network calls.
 ## Wire it into your agent
 
 `logbook init` does this for you. Manually, it's one block in your
-CLAUDE.md (or AGENTS.md / .cursorrules) so every fresh session reads the
-history without being asked:
+CLAUDE.md (or AGENTS.md / .cursorrules) so every fresh session is instructed
+to read the history first:
 
 ```markdown
 ## Repo memory
-Read LOGBOOK.md before proposing changes. If its Historical signal is
-LOW, treat it as a hotspot map; otherwise check do-not-retry and fragile
-areas before any large change. Refresh with: npx -y @promptwheel/logbook
+Before planning or editing:
+1. Read LOGBOOK.md at the repo root completely before any history query.
+2. If Historical signal is LOW, use it only as a hotspot map. Otherwise,
+   inspect task-relevant do-not-retry entries and fragile areas.
+3. For completeness, query relevant paths before broad terms:
+   npx -y @promptwheel/logbook query --file path/to/file --revert
+   If output says TRUNCATED, narrow filters or raise --limit before concluding.
+4. Treat findings as leads, not verdicts. Verify claims with git show SHA and
+   confirm that the constraint still applies to the current tree.
+Refresh the record: npx -y @promptwheel/logbook
 Check what is still silenced: npx -y @promptwheel/logbook audit
-When you investigate WHY a listed commit happened, persist the finding:
+When you investigate WHY a listed commit happened and verify it in the
+diffs, persist it (replace SHA, the sentence, and MODEL with your own
+model name; never annotate guesses):
 npx -y @promptwheel/logbook annotate SHA "one specific sentence" --by MODEL
 ```
 
-Passive beats invoked: the agent doesn't have to decide to look — the
-history is simply in front of it.
+Wiring makes history the default first read instead of relying on the agent to
+invent git archaeology. It is still an instruction, not a guarantee; for
+high-risk work, confirm that the digest was actually consulted.
 
 ## Lazy enrichment: the record says WHAT, your agent persists WHY
 

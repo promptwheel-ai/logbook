@@ -28,8 +28,9 @@ export const GEN_PAT =
   /node_modules\/|\.map$|\.lock$|lock\.json$|\.gen\.|generated|dist\/|build\/|vendor\/|-?snapshot\.json$|\.snap$|(^|\/)next-env\.d\.ts$/i;
 // Bump whenever detector precision changes: a cached events.jsonl written by
 // an older extractor must trigger a full rebuild, not survive the upgrade.
-// (3: 0.7.10 could persist a partial ledger after a failed diff scan)
-export const EXTRACTOR_VERSION = 3;
+// (4: event paths are complete, not a six-path display sample, so --file
+// queries cannot silently miss wide commits)
+export const EXTRACTOR_VERSION = 4;
 // Default commit window (-n/--max). The ledger cache is only trusted at this
 // cap (or when it reaches a root commit), so the two sites must agree.
 export const DEFAULT_MAX = 20000;
@@ -122,7 +123,9 @@ function eraArgs(opts) {
 // ---------- layer 1: commit events (metadata + shape) ----------
 export function collectEvents(repo, opts) {
   const log = git(repo, [
-    "log", ...(opts.range ? [opts.range] : [`-${opts.max}`]), "--no-merges", "--date=short", ...eraArgs(opts),
+    // Read one extra commit so an exact-size history is not falsely reported
+    // as capped. Range scans are incremental and intentionally unbounded.
+    "log", ...(opts.range ? [opts.range] : [`-${opts.max + 1}`]), "--no-merges", "--date=short", ...eraArgs(opts),
     "--pretty=%x1e%H%x1f%h%x1f%ad%x1f%an%x1f%s", "--numstat",
   ]);
   const events = [];
@@ -142,7 +145,10 @@ export function collectEvents(repo, opts) {
       if (!m) continue;
       const cls = classifyFile(m[3]);
       shape[cls] = (shape[cls] || 0) + 1;
-      if (cls !== "doc" && cls !== "gen" && files.length < 6) files.push(m[3]);
+      // events.jsonl is the query layer, not a display sample. Keep every path
+      // (including docs/config/generated files) so --file is complete for the
+      // analyzed commit window. Digest renderers still choose compact subsets.
+      files.push(m[3]);
       if (m[1] !== "-") adds += Number(m[1]);
       if (m[2] !== "-") dels += Number(m[2]);
     }
@@ -158,6 +164,9 @@ export function collectEvents(repo, opts) {
       xv: EXTRACTOR_VERSION,
     });
   }
+  const capped = !opts.range && events.length > opts.max;
+  if (capped) events.length = opts.max;
+  Object.defineProperty(events, "capped", { value: capped, enumerable: false });
   return events;
 }
 
@@ -274,17 +283,18 @@ export function loadEvents(repo, opts, onProgress) {
   // completeness: a record written with a smaller -n window must not
   // masquerade as the full ledger — accept only cache-at-cap, or a cache
   // that contains a root commit of the repo (i.e. reaches the beginning).
-  if (cached.length < opts.max) {
-    try {
-      // merged unrelated histories have MULTIPLE roots — a complete ledger
-      // must reach every beginning, not just one of them
-      const roots = git(repo, ["rev-list", "--max-parents=0", "HEAD"]).split("\n").filter(Boolean);
-      if (!roots.every((r) => seenSha.has(r))) return null;
-    } catch { return null; }
-  }
+  let reachesEveryRoot;
+  try {
+    // Merged unrelated histories have MULTIPLE roots. Besides validating a
+    // short cache, root membership distinguishes exactly-at-max from capped.
+    const roots = git(repo, ["rev-list", "--max-parents=0", "HEAD"]).split("\n").filter(Boolean);
+    reachesEveryRoot = roots.every((r) => seenSha.has(r));
+  } catch { return null; }
+  if (cached.length < opts.max && !reachesEveryRoot) return null;
   // fresh if the ledger already contains the newest non-merge commit —
   // anything above it in the log is merges, which the ledger excludes
-  if (seenSha.has(head)) return { events: cached, mode: "cached" };
+  if (seenSha.has(head))
+    return { events: cached, mode: "cached", capped: cached.length >= opts.max && !reachesEveryRoot };
   // stale: try incremental append of only the new commits
   try {
     const fresh = collectEvents(repo, { ...opts, range: `${newest.fullSha}..HEAD` });
@@ -293,7 +303,10 @@ export function loadEvents(repo, opts, onProgress) {
     // the range can re-return cached side-branch commits (see self-heal note)
     const freshShas = new Set(fresh.map((e) => e.fullSha));
     const merged = fresh.concat(cached.filter((e) => !freshShas.has(e.fullSha))).slice(0, opts.max);
-    return { events: merged, mode: `incremental +${fresh.length}` };
+    const mergedShas = new Set(merged.map((e) => e.fullSha));
+    const roots = git(repo, ["rev-list", "--max-parents=0", "HEAD"]).split("\n").filter(Boolean);
+    const complete = roots.every((r) => mergedShas.has(r));
+    return { events: merged, mode: `incremental +${fresh.length}`, capped: merged.length >= opts.max && !complete };
   } catch { return null; } // rewritten history etc: full rebuild
 }
 
@@ -873,7 +886,7 @@ function usage() {
 
   usage:
     logbook init [path]           analyze + wire AGENTS.md/CLAUDE.md/.cursorrules
-                                  so your agent reads the history every session
+                                  so your agent is instructed to read history first
     logbook [path]                analyze repo → LOGBOOK.md, events.jsonl, JOURNEY.md
     logbook journey [path]        the repo's story, in color (writes nothing)
     logbook audit [path]          what is STILL suppressed in HEAD, and since when
@@ -978,7 +991,7 @@ async function main() {
       if (reused) {
         const A = analyze(reused.events, hotspots(repo, o));
         writeFileSync(join(dir, "LOGBOOK.md"),
-          renderLogbookMd(name, A, shallow, reused.events.length >= o.max, loadAnnotations(dir)));
+          renderLogbookMd(name, A, shallow, reused.capped, loadAnnotations(dir)));
         merged = true;
       }
     }
@@ -991,12 +1004,14 @@ async function main() {
 
   if (!o.quiet && !o.json) console.error(`\n  ${C.dim}reading git history…${C.r}`);
   const reused = loadEvents(repo, o);
-  let events;
+  let events, capped;
   if (reused) {
     events = reused.events;
+    capped = reused.capped;
     if (!o.quiet && !o.json) console.error(`  ${C.dim}(ledger ${reused.mode})${C.r}`);
   } else {
     events = collectEvents(repo, o);
+    capped = events.capped;
   }
   if (!events.length) {
     console.error("  no commits found (empty repo, or --since/--until excluded everything)");
@@ -1006,7 +1021,6 @@ async function main() {
   // don't — normalize before --json, query, analysis, and the ledger write,
   // so the public JSON is identical regardless of cache state
   events = events.map((e) => ({ ...e, xv: EXTRACTOR_VERSION }));
-  const capped = events.length >= o.max;
   let scanOk = true;
   if (!reused) scanOk = diffScan(repo, events, o);
   const touched = hotspots(repo, o);
@@ -1031,9 +1045,21 @@ async function main() {
       console.error("logbook: diff scan failed — the record would be incomplete, refusing to query it");
       process.exit(1);
     }
-    const hits = queryEvents(events, o).slice(0, o.limit || 200);
+    const limit = o.limit ?? 200;
+    if (!Number.isInteger(limit) || limit < 1) {
+      console.error("logbook: --limit must be a positive integer");
+      process.exit(1);
+    }
+    const all = queryEvents(events, o);
+    const hits = all.slice(0, limit);
     for (const e of hits) console.log(JSON.stringify(e));
-    console.error(`  ${hits.length} matching events${hits.length === (o.limit || 200) ? " (limit reached)" : ""}`);
+    const count = `${all.length} matching event${all.length === 1 ? "" : "s"}, returned ${hits.length}`;
+    const truncated = all.length > hits.length
+      ? " — TRUNCATED: narrow with --file/--revert or pass a higher --limit before concluding"
+      : "";
+    console.error(`  ${count}${truncated}`);
+    if (capped)
+      console.error(`  analysis capped at ${fmt(o.max)} commits — use -n for a larger window or --since/--until for another era`);
     return;
   }
 
@@ -1051,12 +1077,14 @@ async function main() {
   writeFileSync(join(outDir, "JOURNEY.md"), renderJourneyMd(name, A, o.compare));
 
   if (o.cmd === "init") {
-    const block = `\n## Repo memory\nRead LOGBOOK.md (at the repo root) before proposing changes. If its\nHistorical signal is LOW, treat it as a hotspot map; otherwise check the\ndo-not-retry list and fragile areas before any large change. Refresh with:\nnpx -y @promptwheel/logbook\nCheck what is still silenced: npx -y @promptwheel/logbook audit\nWhen you investigate WHY a listed commit happened and verify it in the\ndiffs, persist it (replace SHA, the sentence, and MODEL with your own\nmodel name; never annotate guesses):\nnpx -y @promptwheel/logbook annotate SHA "one specific sentence" --by MODEL\n`;
-    // Earlier generated blocks hardcoded --by codex, which mis-attributes
-    // annotations from every other agent. Migrate ONLY on an exact match of
-    // the old generated text — a user-edited block is theirs, leave it alone.
+    const block = `\n## Repo memory\nBefore planning or editing:\n1. Read LOGBOOK.md at the repo root completely before any history query.\n2. If Historical signal is LOW, use it only as a hotspot map. Otherwise,\n   inspect task-relevant do-not-retry entries and fragile areas.\n3. For completeness, query relevant paths before broad terms:\n   npx -y @promptwheel/logbook query --file path/to/file --revert\n   If output says TRUNCATED, narrow filters or raise --limit before concluding.\n4. Treat findings as leads, not verdicts. Verify claims with git show SHA and\n   confirm that the constraint still applies to the current tree.\nRefresh the record: npx -y @promptwheel/logbook\nCheck what is still silenced: npx -y @promptwheel/logbook audit\nWhen you investigate WHY a listed commit happened and verify it in the\ndiffs, persist it (replace SHA, the sentence, and MODEL with your own\nmodel name; never annotate guesses):\nnpx -y @promptwheel/logbook annotate SHA "one specific sentence" --by MODEL\n`;
+    // Migrate ONLY exact blocks generated by released versions. A user-edited
+    // block is theirs, so the header alone is never permission to rewrite it.
     const oldBlocks = [
+      `\n## Repo memory\nRead LOGBOOK.md (at the repo root) before proposing changes. If its\nHistorical signal is LOW, treat it as a hotspot map; otherwise check the\ndo-not-retry list and fragile areas before any large change. Refresh with:\nnpx -y @promptwheel/logbook\nCheck what is still silenced: npx -y @promptwheel/logbook audit\nWhen you investigate WHY a listed commit happened and verify it in the\ndiffs, persist it (replace SHA, the sentence, and MODEL with your own\nmodel name; never annotate guesses):\nnpx -y @promptwheel/logbook annotate SHA "one specific sentence" --by MODEL\n`,
       `\n## Repo memory\nRead LOGBOOK.md (at the repo root) before proposing changes. If its\nHistorical signal is LOW, treat it as a hotspot map; otherwise check the\ndo-not-retry list and fragile areas before any large change. Refresh with:\nnpx -y @promptwheel/logbook\nCheck what is still silenced: npx -y @promptwheel/logbook audit\nWhen you investigate WHY a listed commit happened and verify it in the\ndiffs, persist it (replace SHA and the sentence; never annotate guesses):\nnpx -y @promptwheel/logbook annotate SHA "one specific sentence" --by codex\n`,
+      `\n## Repo memory\nRead LOGBOOK.md (at the repo root) before proposing changes — especially\nthe do-not-retry list and fragile areas. Refresh with:\nnpx -y @promptwheel/logbook\nCheck what is still silenced: npx -y @promptwheel/logbook audit\nWhen you investigate WHY a listed commit happened and verify it in the\ndiffs, persist it (replace SHA and the sentence; never annotate guesses):\nnpx -y @promptwheel/logbook annotate SHA "one specific sentence" --by codex\n`,
+      `\n## Repo memory\nRead LOGBOOK.md before proposing changes — especially the do-not-retry\nlist and fragile areas. Refresh with: npx -y @promptwheel/logbook\nCheck what is still silenced: npx -y @promptwheel/logbook audit\nWhen you investigate WHY a listed commit happened, persist the finding:\nnpx -y @promptwheel/logbook annotate <sha> "<why>" --by <model>\n`,
     ];
     // AGENTS.md is the cross-tool convention — always ensure it exists;
     // also wire tool-specific files that are present. AGENTS.override.md
@@ -1076,11 +1104,11 @@ async function main() {
         const old = oldBlocks.find((b) => cur.includes(b));
         if (old) {
           writeFileSync(p, cur.replace(old, block));
-          if (!o.quiet) console.log(`  ${C.good}✓${C.r} updated ${C.bold}${f}${C.r}   ${C.dim}annotation attribution now uses your agent's own name${C.r}`);
+          if (!o.quiet) console.log(`  ${C.good}✓${C.r} updated ${C.bold}${f}${C.r}   ${C.dim}repo-memory workflow refreshed${C.r}`);
         } else if (!o.quiet) console.log(`  ${C.dim}=${C.r} ${f} already wired`);
       } else {
         writeFileSync(p, cur + (cur && !cur.endsWith("\n") ? "\n" : "") + block);
-        if (!o.quiet) console.log(`  ${C.good}✓${C.r} wired ${C.bold}${f}${C.r}   ${C.dim}your agent reads the history from now on${C.r}`);
+        if (!o.quiet) console.log(`  ${C.good}✓${C.r} wired ${C.bold}${f}${C.r}   ${C.dim}agent instructed to read history first${C.r}`);
       }
     }
     // Claude Code reads CLAUDE.md, not AGENTS.md. A fresh repo gets the

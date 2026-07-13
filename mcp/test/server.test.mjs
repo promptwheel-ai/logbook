@@ -83,6 +83,12 @@ test("raised limit returns everything, no truncation notice", async () => {
   assert.equal(rows.length, 105);
 });
 
+test("invalid query limits fail validation instead of slicing strangely", async () => {
+  const r = await rpc("tools/call", { name: "logbook_query", arguments: { repo, limit: 0 } });
+  assert.equal(r.result.isError, true);
+  assert.match(r.result.content[0].text, /limit|greater than or equal to 1/i);
+});
+
 test("query after a CLI-written ledger: identical schema (cache-invariant)", async () => {
   const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "node_modules", "@promptwheel", "logbook", "bin", "logbook.mjs");
   execFileSync(process.execPath, [CLI, repo, "-q"], { encoding: "utf8" });

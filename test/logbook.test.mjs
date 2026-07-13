@@ -1,6 +1,6 @@
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -382,6 +382,57 @@ test("query filters the record (mirrors the MCP experiment)", () => {
   assert.ok(out2.trim().split("\n").filter(Boolean).length >= 1, "file+suppress filter works");
 });
 
+test("query counts all matches and gives actionable truncation recovery", () => {
+  const truncated = spawnSync(process.execPath, [CLI, "query", repo, "--limit", "2"], { encoding: "utf8" });
+  assert.equal(truncated.status, 0);
+  assert.equal(truncated.stdout.trim().split("\n").length, 2, "stdout honors the requested limit");
+  assert.match(truncated.stderr,
+    /\d+ matching events, returned 2 — TRUNCATED: narrow with --file\/--revert or pass a higher --limit before concluding/);
+
+  const exact = spawnSync(process.execPath, [CLI, "query", repo, "--revert", "--limit", "1"], { encoding: "utf8" });
+  assert.equal(exact.status, 0);
+  assert.match(exact.stderr, /1 matching event, returned 1/);
+  assert.doesNotMatch(exact.stderr, /TRUNCATED/, "hitting the limit exactly is still complete");
+
+  const complete = spawnSync(process.execPath, [CLI, "query", repo, "--limit", "999"], { encoding: "utf8" });
+  assert.equal(complete.status, 0);
+  const count = complete.stdout.trim().split("\n").filter(Boolean).length;
+  assert.match(complete.stderr, new RegExp(`${count} matching events, returned ${count}`));
+  assert.doesNotMatch(complete.stderr, /TRUNCATED/, "an exact complete result is not called truncated");
+
+  const capped = spawnSync(process.execPath, [CLI, "query", repo, "-n", "2", "--limit", "100"], { encoding: "utf8" });
+  assert.equal(capped.status, 0);
+  assert.match(capped.stderr, /analysis capped at 2 commits.*--since\/--until/);
+  assert.ok(capped.stdout.trim().split("\n").every((line) => JSON.parse(line)),
+    "status notices stay on stderr; stdout remains pure JSONL");
+
+  const exactWindow = spawnSync(process.execPath, [CLI, "query", repo, "-n", "10", "--limit", "100"], { encoding: "utf8" });
+  assert.equal(exactWindow.status, 0);
+  assert.doesNotMatch(exactWindow.stderr, /analysis capped/, "exactly max commits is complete, not capped");
+
+  for (const invalid of ["0", "-1", "1.5", "nope"]) {
+    const bad = spawnSync(process.execPath, [CLI, "query", repo, "--limit", invalid], { encoding: "utf8" });
+    assert.notEqual(bad.status, 0, `invalid --limit ${invalid} fails`);
+    assert.match(bad.stderr, /--limit must be a positive integer/);
+  }
+});
+
+test("file query retains every path from wide commits", () => {
+  const d = mkdtempSync(join(tmpdir(), "logbook-wide-"));
+  const g = (args) => execFileSync("git", ["-C", d, ...args], { env: { ...process.env,
+    GIT_AUTHOR_NAME: "H", GIT_AUTHOR_EMAIL: "h@x.io", GIT_COMMITTER_NAME: "H", GIT_COMMITTER_EMAIL: "h@x.io" } });
+  g(["init", "-q"]);
+  for (let i = 1; i <= 8; i++) writeFileSync(join(d, `src-${i}.js`), `export const n = ${i};\n`);
+  writeFileSync(join(d, "later-path.md"), "history matters\n");
+  g(["add", "-A"]); g(["commit", "-q", "-m", "revert wide change"]);
+
+  const eighth = execFileSync(process.execPath, [CLI, "query", d, "--file", "src-8.js", "--revert"], { encoding: "utf8" });
+  assert.equal(JSON.parse(eighth.trim()).subject, "revert wide change", "seventh-plus source path remains queryable");
+  const doc = execFileSync(process.execPath, [CLI, "query", d, "--file", "later-path.md", "--revert"], { encoding: "utf8" });
+  assert.equal(JSON.parse(doc.trim()).subject, "revert wide change", "doc/config paths are queryable too");
+  rmSync(d, { recursive: true, force: true });
+});
+
 test("ledger cache: reuse, incremental append, window-poisoning guard", () => {
   const d = mkdtempSync(join(tmpdir(), "logbook-cache-"));
   const g = (args, date) => execFileSync("git", ["-C", d, ...args], { env: { ...process.env,
@@ -474,6 +525,10 @@ test("init wires the repo once, idempotently, into existing agent files", () => 
   const agents = readFileSync(join(d, "AGENTS.md"), "utf8");
   assert.match(agents, /Repo memory/);
   assert.match(agents, /do-not-retry/);
+  assert.match(agents, /Read LOGBOOK\.md.*completely before any history query/);
+  assert.match(agents, /query --file path\/to\/file --revert/);
+  assert.match(agents, /TRUNCATED.*narrow filters or raise --limit/);
+  assert.match(agents, /leads, not verdicts.*git show SHA/s);
   // Claude Code reads CLAUDE.md, not AGENTS.md — fresh repos get the import bridge
   assert.equal(readFileSync(join(d, "CLAUDE.md"), "utf8"), "@AGENTS.md\n", "bridge created");
   // second init → no duplicate block, bridge untouched (wired via import)
@@ -633,15 +688,20 @@ test("extractor version gates the cache: stale ledgers rebuild clean", () => {
   rmSync(d, { recursive: true, force: true });
 });
 
-test("init migrates the old --by codex block; user-edited blocks stay", () => {
+test("init migrates prior generated blocks; user-edited blocks stay", () => {
   const d = mkdtempSync(join(tmpdir(), "logbook-migrate-"));
   const g = (args) => execFileSync("git", ["-C", d, ...args], { env: { ...process.env,
     GIT_AUTHOR_NAME: "H", GIT_AUTHOR_EMAIL: "h@x.io", GIT_COMMITTER_NAME: "H", GIT_COMMITTER_EMAIL: "h@x.io" } });
   g(["init", "-q"]);
   writeFileSync(join(d, "a.js"), "let x = 1;\n");
   g(["add", "-A"]); g(["commit", "-q", "-m", "base"]);
+  const priorBlock = `\n## Repo memory\nRead LOGBOOK.md (at the repo root) before proposing changes. If its\nHistorical signal is LOW, treat it as a hotspot map; otherwise check the\ndo-not-retry list and fragile areas before any large change. Refresh with:\nnpx -y @promptwheel/logbook\nCheck what is still silenced: npx -y @promptwheel/logbook audit\nWhen you investigate WHY a listed commit happened and verify it in the\ndiffs, persist it (replace SHA, the sentence, and MODEL with your own\nmodel name; never annotate guesses):\nnpx -y @promptwheel/logbook annotate SHA "one specific sentence" --by MODEL\n`;
   const oldBlock = `\n## Repo memory\nRead LOGBOOK.md (at the repo root) before proposing changes. If its\nHistorical signal is LOW, treat it as a hotspot map; otherwise check the\ndo-not-retry list and fragile areas before any large change. Refresh with:\nnpx -y @promptwheel/logbook\nCheck what is still silenced: npx -y @promptwheel/logbook audit\nWhen you investigate WHY a listed commit happened and verify it in the\ndiffs, persist it (replace SHA and the sentence; never annotate guesses):\nnpx -y @promptwheel/logbook annotate SHA "one specific sentence" --by codex\n`;
+  const rootCodexBlock = `\n## Repo memory\nRead LOGBOOK.md (at the repo root) before proposing changes — especially\nthe do-not-retry list and fragile areas. Refresh with:\nnpx -y @promptwheel/logbook\nCheck what is still silenced: npx -y @promptwheel/logbook audit\nWhen you investigate WHY a listed commit happened and verify it in the\ndiffs, persist it (replace SHA and the sentence; never annotate guesses):\nnpx -y @promptwheel/logbook annotate SHA "one specific sentence" --by codex\n`;
+  const initialBlock = `\n## Repo memory\nRead LOGBOOK.md before proposing changes — especially the do-not-retry\nlist and fragile areas. Refresh with: npx -y @promptwheel/logbook\nCheck what is still silenced: npx -y @promptwheel/logbook audit\nWhen you investigate WHY a listed commit happened, persist the finding:\nnpx -y @promptwheel/logbook annotate <sha> "<why>" --by <model>\n`;
   writeFileSync(join(d, "AGENTS.md"), "# mine\n" + oldBlock);
+  writeFileSync(join(d, "AGENTS.override.md"), "# override\n" + rootCodexBlock);
+  writeFileSync(join(d, ".cursorrules"), "# mine too\n" + priorBlock);
   writeFileSync(join(d, "CLAUDE.md"), "## Repo memory\nmy own custom wording — hands off\n");
   const out = execFileSync(process.execPath, [CLI, "init", d], { encoding: "utf8" });
   assert.match(out, /updated AGENTS\.md/);
@@ -649,13 +709,35 @@ test("init migrates the old --by codex block; user-edited blocks stay", () => {
   assert.match(agents, /^# mine/, "user content above the block survives");
   assert.doesNotMatch(agents, /--by codex/, "cross-agent misattribution migrated away");
   assert.match(agents, /--by MODEL/);
+  assert.match(agents, /query --file path\/to\/file --revert/);
   assert.equal(agents.split("## Repo memory").length - 1, 1, "no duplicate block");
+  const cursor = readFileSync(join(d, ".cursorrules"), "utf8");
+  assert.match(cursor, /^# mine too/, "content above the prior neutral block survives");
+  assert.match(cursor, /query --file path\/to\/file --revert/,
+    "the immediately prior generated block migrates to the ordered workflow");
+  assert.equal(cursor.split("## Repo memory").length - 1, 1);
+  const override = readFileSync(join(d, "AGENTS.override.md"), "utf8");
+  assert.match(override, /^# override/);
+  assert.match(override, /query --file path\/to\/file --revert/,
+    "the pre-grade generated block also migrates");
   assert.equal(readFileSync(join(d, "CLAUDE.md"), "utf8"),
     "## Repo memory\nmy own custom wording — hands off\n", "edited block untouched");
   // a second init after migration is a no-op, not a re-migration
   execFileSync(process.execPath, [CLI, "init", d], { encoding: "utf8" });
   assert.equal(readFileSync(join(d, "AGENTS.md"), "utf8").split("## Repo memory").length - 1, 1);
   rmSync(d, { recursive: true, force: true });
+
+  const d2 = mkdtempSync(join(tmpdir(), "logbook-migrate-initial-"));
+  const g2 = (args) => execFileSync("git", ["-C", d2, ...args], { env: { ...process.env,
+    GIT_AUTHOR_NAME: "H", GIT_AUTHOR_EMAIL: "h@x.io", GIT_COMMITTER_NAME: "H", GIT_COMMITTER_EMAIL: "h@x.io" } });
+  g2(["init", "-q"]);
+  writeFileSync(join(d2, "a.js"), "let x = 1;\n");
+  g2(["add", "-A"]); g2(["commit", "-q", "-m", "base"]);
+  writeFileSync(join(d2, "AGENTS.md"), initialBlock);
+  execFileSync(process.execPath, [CLI, "init", d2], { encoding: "utf8" });
+  assert.match(readFileSync(join(d2, "AGENTS.md"), "utf8"), /query --file path\/to\/file --revert/,
+    "the initial 0.7.0 generated block migrates");
+  rmSync(d2, { recursive: true, force: true });
 });
 
 test("audit on a suppression-free repo is clean, not an error", () => {
