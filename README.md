@@ -168,7 +168,12 @@ context window at all. Measured across 400 repos:
 
 ## Does it actually change agent behavior?
 
-Yes — measurably. In an A/B test, an agent asked to plan a `useShallow`
+On history-dense tasks, measurably — with an honest boundary found by our
+own later testing: on a held-out sample of ten easier planning tasks, a
+well-instructed agent matched it using raw git alone, and the bottleneck
+was traced to the query/retrieval path (see the evidence-status note in
+[docs/wrong-work-benchmark.md](docs/wrong-work-benchmark.md)). In the
+original A/B test, an agent asked to plan a `useShallow`
 refactor in zustand walked straight into re-attempting a refactor that was
 merged and reverted in 2024. The same agent with LOGBOOK.md in context
 started from the revert, inferred the repo's characteristic failure class

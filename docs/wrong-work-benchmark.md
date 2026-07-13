@@ -47,3 +47,20 @@ deterministic surrogate for structure-mapping tools. Single grader against
 pre-registered criteria; a cross-vendor re-grade is planned. A full run
 was repeated end-to-end once: 27 of 28 arm-level scores reproduced; the
 one change was an improvement caused by a digest-ordering fix.
+
+## Evidence status (updated 2026-07-13)
+
+Read this experiment together with two later, stronger tests. A three-arm
+pilot on history-dense tasks favored the artifact (Logbook 7/12
+primary-success plans vs 3/12 for raw-git archaeology and 4/12 for a
+model-written memo, with zero wrong-work plans). A better-designed
+held-out screen (sealed fixtures, blinded raters, intention-to-treat)
+then found NO advantage over a strong raw-git instruction on ten new
+planning tasks — and traced the gap to retrieval, not the index: the
+ledgers contained every sealed lineage item, but task-facing queries
+delivered none of them before agents fell back to raw git.
+
+The calibrated claim across all evidence: valuable on sufficiently
+difficult, history-dense tasks; not universally better; currently limited
+by the query/retrieval path, which is being redesigned and will be
+re-tested on a fresh held-out sample before any claim here is upgraded.
