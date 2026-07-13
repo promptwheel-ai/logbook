@@ -1,0 +1,26 @@
+name: mcp-registry
+# Refreshes the MCP Registry listing for @promptwheel/logbook-mcp.
+# Manual trigger only: run AFTER the npm package is published, since the
+# registry validates the version against npm. OIDC proves the org
+# namespace (io.github.promptwheel-ai/*) — no secrets, no OAuth grants.
+on:
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    defaults:
+      run:
+        working-directory: mcp
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install mcp-publisher
+        run: |
+          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
+      - name: Authenticate (OIDC)
+        run: ./mcp-publisher login github-oidc
+      - name: Publish server.json to the registry
+        run: ./mcp-publisher publish
