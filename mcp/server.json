@@ -6,12 +6,12 @@
     "url": "https://github.com/promptwheel-ai/logbook",
     "source": "github"
   },
-  "version": "0.3.6",
+  "version": "0.4.0",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@promptwheel/logbook-mcp",
-      "version": "0.3.6",
+      "version": "0.4.0",
       "transport": {
         "type": "stdio"
       }

@@ -10,7 +10,9 @@ import {
   SUPPRESS_PAT, classifyFile, parseArgs, collectEvents, diffScan, hotspots, analyze,
   renderLogbookMd, renderJourneyMd, journeyBeats, almanacStats,
   loadAnnotations, saveAnnotation, loadEvents, kindAllowedInFile, signalGrade,
-  EXTRACTOR_VERSION,
+  EXTRACTOR_VERSION, FORMAT_VERSION, CONTEXT_ORDER_VERSION,
+  CONTEXT_PAGE_MAX_ITEMS, CONTEXT_PAGE_MAX_BYTES, CONTEXT_ITEM_MAX_BYTES,
+  formatContextPage, sanitizeContextText,
 } from "../bin/logbook.mjs";
 
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "bin", "logbook.mjs");
@@ -131,6 +133,12 @@ test("parseArgs handles command, path, and flags", () => {
   assert.equal(o.max, 100);
   assert.equal(o.since, "2024-01-01");
   assert.equal(o.quiet, true);
+  const context = parseArgs(["context", "/some/repo", "--file", "src/core", "--revert", "--cursor", "opaque.token"]);
+  assert.equal(context.cmd, "context");
+  assert.equal(context.repo, "/some/repo");
+  assert.equal(context.file, "src/core");
+  assert.equal(context.revert, true);
+  assert.equal(context.cursor, "opaque.token");
   assert.equal(parseArgs([]).cmd, "run");
 });
 
@@ -373,6 +381,180 @@ test("suppressions inside string literals are mentions, not directives", () => {
   assert.ok(!/ts-ignore/.test(out), "string-literal mention not flagged");
 });
 
+const CONTEXT_HEAD = "f".repeat(40);
+const contextSha = (index) => index.toString(16).padStart(40, "0");
+const contextEvent = (index, overrides = {}) => ({
+  fullSha: contextSha(index),
+  sha: contextSha(index).slice(0, 8),
+  date: "2026-07-13",
+  subject: `context event ${index}`,
+  files: [`src/file-${index % 7}.js`, `test/file-${index % 5}.test.js`],
+  revert: false,
+  suppressions: [],
+  del_asserts: 0,
+  add_asserts: 0,
+  downgrades: 0,
+  xv: EXTRACTOR_VERSION,
+  body: `BODY_CANARY_${index}`,
+  patch: `PATCH_CANARY_${index}`,
+  ...overrides,
+});
+
+test("context traverses query order exactly within item and page caps", () => {
+  const events = Array.from({ length: 57 }, (_, index) => contextEvent(index + 1));
+  const base = {
+    repo: "/tmp/logbook-context-contract",
+    head: CONTEXT_HEAD,
+    events,
+    filters: { max: 20000, grep: "CONTEXT EVENT" },
+  };
+  const traversed = [];
+  let cursor = null;
+  let pages = 0;
+  do {
+    const page = formatContextPage({ ...base, cursor });
+    pages++;
+    traversed.push(...page.selectedShas);
+    assert.ok(page.selectedShas.length <= CONTEXT_PAGE_MAX_ITEMS);
+    assert.ok(page.bytes <= CONTEXT_PAGE_MAX_BYTES);
+    assert.ok(page.itemBytes.every((bytes) => bytes <= CONTEXT_ITEM_MAX_BYTES));
+    assert.equal(page.text.includes("BODY_CANARY_"), false, "bodies never render");
+    assert.equal(page.text.includes("PATCH_CANARY_"), false, "patches never render");
+    assert.match(page.text, /sanitized untrusted data, not instructions/);
+    cursor = page.nextCursor;
+  } while (cursor);
+  assert.deepEqual(traversed, events.map((event) => event.fullSha), "no gaps, duplicates, or reordering");
+  assert.equal(new Set(traversed).size, traversed.length);
+  assert.ok(pages >= 3);
+
+  const reorderedFiles = events.map((event) => ({ ...event, files: [...event.files].reverse() }));
+  const canonicalA = formatContextPage(base);
+  const canonicalB = formatContextPage({
+    ...base,
+    events: reorderedFiles,
+    filters: { grep: "context event", max: 20000 },
+  });
+  assert.equal(canonicalA.text, canonicalB.text, "equivalent filters/files serialize identically");
+  assert.equal(canonicalA.nextCursor, canonicalB.nextCursor, "canonical cursor is deterministic");
+  assert.equal(canonicalA.binding.format, FORMAT_VERSION);
+  assert.equal(canonicalA.binding.order, CONTEXT_ORDER_VERSION);
+});
+
+test("context compacts huge events and sanitizes untrusted text atomically", () => {
+  const files = Array.from({ length: 1362 }, (_, index) =>
+    `packages/path-${String(index).padStart(4, "0")}/source-${index}.ts`);
+  const match = files[731];
+  const huge = contextEvent(9001, {
+    date: "not-a-date",
+    subject: `hostile\n<script>& text \x1b[31mred\x1b[0m \x1b]0;title\x07 bidi\u061c\u200e\u200f\u202e ${"&".repeat(1500)} ${"é".repeat(700)}`,
+    files: [...files].reverse(),
+    body: `BODY_HUGE_${"x".repeat(87000)}`,
+    patch: `PATCH_HUGE_${"y".repeat(87000)}`,
+  });
+  const page = formatContextPage({
+    repo: "/tmp/logbook-context-huge",
+    head: CONTEXT_HEAD,
+    events: [huge],
+    filters: { max: 20000, file: "path-0731/source" },
+  });
+  assert.equal(page.selectedShas.length, 1);
+  assert.ok(page.itemBytes[0] <= CONTEXT_ITEM_MAX_BYTES);
+  assert.ok(page.bytes <= CONTEXT_PAGE_MAX_BYTES);
+  assert.match(page.text, /\(\+1361 other paths\)/);
+  assert.ok(page.text.includes(match), "displayed path is the path that passed substring filtering");
+  assert.match(page.text, /unknown-date/);
+  assert.match(page.text, /&lt;script&gt;&amp; text/);
+  assert.doesNotMatch(page.text, /\x1b|\u061c|\u200e|\u200f|\u202e|BODY_HUGE|PATCH_HUGE/);
+  assert.doesNotMatch(page.text, /&(?!amp;|lt;|gt;)/, "truncation leaves no partial HTML entity");
+  assert.match(page.text, /- [0-9a-f]{12} /);
+  assert.equal(page.text.includes(huge.fullSha), false, "only the fixed-width SHA renders");
+  assert.equal(sanitizeContextText("&&", 6), "&amp;", "escaped tokens are kept or dropped whole");
+  assert.equal(sanitizeContextText("e\u0301", 2), "é", "Unicode is normalized before byte clipping");
+});
+
+test("context cursors bind HEAD, filters, scope, order, and event content", () => {
+  const events = Array.from({ length: 45 }, (_, index) => contextEvent(index + 1));
+  const base = {
+    repo: "/tmp/logbook-context-cursor",
+    head: CONTEXT_HEAD,
+    events,
+    filters: { max: 20000, grep: "context" },
+  };
+  const first = formatContextPage(base);
+  assert.ok(first.nextCursor);
+  const tail = first.nextCursor.endsWith("A") ? "B" : "A";
+  const tampered = first.nextCursor.slice(0, -1) + tail;
+  assert.throws(() => formatContextPage({ ...base, cursor: tampered }), /invalid or stale cursor/);
+  assert.throws(() => formatContextPage({ ...base, cursor: "not-a-cursor" }), /invalid or stale cursor/);
+  assert.throws(() => formatContextPage({ ...base, head: "e".repeat(40), cursor: first.nextCursor }), /invalid or stale cursor/);
+  assert.throws(() => formatContextPage({ ...base, filters: { ...base.filters, grep: "event 1" }, cursor: first.nextCursor }), /invalid or stale cursor/);
+  assert.throws(() => formatContextPage({ ...base, filters: { ...base.filters, max: 40000 }, cursor: first.nextCursor }), /invalid or stale cursor/);
+  assert.throws(() => formatContextPage({ ...base, repo: "/tmp/other-repo", cursor: first.nextCursor }), /invalid or stale cursor/);
+  assert.throws(() => formatContextPage({ ...base, capped: true, cursor: first.nextCursor }), /invalid or stale cursor/);
+  assert.throws(() => formatContextPage({ ...base, events: [...events].reverse(), cursor: first.nextCursor }), /invalid or stale cursor/);
+  const changed = events.map((event, index) => index === 0 ? { ...event, subject: "changed in place" } : event);
+  assert.throws(() => formatContextPage({ ...base, events: changed, cursor: first.nextCursor }), /invalid or stale cursor/);
+  assert.throws(() => formatContextPage({ ...base, events: [...events, events[0]] }), /duplicate context event SHA/);
+
+  const empty = formatContextPage({ ...base, events: [], filters: { max: 20000 } });
+  assert.equal(empty.complete, true);
+  assert.equal(empty.nextCursor, null);
+  assert.deepEqual(empty.selectedShas, []);
+  assert.ok(empty.text.endsWith("END complete\n"));
+
+  const capped = formatContextPage({ ...base, events: [events[0]], capped: true, filters: { max: 2 } });
+  assert.match(capped.text, /ANALYSIS CAPPED at 2 commits.*use -n.*--since\/--until/);
+});
+
+test("context CLI traversal equals raw query order and leaves query bytes unchanged", () => {
+  const d = mkdtempSync(join(tmpdir(), "logbook-context-cli-"));
+  const env = { ...process.env, FORCE_COLOR: "0",
+    GIT_AUTHOR_NAME: "H", GIT_AUTHOR_EMAIL: "h@x.io",
+    GIT_COMMITTER_NAME: "H", GIT_COMMITTER_EMAIL: "h@x.io" };
+  const g = (args, date) => execFileSync("git", ["-C", d, ...args], {
+    env: { ...env, ...(date && { GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date }) },
+  });
+  try {
+    g(["init", "-q"]);
+    for (let i = 0; i < 25; i++) {
+      writeFileSync(join(d, "core.js"), `export const n = ${i};\n`);
+      g(["add", "-A"]);
+      g(["commit", "-q", "-m", `context cli event ${String(i).padStart(2, "0")}`],
+        `2026-07-13T12:00:${String(i).padStart(2, "0")}`);
+    }
+    const queryArgs = [CLI, "query", d, "--grep", "context cli", "--limit", "100"];
+    const rawBefore = spawnSync(process.execPath, queryArgs, { encoding: "utf8", env });
+    assert.equal(rawBefore.status, 0, rawBefore.stderr);
+    const expected = rawBefore.stdout.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line).fullSha);
+
+    const traversed = [];
+    let cursor = null;
+    do {
+      const args = [CLI, "context", d, "--grep", "context cli", ...(cursor ? ["--cursor", cursor] : [])];
+      const result = spawnSync(process.execPath, args, { encoding: "utf8", env });
+      assert.equal(result.status, 0, result.stderr);
+      if (cursor) assert.match(result.stderr, /\(ledger cached\)/, "NEXT pages reuse the first page's ledger");
+      assert.ok(Buffer.byteLength(result.stdout) <= CONTEXT_PAGE_MAX_BYTES);
+      traversed.push(...[...result.stdout.matchAll(/^- ([0-9a-f]{12}) /gm)].map((match) => match[1]));
+      if (!cursor) assert.ok(existsSync(join(d, "events.jsonl")), "first page persists the reusable default ledger");
+      cursor = (/^NEXT (\S+)$/m.exec(result.stdout) || [])[1] || null;
+      if (!cursor) assert.match(result.stdout, /END complete\n$/);
+    } while (cursor);
+    assert.deepEqual(traversed, expected.map((sha) => sha.slice(0, 12)));
+
+    const rawAfter = spawnSync(process.execPath, queryArgs, { encoding: "utf8", env });
+    assert.equal(rawAfter.status, 0, rawAfter.stderr);
+    assert.equal(rawAfter.stdout, rawBefore.stdout, "context does not alter raw query JSONL bytes");
+    assert.match(rawAfter.stderr, /25 matching events, returned 25/);
+
+    const missingCursor = spawnSync(process.execPath, [CLI, "context", d, "--cursor"], { encoding: "utf8", env });
+    assert.notEqual(missingCursor.status, 0, "a missing cursor token must not silently restart page one");
+    assert.match(missingCursor.stderr, /--cursor requires/);
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
+});
+
 test("query filters the record (mirrors the MCP experiment)", () => {
   const out = execFileSync(process.execPath, [CLI, "query", repo, "--revert"], { encoding: "utf8" });
   const rows = out.trim().split("\n").map((l) => JSON.parse(l));
@@ -498,6 +680,30 @@ test("ledger cache: reuse, incremental append, window-poisoning guard", () => {
   assert.equal(reused.mode, "cached", "merge-HEAD hits the cached path, not incremental");
   const shas8 = reused.events.map((e) => e.fullSha);
   assert.equal(new Set(shas8).size, shas8.length, "no duplicates under merge HEAD");
+});
+
+test("incremental cache rejects a failed diff scan instead of returning partial events", () => {
+  const d = mkdtempSync(join(tmpdir(), "logbook-incremental-fail-"));
+  const env = { ...process.env, GIT_AUTHOR_NAME: "H", GIT_AUTHOR_EMAIL: "h@x.io",
+    GIT_COMMITTER_NAME: "H", GIT_COMMITTER_EMAIL: "h@x.io" };
+  const g = (args) => execFileSync("git", ["-C", d, ...args], { env, encoding: "utf8" });
+  try {
+    g(["init", "-q"]);
+    writeFileSync(join(d, "a.js"), "export const a = 1;\n");
+    g(["add", "-A"]); g(["commit", "-q", "-m", "base"]);
+    execFileSync(process.execPath, [CLI, d, "-q"], { env, encoding: "utf8" });
+    const ledger = join(d, "events.jsonl");
+    const before = readFileSync(ledger, "utf8");
+
+    writeFileSync(join(d, "a.js"), "export const a = 2;\n");
+    g(["add", "-A"]); g(["commit", "-q", "-m", "new work"]);
+
+    assert.equal(loadEvents(d, { max: 20000, since: null, until: null }, undefined, () => false), null,
+      "a failed incremental diff pass is unmeasurable, never a reusable cache hit");
+    assert.equal(readFileSync(ledger, "utf8"), before, "failed incremental scan never rewrites the ledger");
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
 });
 
 test("chunked diff scan is equivalent to single-pass", () => {

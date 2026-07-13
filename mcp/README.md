@@ -12,6 +12,10 @@ Cursor, and any MCP client).
   (blame-dated), with re-silencing fight logs.
 - **logbook_query** — precision filters over the full commit-event record
   (file / revert / suppress / weaken / downgrade / grep / since / until).
+- **logbook_context** — the same filtered order in deterministic pages capped
+  at 20 events and 8 KiB. Follow its opaque `NEXT` cursor until `END complete`;
+  it compacts delivery but does not rank relevance. Cursors reject changed
+  HEADs, filters, analysis windows, or event order instead of silently drifting.
 - **logbook_annotate** — persist WHY a commit happened (lazy enrichment):
   when the agent investigates a revert or suppression, the finding is kept —
   sha-keyed, attributed, dated — and merged into future digests as

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // @promptwheel/logbook-mcp — the logbook over MCP, for clients without a shell.
-// Four tools wrapping the zero-dep core: digest, annotate, audit, query.
+// Five tools wrapping the zero-dep core: digest, annotate, audit, query,
+// and bounded context pages.
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -8,6 +9,7 @@ import { execFileSync } from "node:child_process";
 import {
   collectEvents, diffScan, hotspots, analyze, renderLogbookMd,
   auditHead, queryEvents, loadEvents, loadAnnotations, saveAnnotation,
+  formatContextPage,
 } from "@promptwheel/logbook";
 
 const DEFAULTS = { max: 20000, since: null, until: null };
@@ -58,7 +60,7 @@ function progressFor(extra) {
   }).catch(() => {});
 }
 
-const server = new McpServer({ name: "logbook", version: "0.3.6" });
+const server = new McpServer({ name: "logbook", version: "0.4.0" });
 
 server.registerTool(
   "logbook_digest",
@@ -142,6 +144,38 @@ server.registerTool(
     // Keep every line after the count/status line as JSON: existing MCP
     // consumers parse rows that way, so cap metadata belongs on line one.
     return { content: [{ type: "text", text: note + capNote + (hits.length ? "\n" + hits.map((e) => JSON.stringify(e)).join("\n") : "") }] };
+  }
+);
+
+server.registerTool(
+  "logbook_context",
+  {
+    description: "Return the same filtered history order as logbook_query in compact, bounded pages for agent context. This is deterministic delivery, not relevance ranking. Follow NEXT cursors until END complete when completeness matters.",
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    inputSchema: {
+    repo: z.string().describe("absolute path to the git repository"),
+    file: z.string().optional().describe("substring match against files touched"),
+    revert: z.boolean().optional(),
+    suppress: z.boolean().optional().describe("only events that added suppressions"),
+    weaken: z.number().optional().describe("min net assertions removed"),
+    downgrade: z.number().optional().describe("min assertion downgrades"),
+    grep: z.string().optional().describe("substring match against commit subject"),
+    since: z.string().optional(), until: z.string().optional(),
+    cursor: z.string().optional().describe("opaque NEXT cursor from the previous page; rejects stale or changed queries"),
+    },
+  },
+  async ({ repo: repoArg, cursor, ...filters }, extra) => {
+    const repo = rootOf(repoArg);
+    const { events, capped, head } = pipeline(repo, progressFor(extra));
+    const page = formatContextPage({
+      repo,
+      head,
+      events,
+      filters: { ...filters, max: DEFAULTS.max },
+      capped,
+      cursor: cursor ?? null,
+    });
+    return { content: [{ type: "text", text: page.text }] };
   }
 );
 

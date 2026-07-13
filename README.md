@@ -60,6 +60,7 @@ npx @promptwheel/logbook path/to/repo # or any repo
 npx @promptwheel/logbook journey      # the story, in color (writes nothing)
 npx @promptwheel/logbook journey --compare  # rank your almanac vs the top 2,500 GitHub repos
 npx @promptwheel/logbook audit        # what is STILL suppressed in HEAD, and since when
+npx @promptwheel/logbook context --file path/to/file --revert  # bounded, paged query view
 npx @promptwheel/logbook annotate SHA "why it happened" --by WHO   # persist WHY a commit happened
 npx @promptwheel/logbook --json       # events to stdout (writes nothing)
 
@@ -68,6 +69,18 @@ npx @promptwheel/logbook --since 2024-01-01 --until 2025-01-01
 ```
 
 Options: `-n/--max N` (commit cap, default 20000) · `--compare` · `--out DIR` · `-q/--quiet`
+
+`context` preserves the filtered `query` order but serializes it into pages of
+at most 20 events and 8 KiB, with an opaque `NEXT` cursor and explicit
+`END complete`. It is a delivery format, not relevance ranking; use `query`
+when you need the raw JSONL interface. A cursor is bound to the repository
+HEAD, filters, analysis window, and ordered event set; if any changes, restart
+from the first page. On a default-window cold run, the CLI creates or refreshes
+`events.jsonl` after page one so `NEXT` pages reuse the scan; it never changes
+source or Git history. Non-default `-n` or `--since`/`--until` windows remain
+uncached, so each CLI page rescans that explicit window. Across 7,123 measured
+events, the 0.8 representation used 72.7% fewer bytes than the raw rows
+([method and scope](docs/context-format.md)).
 
 ## The ledger is batched
 

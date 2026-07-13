@@ -59,10 +59,11 @@ test("handshake and tool inventory", async () => {
   const init = await rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {},
     clientInfo: { name: "behavioral-test", version: "0.0.0" } });
   assert.equal(init.result.serverInfo.name, "logbook");
+  assert.equal(init.result.serverInfo.version, "0.4.0");
   child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
   const tools = await rpc("tools/list", {});
   assert.deepEqual(tools.result.tools.map((t) => t.name).sort(),
-    ["logbook_annotate", "logbook_audit", "logbook_digest", "logbook_query"]);
+    ["logbook_annotate", "logbook_audit", "logbook_context", "logbook_digest", "logbook_query"]);
 });
 
 test("fresh query (no ledger on disk): events carry xv, truncation is announced", async () => {
@@ -81,6 +82,39 @@ test("raised limit returns everything, no truncation notice", async () => {
   const [note, ...rows] = text.split("\n");
   assert.match(note, /^105 matching events, returned 105$/);
   assert.equal(rows.length, 105);
+});
+
+test("context traverses the raw query order exactly in bounded pages", async () => {
+  const raw = (await callTool("logbook_query", { repo, limit: 200 }))
+    .split("\n").slice(1).map((line) => JSON.parse(line).fullSha.slice(0, 12));
+  const seen = [];
+  let cursor;
+  let pages = 0;
+  do {
+    const text = await callTool("logbook_context", { repo, ...(cursor ? { cursor } : {}) });
+    assert.ok(Buffer.byteLength(text) <= 8192, "MCP context page obeys the byte cap");
+    const rows = [...text.matchAll(/^- ([0-9a-f]{12}) /gm)].map((match) => match[1]);
+    assert.ok(rows.length <= 20, "MCP context page obeys the item cap");
+    seen.push(...rows);
+    const next = text.match(/^NEXT (\S+)$/m);
+    cursor = next?.[1];
+    if (!cursor) assert.match(text, /^END complete$/m);
+    pages += 1;
+    assert.ok(pages < 20, "cursor traversal terminates");
+  } while (cursor);
+  assert.deepEqual(seen, raw, "compact traversal neither reorders nor drops raw query events");
+});
+
+test("context rejects tampered cursors", async () => {
+  const first = await callTool("logbook_context", { repo });
+  const cursor = first.match(/^NEXT (\S+)$/m)?.[1];
+  assert.ok(cursor, "fixture produces another page");
+  const r = await rpc("tools/call", {
+    name: "logbook_context",
+    arguments: { repo, cursor: cursor.slice(0, -1) + (cursor.endsWith("A") ? "B" : "A") },
+  });
+  assert.equal(r.result.isError, true);
+  assert.match(r.result.content[0].text, /invalid or stale cursor/i);
 });
 
 test("invalid query limits fail validation instead of slicing strangely", async () => {
@@ -110,4 +144,17 @@ test("digest renders through the same pipeline", async () => {
 test("audit on the clean fixture reports clean, not an error", async () => {
   const text = await callTool("logbook_audit", { repo });
   assert.match(text, /clean — no live suppressions/);
+});
+
+test("context cursor is rejected after repository HEAD changes", async () => {
+  const first = await callTool("logbook_context", { repo });
+  const cursor = first.match(/^NEXT (\S+)$/m)?.[1];
+  assert.ok(cursor, "fixture produces another page");
+  execFileSync("git", ["-C", repo, "commit", "-q", "--allow-empty", "-m", "context-head-change"], {
+    env: { ...process.env, GIT_AUTHOR_NAME: "H", GIT_AUTHOR_EMAIL: "h@x.io",
+      GIT_COMMITTER_NAME: "H", GIT_COMMITTER_EMAIL: "h@x.io" },
+  });
+  const r = await rpc("tools/call", { name: "logbook_context", arguments: { repo, cursor } });
+  assert.equal(r.result.isError, true);
+  assert.match(r.result.content[0].text, /invalid or stale cursor/i);
 });
