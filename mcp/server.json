@@ -1,7 +1,7 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.promptwheel-ai/logbook",
-  "description": "MCP server for @promptwheel/logbook \u2014 git history as agent memory for MCP clients (Claude Desktop, Cursor, and any shell-less agent).",
+  "description": "Local Git-history memory for coding agents: reverts, suppressions, hotspots, and annotations.",
   "repository": {
     "url": "https://github.com/promptwheel-ai/logbook",
     "source": "github"
