@@ -19,6 +19,8 @@ import {
   formatContextPage, formatOrderedContextPage, sanitizeContextText, queryEvents,
   managedWriteFile, sha256, stampArtifact, parseArtifactRecord, writeArtifactBundle,
   hasClaudeImport,
+  saveAcceptance, runCheckDiff, canonicalAnnotationHash, normalizeScope, scopeMatches,
+  loadAcceptances, collectChangedPaths, parseAnnotations,
 } from "../bin/logbook.mjs";
 
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "bin", "logbook.mjs");
@@ -1874,4 +1876,121 @@ test("multi-root history: a partial cache missing one root is repaired", () => {
   const rebuilt = execFileSync(process.execPath, [CLI, d, "--json"], { encoding: "utf8" }).trim().split("\n");
   assert.equal(rebuilt.length, 3, "default output includes all three events");
   rmSync(d, { recursive: true, force: true });
+});
+
+// ---------- accept + check --diff (alpha slice) ----------
+function mkAcceptRepo() {
+  const r = mkdtempSync(join(tmpdir(), "logbook-accept-"));
+  const env = { GIT_AUTHOR_NAME: "T", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "T", GIT_COMMITTER_EMAIL: "t@t" };
+  const g = (...a) => execFileSync("git", ["-C", r, ...a], { env, encoding: "utf8" });
+  g("init", "-q");
+  mkdirSync(join(r, "src")); mkdirSync(join(r, "src", "cache"));
+  writeFileSync(join(r, "src", "cache.ts"), "v1\n"); g("add", "-A"); g("commit", "-qm", "add cache");
+  writeFileSync(join(r, "src", "cache.ts"), "v2\n"); g("add", "-A"); g("commit", "-qm", "remove sync.Pool");
+  const sha = g("rev-parse", "HEAD").trim();
+  return { r, g, sha };
+}
+
+test("check: a DRAFT annotation never surfaces (no accepted decisions => not-configured, exit 0)", () => {
+  const { r, sha } = mkAcceptRepo();
+  saveAnnotation(r, r, { sha, why: "sync.Pool removed: cross-request leak", by: "codex" });
+  const out = runCheckDiff(r, {});
+  assert.equal(out.result, "not-configured");
+  assert.equal(out.exitCode, 0);
+  assert.match(out.message, /not "clean"/);
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("accept requires an existing annotation and >=1 path scope", () => {
+  const { r, sha } = mkAcceptRepo();
+  assert.match(saveAcceptance(r, r, { sha, paths: ["src/cache.ts"], by: "a" }).error, /no annotation/);
+  saveAnnotation(r, r, { sha, why: "why", by: "codex" });
+  assert.match(saveAcceptance(r, r, { sha, paths: [], by: "a" }).error, /path scope/);
+  assert.ok(saveAcceptance(r, r, { sha, paths: ["src/cache.ts"], by: "a" }).accepted);
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("check LOCAL: accepted decision surfaces only when a changed path hits its scope", () => {
+  const { r, g, sha } = mkAcceptRepo();
+  saveAnnotation(r, r, { sha, why: "sync.Pool removed", by: "codex" });
+  saveAcceptance(r, r, { sha, paths: ["src/cache.ts"], by: "alice" });
+  g("add", "annotations.jsonl", "annotation-reviews.jsonl"); g("commit", "-qm", "accept");
+  // touch the scoped file
+  writeFileSync(join(r, "src", "cache.ts"), "v3\n");
+  const hit = runCheckDiff(r, {});
+  assert.equal(hit.result, "leads"); assert.equal(hit.exitCode, 0);
+  assert.equal(hit.leads.length, 1);
+  assert.match(hit.message, /git show/);
+  // touch an unrelated file only
+  g("checkout", "--", "src/cache.ts"); writeFileSync(join(r, "src", "other.ts"), "x\n");
+  const miss = runCheckDiff(r, {});
+  assert.equal(miss.result, "no-leads"); assert.equal(miss.leads.length, 0);
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("re-annotating the same sha invalidates a prior acceptance (hash no longer matches)", () => {
+  const { r, g, sha } = mkAcceptRepo();
+  saveAnnotation(r, r, { sha, why: "original why", by: "codex" });
+  saveAcceptance(r, r, { sha, paths: ["src/cache.ts"], by: "alice" });
+  // author edits the annotation prose after acceptance
+  saveAnnotation(r, r, { sha, why: "DIFFERENT edited why", by: "codex" });
+  g("add", "annotations.jsonl", "annotation-reviews.jsonl"); g("commit", "-qm", "state");
+  writeFileSync(join(r, "src", "cache.ts"), "v3\n");
+  const out = runCheckDiff(r, {});
+  assert.equal(out.leads.length, 0);
+  assert.equal(out.metrics.ignoredDraftCount, 1); // drifted acceptance ignored, not surfaced
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("scope matching is exact: directory prefix works, duplicate basenames do not collide", () => {
+  assert.ok(scopeMatches("src/cache.ts", "src/cache.ts"));
+  assert.ok(!scopeMatches("src/cache.ts", "src/cache.ts.bak"));
+  assert.ok(!scopeMatches("foo", "foobar"));
+  assert.ok(scopeMatches("src/cache/", "src/cache/x.ts"));
+  assert.ok(scopeMatches("src/cache/", "src/cache"));
+  assert.ok(!scopeMatches("src/cache/", "src/cacheX/y"));
+  assert.equal(normalizeScope("../etc/passwd"), null);
+  assert.equal(normalizeScope("./src/a.ts"), "src/a.ts");
+  rmSync;
+});
+
+test("check RANGE reads accepted state from BASE ref, ignoring PR-HEAD acceptance", () => {
+  const { r, g, sha } = mkAcceptRepo();
+  const base = g("rev-parse", "HEAD").trim();
+  // commit acceptance ON A BRANCH (PR head), not on base
+  g("checkout", "-q", "-b", "pr");
+  saveAnnotation(r, r, { sha, why: "sync.Pool removed", by: "codex" });
+  saveAcceptance(r, r, { sha, paths: ["src/cache.ts"], by: "attacker" });
+  writeFileSync(join(r, "src", "cache.ts"), "v3\n");
+  g("add", "-A"); g("commit", "-qm", "pr: self-approve + change cache");
+  const head = g("rev-parse", "HEAD").trim();
+  const out = runCheckDiff(r, { base, head });
+  // base ref has NO acceptance => not-configured; the PR cannot approve its own warning
+  assert.equal(out.result, "not-configured");
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("unmeasurable: invalid range refs exit nonzero and never report clean", () => {
+  const { r } = mkAcceptRepo();
+  const out = runCheckDiff(r, { base: "deadbeef", head: "cafebabe" });
+  assert.equal(out.result, "unmeasurable");
+  assert.equal(out.exitCode, 1);
+  assert.match(out.message, /unmeasurable/);
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("metrics carry no identity/content fields; check leaves journals byte-identical", () => {
+  const { r, g, sha } = mkAcceptRepo();
+  saveAnnotation(r, r, { sha, why: "secret rationale text", by: "codex" });
+  saveAcceptance(r, r, { sha, paths: ["src/cache.ts"], by: "alice" });
+  g("add", "annotations.jsonl", "annotation-reviews.jsonl"); g("commit", "-qm", "accept");
+  const before = readFileSync(join(r, "annotations.jsonl"), "utf8") + readFileSync(join(r, "annotation-reviews.jsonl"), "utf8");
+  writeFileSync(join(r, "src", "cache.ts"), "v3\n");
+  const out = runCheckDiff(r, {});
+  const blob = JSON.stringify(out.metrics);
+  for (const forbidden of [sha, "secret rationale", "alice", "src/cache", r])
+    assert.ok(!blob.includes(forbidden), `metrics must not contain ${forbidden}`);
+  const after = readFileSync(join(r, "annotations.jsonl"), "utf8") + readFileSync(join(r, "annotation-reviews.jsonl"), "utf8");
+  assert.equal(after, before); // read-only
+  rmSync(r, { recursive: true, force: true });
 });

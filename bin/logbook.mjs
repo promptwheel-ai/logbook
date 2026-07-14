@@ -1565,6 +1565,186 @@ export function noteFor(notes, e) {
   return notes.find((a) => (e.fullSha && a.sha === e.fullSha) || a.sha.startsWith(e.sha)) || null;
 }
 
+// ---- Acceptance layer (check --diff alpha) --------------------------------
+// An annotation is an agent-inferred DRAFT and never surfaces in `check`.
+// Acceptance is a human attestation, scoped to explicit paths, that binds the
+// EXACT annotation bytes {sha,why,by,date}. Re-annotating the sha changes the
+// hash, so an old acceptance stops matching and silently stops surfacing —
+// acceptance can never drift onto edited prose. Nothing here is trust that a
+// biological human reviewed the card; it is an explicit, scoped, base-ref
+// attestation whose worth the field metrics measure.
+export function canonicalAnnotationHash(a) {
+  return sha256(JSON.stringify({ sha: a.sha, why: a.why, by: a.by, date: a.date }));
+}
+
+export function parseAnnotations(text) {
+  const bySha = new Map();
+  for (const line of String(text || "").split("\n")) {
+    if (!line.trim()) continue;
+    try { const a = JSON.parse(line); if (a.sha && a.why) bySha.set(a.sha, a); } catch { /* skip */ }
+  }
+  return bySha;
+}
+
+// A scope is an exact repo-relative file OR a trailing-slash directory prefix.
+// No globs/regex/basename/symbol parsing — those are a retrieval system, out of
+// alpha scope, and substring matching confuses foo/foobar.
+export function normalizeScope(raw) {
+  let p = String(raw).replace(/\\/g, "/").replace(/^\.\/+/, "").replace(/\/{2,}/g, "/");
+  p = p.replace(/^\/+/, "");
+  if (!p || p === "." || p.split("/").includes("..")) return null;
+  return p; // trailing slash preserved => directory prefix
+}
+
+export function scopeMatches(scope, path) {
+  if (scope.endsWith("/")) return path === scope.slice(0, -1) || path.startsWith(scope);
+  return path === scope;
+}
+
+export function loadAcceptances(text) {
+  const out = [];
+  for (const line of String(text || "").split("\n")) {
+    if (!line.trim()) continue;
+    let a; try { a = JSON.parse(line); } catch { continue; }
+    if (a && a.type === "acceptance" && typeof a.sha === "string" &&
+        typeof a.annotationSha256 === "string" && Array.isArray(a.paths) && a.paths.length)
+      out.push(a);
+  }
+  return out;
+}
+
+// Read a committed journal from a trust ref (BASE for a range, HEAD locally).
+// Returns null when absent at the ref (means "no accepted decisions", not an
+// error); throws only on a real git failure the caller reports as unmeasurable.
+export function readRefFile(repo, ref, filename) {
+  const r = spawnSync("git", ["-C", repo, "show", `${ref}:${filename}`], { encoding: "utf8", maxBuffer: 1 << 30 });
+  if (r.status === 0) return r.stdout;
+  return null; // absent at ref
+}
+
+export function saveAcceptance(repo, dir, { sha, paths, by, applicability }) {
+  const rev = spawnSync("git", ["-C", repo, "rev-parse", "--verify", "--quiet", `${sha}^{commit}`], { encoding: "utf8" });
+  const full = (rev.stdout || "").trim();
+  if (rev.status !== 0 || !full) return { error: `commit not found or unreachable: ${sha}` };
+  const ann = loadAnnotations(dir).find((a) => a.sha === full);
+  if (!ann) return { error: `no annotation to accept for ${full.slice(0, 12)} — run: logbook annotate ${full.slice(0, 12)} "<why>" first` };
+  const scopes = [...new Set((paths || []).map(normalizeScope).filter(Boolean))];
+  if (!scopes.length) return { error: "acceptance requires at least one --file or --dir path scope" };
+  const app = applicability || "active";
+  if (!["active", "uncertain", "retired"].includes(app)) return { error: "applicability must be active | uncertain | retired" };
+  const now = new Date();
+  const local = new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+  const ev = { type: "acceptance", sha: full, annotationSha256: canonicalAnnotationHash(ann),
+    paths: scopes, applicability: app, acceptedBy: by || "human", acceptedAt: local };
+  const p = join(realpathSync(dir), "annotation-reviews.jsonl");
+  if (existsSync(p)) {
+    const st = lstatSync(p);
+    if (!st.isFile() || st.isSymbolicLink() || st.nlink > 1)
+      throw new Error(`refusing acceptance append through non-private regular file: ${p}`);
+  }
+  writeFileSync(p, JSON.stringify(ev) + "\n", { flag: "a" });
+  return { accepted: ev, annotation: ann };
+}
+
+// Changed paths: local (tracked-vs-HEAD + untracked non-ignored) or a
+// rename-aware range (both sides of a rename retained).
+export function collectChangedPaths(repo, { base, head }) {
+  const paths = new Set();
+  if (base && head) {
+    let out;
+    try { out = git(repo, ["diff", "--name-status", "-z", `${base}...${head}`]); }
+    catch (e) { return { error: `invalid range ${base}...${head}: ${e.message}` }; }
+    const parts = out.split("\0");
+    for (let i = 0; i < parts.length;) {
+      const status = parts[i];
+      if (!status) { i++; continue; }
+      if (status[0] === "R" || status[0] === "C") { if (parts[i + 1]) paths.add(parts[i + 1]); if (parts[i + 2]) paths.add(parts[i + 2]); i += 3; }
+      else { if (parts[i + 1]) paths.add(parts[i + 1]); i += 2; }
+    }
+    return { mode: "range", paths: [...paths] };
+  }
+  let out;
+  try { out = git(repo, ["status", "--porcelain=1", "-z", "--untracked-files=all"]); }
+  catch (e) { return { error: e.message }; }
+  const parts = out.split("\0");
+  for (let i = 0; i < parts.length; i++) {
+    const entry = parts[i];
+    if (!entry) continue;
+    const status = entry.slice(0, 2), path = entry.slice(3);
+    if (path) paths.add(path);
+    if (status[0] === "R" || status[1] === "R") { if (parts[i + 1]) { paths.add(parts[i + 1]); i++; } } // rename source in next record
+  }
+  return { mode: "local", paths: [...paths] };
+}
+
+// The deterministic diff-time check. Read-only; never mutates the repo. Trust
+// state comes from the trust ref (BASE for a range, HEAD locally), never PR
+// HEAD, so a change cannot approve its own warning data.
+export function runCheckDiff(repo, { base, head } = {}) {
+  const mode = base && head ? "range" : "local";
+  const trustRef = mode === "range" ? base : "HEAD";
+  const m = { schema: "logbook-check-metrics-v1", mode, result: "unmeasurable",
+    changedPathCount: 0, acceptedDecisionCount: 0, matchedDecisionCount: 0,
+    leadCount: 0, ignoredDraftCount: 0, unmeasurableCount: 0 };
+
+  const changed = collectChangedPaths(repo, { base, head });
+  if (changed.error) { m.unmeasurableCount = 1; return { exitCode: 1, result: "unmeasurable", metrics: m, message: `unmeasurable: ${changed.error}` }; }
+  m.changedPathCount = changed.paths.length;
+
+  const accText = readRefFile(repo, trustRef, "annotation-reviews.jsonl");
+  if (accText === null)
+    return { exitCode: 0, result: "not-configured", metrics: { ...m, result: "not-configured" },
+      message: `no accepted decisions configured at ${trustRef} — no accepted-decision conclusion possible (this is not "clean").` };
+  const annById = parseAnnotations(readRefFile(repo, trustRef, "annotations.jsonl"));
+  const acceptances = loadAcceptances(accText);
+  m.acceptedDecisionCount = acceptances.length;
+
+  const changedList = changed.paths;
+  const leads = [];
+  for (const acc of acceptances) {
+    if (acc.applicability === "retired") continue;
+    const ann = annById.get(acc.sha);
+    if (!ann || canonicalAnnotationHash(ann) !== acc.annotationSha256) { m.ignoredDraftCount++; continue; } // re-annotated / drifted / missing
+    const rev = spawnSync("git", ["-C", repo, "rev-parse", "--verify", "--quiet", `${acc.sha}^{commit}`], { encoding: "utf8" });
+    if (rev.status !== 0) { m.unmeasurableCount++; continue; } // source object unavailable at trust ref
+    const hitPaths = acc.paths.filter((scope) => changedList.some((p) => scopeMatches(scope, p)));
+    if (!hitPaths.length) continue;
+    leads.push({ sha: acc.sha, why: ann.why, by: acc.acceptedBy, at: acc.acceptedAt, applicability: acc.applicability, paths: hitPaths });
+  }
+  m.matchedDecisionCount = leads.length; m.leadCount = leads.length;
+  // Never turn "unmeasurable" into clean: a missing source object is an
+  // incomplete measurement, exit nonzero even if some leads were found.
+  const incomplete = m.unmeasurableCount > 0;
+  m.result = incomplete ? "unmeasurable" : (leads.length ? "leads" : "no-leads");
+  return { exitCode: incomplete ? 1 : 0, result: m.result, metrics: m, leads,
+    message: renderLeads(basename(repo), mode, leads, incomplete ? m.unmeasurableCount : 0) };
+}
+
+export function renderLeads(name, mode, leads, unmeasurable = 0) {
+  const cap = 8192;
+  const lines = [];
+  if (!leads.length) lines.push(`logbook check (${mode}): 0 accepted decision leads touch this diff.`);
+  else lines.push(`logbook check (${mode}): ${leads.length} accepted decision lead${leads.length > 1 ? "s" : ""} touch${leads.length > 1 ? "" : "es"} this diff`);
+  for (const l of leads.slice(0, 20)) {
+    const why = sanitizeContextText(l.why, 512, { markdown: false });
+    const paths = l.paths.map((p) => sanitizeContextText(p, 256, { markdown: false })).join(", ");
+    const tag = l.applicability === "uncertain" ? " [applicability: uncertain]" : "";
+    lines.push(`\n${paths}${tag}\n  Prior reviewed rationale: ${why}\n  Source: ${l.sha}   (verify: git show ${l.sha})\n  Accepted by ${sanitizeContextText(l.by, 128, { markdown: false })} on ${l.at}`);
+    if (lines.join("\n").length > cap) { lines.push("\n… (truncated)"); break; }
+  }
+  if (leads.length) lines.push(`\nLead, not verdict: path overlap proves relevance only, not a semantic conflict. Verify the source and confirm the constraint still applies.`);
+  if (unmeasurable) lines.push(`\nunmeasurable: ${unmeasurable} accepted decision(s) cite a source object unavailable at the trust ref (exit nonzero — not clean).`);
+  return lines.join("\n");
+}
+
+export function writeCheckMetrics(target, metrics) {
+  // opt-in, local, atomic, aggregate-only — no repo name, paths, SHAs, prose,
+  // authors, timestamps, or machine identifiers. Incidence/coverage/noise only.
+  const tmp = `${target}.tmp-${process.pid}`;
+  writeFileSync(tmp, JSON.stringify(metrics, null, 2) + "\n");
+  renameSync(tmp, target);
+}
+
 // Claude imports @paths only from prose, not fenced/inline examples. Doctor
 // must distinguish a real AGENTS.md bridge from documentation that mentions
 // one without loading it.
@@ -1846,6 +2026,13 @@ function usage() {
     logbook annotate SHA "WHY" [path] [--by WHO]
                                   persist WHY a commit happened (lazy enrichment:
                                   when your agent investigates a revert, keep it)
+    logbook accept SHA --file P [--dir P/] [--by WHO] [--applicability A]
+                                  human attestation that a DRAFT annotation is
+                                  correct + scoped; only accepted decisions surface
+    logbook check --diff [--base SHA --head SHA] [--metrics-out PATH] [path]
+                                  read-only diff-time preflight: accepted decisions
+                                  whose path scope the change touches (non-blocking;
+                                  exits nonzero only when unmeasurable, never "clean")
     logbook [path] --json         structured events to stdout (writes nothing)
 
   options:
@@ -1872,6 +2059,18 @@ export function parseArgs(argv) {
     else if (a === "query") o.cmd = "query";
     else if (a === "context") o.cmd = "context";
     else if (a === "annotate") o.cmd = "annotate";
+    else if (a === "accept") o.cmd = "accept";
+    else if (a === "check") o.cmd = "check";
+    else if (a === "--diff") o.diff = true;
+    else if (a === "--base") o.base = argv[++i];
+    else if (a === "--head") o.head = argv[++i];
+    else if (a === "--applicability") o.applicability = argv[++i];
+    else if (a === "--metrics-out") o.metricsOut = argv[++i];
+    else if (a === "--dir") {
+      let d = argv[++i];
+      if (d && !d.endsWith("/")) d += "/";
+      if (d) (o.files ||= []).push(d);
+    }
     else if (a === "--by") o.by = argv[++i];
     else if (a === "--file") {
       o.file = argv[++i];
@@ -1899,6 +2098,10 @@ export function parseArgs(argv) {
     // annotate <sha> "<why>" [repo] — sha and why are positional
     o.sha = rest[0]; o.why = rest[1];
     if (rest[2]) o.repo = rest[2];
+  } else if (o.cmd === "accept") {
+    // accept <sha> [repo] — sha is positional; scope via --file/--dir
+    o.sha = rest[0];
+    if (rest[1]) o.repo = rest[1];
   } else if (rest.length) o.repo = rest[0];
   return o;
 }
@@ -1982,6 +2185,41 @@ async function main() {
       console.log(`  ${C.good}✓${C.r} annotated ${C.bold}${a.sha.slice(0, 8)}${C.r} ${C.dim}(by ${sanitizeContextText(a.by, 512, { markdown: false })}, ${a.date})${C.r}`);
       console.log(`  ${C.dim}${merged ? "merged into LOGBOOK.md" : "merged into LOGBOOK.md on the next run"}${C.r}\n`);
     }
+    return;
+  }
+
+  if (o.cmd === "accept") {
+    if (!o.sha) {
+      console.error(`  usage: logbook accept <sha> --file <path> [--dir <prefix>] [--by <who>] [--applicability active|uncertain|retired]`);
+      process.exit(1);
+    }
+    const dir = o.out ? resolve(o.out) : repo;
+    const res = saveAcceptance(repo, dir, { sha: o.sha, paths: o.files, by: o.by, applicability: o.applicability });
+    if (res.error) { console.error(`  ${res.error}`); process.exit(1); }
+    const ev = res.accepted;
+    if (!o.quiet) {
+      console.log(`  ${C.good}✓${C.r} accepted decision ${C.bold}${ev.sha.slice(0, 8)}${C.r} for ${ev.paths.map((p) => sanitizeContextText(p, 256, { markdown: false })).join(", ")} ${C.dim}(${ev.applicability}, by ${sanitizeContextText(ev.acceptedBy, 128, { markdown: false })}, ${ev.acceptedAt})${C.r}`);
+      console.log(`  ${C.dim}commit annotation-reviews.jsonl on the trusted branch for check --diff to honor it${C.r}\n`);
+    }
+    return;
+  }
+
+  if (o.cmd === "check") {
+    if (!o.diff) {
+      console.error(`  usage: logbook check --diff [--base <sha> --head <sha>] [--metrics-out <path>] [repo]`);
+      process.exit(1);
+    }
+    if ((o.base && !o.head) || (!o.base && o.head)) {
+      console.error(`  check --diff range mode requires both --base and --head`);
+      process.exit(1);
+    }
+    const r = runCheckDiff(repo, { base: o.base, head: o.head });
+    if (o.metricsOut) {
+      try { writeCheckMetrics(resolve(o.metricsOut), r.metrics); }
+      catch (e) { console.error(`  could not write metrics: ${e.message}`); }
+    }
+    console.log(r.message);
+    process.exitCode = r.exitCode;
     return;
   }
 
