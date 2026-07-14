@@ -2134,6 +2134,9 @@ function usage() {
                                   exits nonzero only when unmeasurable, never "clean")
     logbook pending [path]        draft annotations no human has accepted yet
                                   (they stay inert until a maintainer runs accept)
+    logbook refine [path] [--limit N]
+                                  on-demand worklist: un-annotated notable decisions
+                                  (reverts/suppressions) to investigate + annotate
     logbook [path] --json         structured events to stdout (writes nothing)
 
   options:
@@ -2163,6 +2166,7 @@ export function parseArgs(argv) {
     else if (a === "accept") o.cmd = "accept";
     else if (a === "check") o.cmd = "check";
     else if (a === "pending") o.cmd = "pending";
+    else if (a === "refine") o.cmd = "refine";
     else if (a === "--diff") o.diff = true;
     else if (a === "--base") { if (i + 1 >= argv.length) o._missing = "--base"; else o.base = argv[++i]; }
     else if (a === "--head") { if (i + 1 >= argv.length) o._missing = "--head"; else o.head = argv[++i]; }
@@ -2377,6 +2381,33 @@ async function main() {
       process.exit(1);
     }
     for (const e of events) console.log(JSON.stringify(e));
+    return;
+  }
+  if (o.cmd === "refine") {
+    // On-demand indexing: the un-annotated notable-decision worklist across the
+    // repo. The CLI is deterministic/offline — it names WHAT warrants a "why";
+    // the agent then investigates each and writes cite-or-abstain DRAFTS. This
+    // is the lazy loop run deliberately, not blind bulk generation.
+    if (!scanOk) {
+      console.error("logbook: diff scan failed — suppression/weakening rows are unmeasured; refusing a partial worklist");
+      process.exit(1);
+    }
+    const annotated = new Set(loadAnnotations(o.out ? resolve(o.out) : repo).map((a) => a.sha));
+    const notable = events.filter((e) =>
+      (e.revert || (e.suppressions && e.suppressions.length) || (e.del_asserts - e.add_asserts > 2)) &&
+      !annotated.has(e.fullSha));
+    notable.sort((a, b) => Number(b.revert) - Number(a.revert)); // do-not-retry first; events already newest-first
+    const limit = o.limit ?? 50;
+    console.log(`  ${C.bold}${notable.length}${C.r} un-annotated notable decision${notable.length === 1 ? "" : "s"} in the last ${fmt(o.max)} commits ${C.dim}(investigate each with git show before annotating — never annotate a guess)${C.r}\n`);
+    for (const e of notable.slice(0, limit)) {
+      const kind = e.revert ? "revert" : (e.suppressions?.length ? "suppression" : "weakening");
+      const f = (e.files || [])[0] || "";
+      console.log(`  ${e.sha}  ${C.dim}[${kind}]${C.r}  ${sanitizeContextText(e.subject || "", 120, { markdown: false })}`);
+      console.log(`    ${C.dim}${sanitizeContextText(f, 200, { markdown: false })} — verify: git show ${e.fullSha}${C.r}`);
+      console.log(`    ${C.dim}then draft: logbook annotate ${e.fullSha} "verified why" --by MODEL${C.r}`);
+    }
+    if (notable.length > limit) console.log(`\n  ${C.dim}… and ${notable.length - limit} more (raise with --limit)${C.r}`);
+    if (capped) console.error(`  analysis capped at ${fmt(o.max)} commits — use -n for a larger window`);
     return;
   }
   if (o.cmd === "audit") return console.log(renderAudit(name, auditHead(repo, events)));

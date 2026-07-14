@@ -2154,3 +2154,25 @@ test("doctor surfaces the pending-draft review count (read-only)", () => {
   assert.ok(!existsSync(join(d, "annotation-reviews.jsonl")));
   rmSync(d, { recursive: true, force: true });
 });
+
+test("refine: lists un-annotated reverts; annotating drops them from the worklist", () => {
+  const d = mkdtempSync(join(tmpdir(), "logbook-refine-"));
+  const env = { GIT_AUTHOR_NAME: "T", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "T", GIT_COMMITTER_EMAIL: "t@t" };
+  const g = (...a) => execFileSync("git", ["-C", d, ...a], { env, encoding: "utf8" });
+  g("init", "-q");
+  writeFileSync(join(d, "a.txt"), "v1\n"); g("add", "-A"); g("commit", "-qm", "base");
+  writeFileSync(join(d, "a.txt"), "v2 bad approach\n"); g("add", "-A"); g("commit", "-qm", "add bad approach");
+  const bad = g("rev-parse", "HEAD").trim();
+  g("revert", "--no-edit", bad); // creates a Revert commit the detector flags
+  const revert = g("rev-parse", "HEAD").trim();
+  execFileSync(process.execPath, [CLI, d, "-q"], { env }); // generate events.jsonl
+  const out = execFileSync(process.execPath, [CLI, "refine", d], { env, encoding: "utf8" });
+  assert.match(out, /un-annotated notable decision/);
+  assert.match(out, /\[revert\]/);
+  assert.ok(out.includes(revert), "the revert commit should be in the worklist");
+  // annotate it, then it drops off
+  execFileSync(process.execPath, [CLI, "annotate", revert, "reverted the bad approach: it leaked", d, "--by", "codex", "-q"], { env });
+  const out2 = execFileSync(process.execPath, [CLI, "refine", d], { env, encoding: "utf8" });
+  assert.ok(!out2.includes(revert), "an annotated decision leaves the worklist");
+  rmSync(d, { recursive: true, force: true });
+});

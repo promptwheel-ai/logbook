@@ -76,6 +76,20 @@ npx @promptwheel/logbook pending    # draft annotations no human has accepted ye
 #   npx @promptwheel/logbook accept SHA --file path/to/file --by their-name
 ```
 
+To seed coverage across a whole repo on demand (e.g. onboarding a mature repo)
+instead of waiting for tasks to trigger it, get the un-annotated decision
+worklist and work through it deliberately:
+
+```bash
+npx @promptwheel/logbook refine    # un-annotated reverts/suppressions to investigate
+```
+
+This is the SAME lazy loop run on purpose, not a shortcut: for each item, run
+`git show SHA`, verify the cause in the actual diff, and only then annotate a
+draft. Do NOT batch-generate rationale you did not verify — an un-grounded card
+is the failure mode the human gate exists to catch. The worklist is deterministic
+(the CLI names what warrants a why); the investigation and drafting are yours.
+
 ## Querying the full record (events.jsonl)
 
 The digest truncates with "…and N more — full record in events.jsonl". When
