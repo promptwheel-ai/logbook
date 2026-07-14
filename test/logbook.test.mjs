@@ -314,6 +314,13 @@ test("managed artifact writes replace regular files but refuse containment and s
     assert.throws(() => managedWriteFile(root, root, "escaped\n"), /outside/);
 
     if (process.platform !== "win32") {
+      const parentAlias = join(parent, "parent-alias");
+      symlinkSync(parent, parentAlias, "dir");
+      const aliasTarget = join(parentAlias, "repo", "ALIASED.md");
+      managedWriteFile(join(parentAlias, "repo"), aliasTarget, "canonicalized\n");
+      assert.equal(readFileSync(join(root, "ALIASED.md"), "utf8"), "canonicalized\n",
+        "equivalent symlink spellings do not look like containment escapes");
+
       const leaf = join(root, "JOURNEY.md");
       symlinkSync(outsideFile, leaf);
       assert.throws(() => managedWriteFile(root, leaf, "followed leaf\n"), /non-regular/);

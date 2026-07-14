@@ -28,15 +28,24 @@ let managedTempId = 0;
 // repository-controlled leaf or parent symlink outside the managed root.
 // Atomic replacement also breaks a hard link instead of modifying its peer.
 export function managedWriteFile(base, target, data) {
+  const requestedRoot = resolve(base);
+  const requestedPath = resolve(target);
+  const requestedRel = relative(requestedRoot, requestedPath);
+  if (!requestedRel || requestedRel === ".." || requestedRel.startsWith(`..${sep}`) ||
+      isAbsolute(requestedRel))
+    throw new Error(`refusing managed write outside ${requestedRoot}: ${requestedPath}`);
   const root = realpathSync(base);
-  const path = resolve(target);
-  const rel = relative(root, path);
-  if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel))
-    throw new Error(`refusing managed write outside ${root}: ${path}`);
-  const parent = realpathSync(dirname(path));
+  // Canonicalize the existing parent before comparing or writing. Besides
+  // catching parent symlinks, this handles platform aliases such as macOS's
+  // /var -> /private/var without comparing two spellings of the same path.
+  const parent = realpathSync(dirname(requestedPath));
   const parentRel = relative(root, parent);
   if (parentRel === ".." || parentRel.startsWith(`..${sep}`) || isAbsolute(parentRel))
-    throw new Error(`refusing managed write through a directory outside ${root}: ${path}`);
+    throw new Error(`refusing managed write through a directory outside ${root}: ${requestedPath}`);
+  const path = join(parent, basename(requestedPath));
+  const rel = relative(root, path);
+  if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel))
+    throw new Error(`refusing managed write outside ${root}: ${requestedPath}`);
   let mode = 0o666;
   let preserveMode = false;
   if (existsSync(path)) {
