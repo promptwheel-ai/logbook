@@ -9,10 +9,19 @@ import { execFileSync } from "node:child_process";
 import {
   collectEvents, diffScan, hotspots, analyze, renderLogbookMd,
   auditHead, queryEvents, loadEvents, loadAnnotations, saveAnnotation,
-  formatContextPage,
+  formatContextPage, sanitizeContextText,
 } from "@promptwheel/logbook";
 
 const DEFAULTS = { max: 20000, since: null, until: null };
+const fileFilterSchema = z.string().min(1).max(1024).refine(
+  (value) => Buffer.byteLength(value, "utf8") <= 1024,
+  { message: "file filter must be at most 1024 UTF-8 bytes" },
+);
+function validateFileFilterCount({ file, files }) {
+  if ((file ? 1 : 0) + (files?.length || 0) > 32) {
+    throw new Error("at most 32 combined file filters are allowed");
+  }
+}
 // Batched ledger, three layers: session memo per HEAD; disk reuse/incremental
 // via loadEvents; windowed full builds that report progress (clients reset
 // their timeout on progress notifications).
@@ -60,7 +69,7 @@ function progressFor(extra) {
   }).catch(() => {});
 }
 
-const server = new McpServer({ name: "logbook", version: "0.4.0" });
+const server = new McpServer({ name: "logbook", version: "0.4.1" });
 
 server.registerTool(
   "logbook_digest",
@@ -93,8 +102,8 @@ server.registerTool(
   async ({ repo: repoArg, sha, why, by }) => {
     const repo = rootOf(repoArg);
     const a = saveAnnotation(repo, repo, { sha, why, by });
-    if (!a) return { content: [{ type: "text", text: `not a commit in this repo: ${sha}` }], isError: true };
-    return { content: [{ type: "text", text: `annotated ${a.sha.slice(0, 8)} (by ${a.by}, ${a.date}) — merged into future digests` }] };
+    if (!a) return { content: [{ type: "text", text: `not a commit in this repo: ${sanitizeContextText(sha, 512)}` }], isError: true };
+    return { content: [{ type: "text", text: `annotated ${a.sha.slice(0, 8)} (by ${sanitizeContextText(a.by, 512)}, ${a.date}) — merged into future digests` }] };
   }
 );
 
@@ -109,7 +118,7 @@ server.registerTool(
     const { events } = pipeline(repo, progressFor(extra));
     const live = auditHead(rootOf(repo), events);
     const lines = live.slice(0, 40).map((x) =>
-      `${x.kind}  ${x.file}:${x.line}  since ${x.since || "?"}${x.resilenced ? `  re-silenced x${x.resilenced} (${x.fight})` : ""}`);
+      `${sanitizeContextText(x.kind, 256)}  ${sanitizeContextText(x.file, 1024)}:${x.line}  since ${x.since || "?"}${x.resilenced ? `  re-silenced x${x.resilenced} (${sanitizeContextText(x.fight, 256)})` : ""}`);
     return { content: [{ type: "text", text: lines.length ? `${live.length} live suppressions\n` + lines.join("\n") : "clean — no live suppressions in src/test/config files" }] };
   }
 );
@@ -117,11 +126,12 @@ server.registerTool(
 server.registerTool(
   "logbook_query",
   {
-    description: "Filter the full commit-event record with precision. Start with file + event type (for example file and revert) before broad grep. Returns up to `limit` matches, default 100, with exact counts and explicit truncation recovery.",
+    description: "Filter the full commit-event record with precision. Start with all relevant files + event type before broad grep. Repeated paths use OR; other filters use AND. Returns up to `limit` matches, default 100, with exact counts and explicit truncation recovery.",
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     inputSchema: {
     repo: z.string().describe("absolute path to the git repository"),
-    file: z.string().optional().describe("substring match against files touched"),
+    file: fileFilterSchema.optional().describe("legacy single substring match against files touched"),
+    files: z.array(fileFilterSchema).min(1).max(32).optional().describe("file substrings; matches events touching any supplied path"),
     revert: z.boolean().optional(),
     suppress: z.boolean().optional().describe("only events that added suppressions"),
     weaken: z.number().optional().describe("min net assertions removed"),
@@ -132,6 +142,7 @@ server.registerTool(
     },
   },
   async ({ repo, ...f }, extra) => {
+    validateFileFilterCount(f);
     const { events, capped } = pipeline(repo, progressFor(extra));
     const all = queryEvents(events, f);
     const hits = all.slice(0, f.limit ?? 100);
@@ -150,21 +161,23 @@ server.registerTool(
 server.registerTool(
   "logbook_context",
   {
-    description: "Return the same filtered history order as logbook_query in compact, bounded pages for agent context. This is deterministic delivery, not relevance ranking. Follow NEXT cursors until END complete when completeness matters.",
+    description: "Return the same filtered history order as logbook_query in compact, bounded pages for agent context. Pass all relevant paths in files; paths use OR and other filters use AND. This is deterministic delivery, not relevance ranking. Repeat identical filters with every NEXT cursor until END complete when completeness matters.",
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     inputSchema: {
     repo: z.string().describe("absolute path to the git repository"),
-    file: z.string().optional().describe("substring match against files touched"),
+    file: fileFilterSchema.optional().describe("legacy single substring match against files touched"),
+    files: z.array(fileFilterSchema).min(1).max(32).optional().describe("file substrings; matches events touching any supplied path"),
     revert: z.boolean().optional(),
     suppress: z.boolean().optional().describe("only events that added suppressions"),
     weaken: z.number().optional().describe("min net assertions removed"),
     downgrade: z.number().optional().describe("min assertion downgrades"),
     grep: z.string().optional().describe("substring match against commit subject"),
     since: z.string().optional(), until: z.string().optional(),
-    cursor: z.string().optional().describe("opaque NEXT cursor from the previous page; rejects stale or changed queries"),
+    cursor: z.string().min(1).optional().describe("opaque NEXT cursor from the previous page; rejects stale or changed queries"),
     },
   },
   async ({ repo: repoArg, cursor, ...filters }, extra) => {
+    validateFileFilterCount(filters);
     const repo = rootOf(repoArg);
     const { events, capped, head } = pipeline(repo, progressFor(extra));
     const page = formatContextPage({

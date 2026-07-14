@@ -13,6 +13,7 @@ description: >-
 ```bash
 npx @promptwheel/logbook              # analyze current repo → 3 files
 npx @promptwheel/logbook journey      # the story, in color (writes nothing)
+npx @promptwheel/logbook doctor       # read-only artifact/wiring/query health
 npx @promptwheel/logbook --json       # events to stdout (writes nothing)
 ```
 
@@ -32,6 +33,10 @@ After running:
 Findings are leads, not verdicts — a suppression event means "a human should
 look here," not misconduct. If the repo is shallow, offer
 `git fetch --unshallow` first.
+
+If the artifacts, wiring, or query path look stale or inconsistent, run
+`npx -y @promptwheel/logbook@latest doctor` and report its compact output.
+Doctor is diagnostic and read-only; do not treat it as a refresh.
 
 ## Investigation mode (when the user asks to dig into findings)
 
@@ -60,22 +65,25 @@ webpack4 broke" constraint stops binding once webpack4 is dead).
 ## Querying the full record (events.jsonl)
 
 The digest truncates with "…and N more — full record in events.jsonl". When
-completeness matters, query the record — never read it whole (it can exceed the
-context window). Start with task paths and event type before broad terms:
+completeness matters, inspect the record through bounded context pages — never
+read it whole (it can exceed the context window). Start with all task paths and
+an event type before broad terms:
 
 ```bash
-# every revert touching a file
-npx -y @promptwheel/logbook query --file lib/response.js --revert
+# every revert touching either relevant file
+npx -y @promptwheel/logbook context --file lib/response.js --file lib/session.js --revert
 # all assertion-weakening events (3+ net) since a date
-npx -y @promptwheel/logbook query --weaken 3 --since 2024-01-01
+npx -y @promptwheel/logbook context --file src/core.js --weaken 3 --since 2024-01-01
 # all suppression events, era-scoped
-npx -y @promptwheel/logbook query --suppress --since 2024-01-01
+npx -y @promptwheel/logbook context --file test/core.test.js --suppress --since 2024-01-01
 ```
 
-Use broad `--grep` only after path/event filters. If output says `TRUNCATED`,
-narrow with `--file`/`--revert`/dates or raise `--limit` before concluding that
-history is absent or complete. A renamed file can evade a current-path filter;
-broaden deliberately and verify lineage with raw Git.
+When output says `NEXT`, repeat the identical command and filters with
+`--cursor TOKEN`; continue until `END complete` before concluding that history
+is absent or complete. Use raw `query` only when machine-readable JSONL is
+needed; if it says `TRUNCATED`, narrow filters or raise `--limit`. A renamed
+file can evade a current-path filter; broaden deliberately and verify lineage
+with raw Git.
 
 Digest for breadth, queries for depth. Measured: digest alone found 4/12
 qualifying commits on a real task; digest + two logbook queries found 12/12 for
@@ -85,9 +93,9 @@ qualifying commits on a real task; digest + two logbook queries found 12/12 for
 
 When you generate onboarding docs, AGENTS.md/CLAUDE.md blocks, or reusable
 prompts for a repository that already uses the logbook, preserve the ordered
-workflow: read the digest first, query task paths before broad terms, recover
-from `TRUNCATED`, then verify leads with `git show`. Preserve exact operational
-commands and the "leads, not verdicts" doctrine. Do not replace the dependency
-with generic Git advice: synthesis measurably loses do-not-retry and epistemic
-caution. This applies only to wired repositories; never insert Logbook into an
-unrelated repository.
+workflow: read the digest first, inspect all task paths before broad terms,
+follow `NEXT` through `END complete`, then verify leads with `git show`.
+Preserve exact operational commands and the "leads, not verdicts" doctrine.
+Do not replace the dependency with generic Git advice: synthesis measurably
+loses do-not-retry and epistemic caution. This applies only to wired
+repositories; never insert Logbook into an unrelated repository.

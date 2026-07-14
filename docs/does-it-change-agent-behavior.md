@@ -45,17 +45,17 @@ the old failure mode with a test before refactoring.
 
 One trial, one scenario, planning-only. The scenario was chosen because it is
 the tool's core claim (do-not-retry), not at random. Reproduce it: run
-`npx @promptwheel/logbook` on any repo with a meaningful revert history
-(the median top-2,500 repo has 10 reverts) and ask an agent to plan a change
-adjacent to a reverted one, with and without LOGBOOK.md in context.
+`npx @promptwheel/logbook` on any repo with a meaningful revert history (the
+median in our random 400-repo sample had 10 reverts) and ask an agent to plan a
+change adjacent to a reverted one, with and without LOGBOOK.md in context.
 
 ---
 
 # Round 2: generic tasks, no revert priming (same day)
 
 Four more runs — onboarding brief on flask, modernization risk assessment on
-express. Tasks never mention history. These are famous repos, which makes
-them the HARDEST test: the control agent has deep training knowledge.
+express. Tasks never mention history. These famous repos give the control
+agent unusually strong training priors.
 
 ## What the controls got right
 
@@ -84,18 +84,17 @@ express treatment:
 > differs materially from what was already reverted. [...] re-enable/tighten
 > [the weakened assertions] first so you have a real regression net.
 
-A modernization pass on express would try `Buffer.from` — it is the textbook
-modernization — and the do-not-retry list is the only thing standing between
-the agent and a re-attempt of a known rollback.
+A modernization pass on express may try `Buffer.from`; the do-not-retry list
+is one direct way to surface the known rollback before planning.
 
 ## The honest reading
 
 On famous repos, the logbook's value is a LAYER (commit-level facts training
 can't hold: which reverts bite this module, whether the test net is
 trustworthy, where security fixes needed two passes) on top of strong priors.
-On PRIVATE repos — the actual target user — the control has no priors at all:
-training data has never seen your company's history. Famous-repo tests
-understate the private-repo value.
+Private repositories may have weaker model priors, but transfer in either
+direction is untested. These runs establish only that supplied commit-level
+history can add information on the selected public tasks.
 
 ---
 
@@ -129,5 +128,6 @@ The shallow arm could not say any of that: the CVE revert wasn't in its
 Depth changes decisions — but only CURATED depth. What paid was (1)
 file-keyed revert history and (2) notable-event highlighting, not longer
 flat lists. The 800-token digest is the right default (context economics);
-the validated v0.2 shape is per-file sections + a notable-events section at
-~2-4k tokens. Honest scope: n=1 per arm, one repo, deep variant hand-curated.
+the promising design example is per-file sections + a notable-events section
+at ~2-4k tokens. Honest scope: n=1 per arm, one repo, deep variant
+hand-curated—not validation of the current product format.

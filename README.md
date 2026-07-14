@@ -2,24 +2,23 @@
 
 [![ci](https://github.com/promptwheel-ai/logbook/actions/workflows/ci.yml/badge.svg)](https://github.com/promptwheel-ai/logbook/actions/workflows/ci.yml) [![npm](https://img.shields.io/npm/v/%40promptwheel%2Flogbook)](https://www.npmjs.com/package/@promptwheel/logbook)
 
-**Nobody reads the git history. It's too big — and skimming a slice gives
-you the wrong picture.**
+**Coding agents often skip git history. It is large, and an arbitrary slice
+can give the wrong picture.**
 
 Every feature gets added by someone who can read the code but not the
 decisions behind it: the module that was rewritten three times, the approach
 that was tried and reverted, the "fix" last quarter that was actually a
-skipped test. AI assistants inherit that blindness on every session, in
-every repo. Code maps (Graphify and friends) tell them where things are,
-not what happened. The logbook mines the existing git history — up to the
-newest 20,000 commits — and writes the short version: the file your agent
-is told to read first.
+skipped test. Fresh agent sessions often start without those decisions. Code
+maps (Graphify and friends) tell them where things are, not what happened. The
+logbook mines the existing git history — up to the newest 20,000 commits — and
+writes a compact recall layer that your agent is instructed to consult.
 
 ```
 npx -y @promptwheel/logbook init
 ```
 
-One line: it reads the history, writes the brief, and wires your agent config
-(AGENTS.md, CLAUDE.md, or .cursorrules) so reading it is the default first step.
+One line: it reads the history, writes the brief, and adds a history workflow to
+your agent config (AGENTS.md, CLAUDE.md, or .cursorrules).
 
 ```
   1,326 commits · 322 files · 7.3 years · 354 authors
@@ -37,12 +36,11 @@ its own brief files (and `init` adds a block to your agent config).
 
 ## Why "logbook"
 
-Because you need the SparkNotes of every decision that mattered in your git
-history, without pulling every book out of the library. And you couldn't
-anyway — for a third of the top repos on GitHub, the full log doesn't even
-fit in a context window. Your repo has been keeping the record for years;
-almost nobody reads it. This reads it back, and hands you the two pages
-that matter.
+Because you need a compact index of the decisions its detectors can recover
+without pulling every book out of the library. In a random 400-repo sample of
+the top 2,500 GitHub repositories, 34% of full logs exceeded a 150k-token
+context estimate. Logbook turns that record into a bounded brief and
+verifiable leads; it does not claim complete decision recall.
 
 ## The three artifacts
 
@@ -60,7 +58,9 @@ npx @promptwheel/logbook path/to/repo # or any repo
 npx @promptwheel/logbook journey      # the story, in color (writes nothing)
 npx @promptwheel/logbook journey --compare  # rank your almanac vs the top 2,500 GitHub repos
 npx @promptwheel/logbook audit        # what is STILL suppressed in HEAD, and since when
+npx @promptwheel/logbook doctor       # read-only artifact/wiring/skill/query health check
 npx @promptwheel/logbook context --file path/to/file --revert  # bounded, paged query view
+npx @promptwheel/logbook context --file src/a.ts --file src/b.ts # multi-path OR query
 npx @promptwheel/logbook annotate SHA "why it happened" --by WHO   # persist WHY a commit happened
 npx @promptwheel/logbook --json       # events to stdout (writes nothing)
 
@@ -75,7 +75,9 @@ at most 20 events and 8 KiB, with an opaque `NEXT` cursor and explicit
 `END complete`. It is a delivery format, not relevance ranking; use `query`
 when you need the raw JSONL interface. A cursor is bound to the repository
 HEAD, filters, analysis window, and ordered event set; if any changes, restart
-from the first page. On a default-window cold run, the CLI creates or refreshes
+from the first page. Repeat `--file` to match commits touching any supplied
+path; remaining filters still combine with that union. Repeat the same filters
+with every `NEXT` cursor. On a default-window cold run, the CLI creates or refreshes
 `events.jsonl` after page one so `NEXT` pages reuse the scan; it never changes
 source or Git history. Non-default `-n` or `--since`/`--until` windows remain
 uncached, so each CLI page rescans that explicit window. Across 7,123 measured
@@ -95,6 +97,28 @@ scan window.
 `--compare` uses a percentile table baked into the CLI from a 2,500-repo fleet
 run — still zero dependencies and zero network calls.
 
+## Trust and diagnostics
+
+Git subjects, paths, authors, and annotations are repository-controlled input.
+Logbook stores the event record unchanged, but sanitizes those values when it
+renders Markdown or agent-facing audit output and labels the result as untrusted
+evidence. Generated files are replaced atomically one at a time; the two
+Markdown artifacts carry matching HEAD, event-count, scope, and ledger-hash
+records that bind `events.jsonl`. A multi-file refresh is not transactional, so
+an interrupted bundle is detected on the next check.
+
+Run the read-only doctor when a report looks stale or when filing a bug:
+
+```bash
+npx -y @promptwheel/logbook@latest doctor
+```
+
+It checks generated-record freshness and ledger integrity, current agent wiring
+(including a shadowing `AGENTS.override.md`), an installed Logbook skill, and a
+real path query. It does not separately hash user edits to the Markdown prose.
+It writes nothing, returns nonzero on a failed check, and prints a compact report
+suitable for pasting into an issue or launch-thread reply.
+
 ## Wire it into your agent
 
 `logbook init` does this for you. Manually, it's one block in your
@@ -107,9 +131,10 @@ Before planning or editing:
 1. Read LOGBOOK.md at the repo root completely before any history query.
 2. If Historical signal is LOW, use it only as a hotspot map. Otherwise,
    inspect task-relevant do-not-retry entries and fragile areas.
-3. For completeness, query relevant paths before broad terms:
-   npx -y @promptwheel/logbook query --file path/to/file --revert
-   If output says TRUNCATED, narrow filters or raise --limit before concluding.
+3. For complete do-not-retry coverage, inspect all relevant paths:
+   npx -y @promptwheel/logbook context --file path/to/file --revert
+   Repeat --file for each other relevant path. If output says NEXT, repeat the
+   identical filters with --cursor TOKEN until END complete before concluding.
 4. Treat findings as leads, not verdicts. Verify claims with git show SHA and
    confirm that the constraint still applies to the current tree.
 Refresh the record: npx -y @promptwheel/logbook
@@ -120,9 +145,9 @@ model name; never annotate guesses):
 npx -y @promptwheel/logbook annotate SHA "one specific sentence" --by MODEL
 ```
 
-Wiring makes history the default first read instead of relying on the agent to
-invent git archaeology. It is still an instruction, not a guarantee; for
-high-risk work, confirm that the digest was actually consulted.
+Wiring installs the history workflow instead of relying on the agent to invent
+it. It is still an instruction, not a guarantee; observed consultation remains
+imperfect, so confirm it for high-risk work.
 
 ## Lazy enrichment: the record says WHAT, your agent persists WHY
 
@@ -174,18 +199,20 @@ keeps trying to fix, and keeps losing to.
 
 ## Context economics
 
-The median top-2,500 repo's LOGBOOK.md is **~1,000 tokens**. Its raw `git log`
-is 82× that — and for a third of repos the full log doesn't fit in a 150k
-context window at all. Measured across 400 repos:
+In a random 400-repo sample of the top 2,500, the median LOGBOOK.md was
+**~1,000 estimated tokens**. The sample's median full `git log` was 82× that,
+and 34% exceeded a 150k-token estimate. This is potential context avoided only
+when a session would otherwise ingest raw history:
 [docs/context-economics.md](docs/context-economics.md).
 
 ## Does it actually change agent behavior?
 
-On history-dense tasks, measurably — with an honest boundary found by our
-own later testing: on a held-out sample of ten easier planning tasks, a
-well-instructed agent matched it using raw git alone, and the bottleneck
-was traced to the query/retrieval path (see the evidence-status note in
-[docs/wrong-work-benchmark.md](docs/wrong-work-benchmark.md)). In the
+On selected history-dense planning tasks, yes—with an important boundary. In a
+later screen of ten new, less history-selected tasks, the packaged Logbook arm
+did not beat strong raw-Git instructions (2/10 safe plans versus 3/10). Every
+known receipt was indexed, but none reached the agents through Logbook queries,
+identifying retrieval and consumption as the bottleneck. See the evidence-status
+note in [docs/wrong-work-benchmark.md](docs/wrong-work-benchmark.md). In the
 original A/B test, an agent asked to plan a `useShallow`
 refactor in zustand walked straight into re-attempting a refactor that was
 merged and reverted in 2024. The same agent with LOGBOOK.md in context
@@ -193,10 +220,12 @@ started from the revert, inferred the repo's characteristic failure class
 from the do-not-retry list, and planned to pin the old failure with a test
 first. Full transcripts: [docs/does-it-change-agent-behavior.md](docs/does-it-change-agent-behavior.md).
 
-In a six-task internal experiment across history-dense planning tasks, the
-un-wired agent proposed already-reverted or already-rejected work in 4 of 6
-tasks; the wired agent in 0 of 6, for about +4.7k tokens of context. Method
-and honest scope: [docs/wrong-work-benchmark.md](docs/wrong-work-benchmark.md).
+In a six-task internal experiment across deliberately history-dense planning
+tasks, agents without supplied history proposed already-reverted or completed
+work in 4 of 6 tasks; agents supplied the full generated LOGBOOK.md did so in
+0 of 6, for about +4.7k tokens of context. This was planning-only, internally
+graded, and selected for historical landmines. Method and scope:
+[docs/wrong-work-benchmark.md](docs/wrong-work-benchmark.md).
 
 ## Honest scope
 
