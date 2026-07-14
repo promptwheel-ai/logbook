@@ -2080,6 +2080,14 @@ export function doctorRepo(repo) {
     }
   }
 
+  // Read-only reminder: draft annotations no human has ratified yet. Never a
+  // fail/warn — pending drafts are the normal steady state — just a nudge so a
+  // repo owner sees the review backlog without running `pending` explicitly.
+  const pending = pendingDrafts(repo);
+  if (pending.length)
+    add("pass", "review", `${pending.length} draft annotation${pending.length === 1 ? "" : "s"} await human acceptance (inert until accepted)`,
+      "a maintainer runs: logbook accept SHA --file <path> --by <who>");
+
   const status = checks.reduce((worst, check) =>
     DOCTOR_RANK[check.level] > DOCTOR_RANK[worst] ? check.level : worst, "pass");
   return { status, checks, fresh: ledgerFresh && bundleFresh };

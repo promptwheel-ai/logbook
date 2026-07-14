@@ -2138,3 +2138,19 @@ test("pending: lists drafts with no active acceptance; retiring re-pends", () =>
   assert.equal(pendingDrafts(r).length, 2); // retired => no active acceptance => pending again
   rmSync(r, { recursive: true, force: true });
 });
+
+test("doctor surfaces the pending-draft review count (read-only)", () => {
+  const d = mkdtempSync(join(tmpdir(), "logbook-doctor-pending-"));
+  const env = { GIT_AUTHOR_NAME: "T", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "T", GIT_COMMITTER_EMAIL: "t@t" };
+  execFileSync("git", ["-C", d, "init", "-q"], { env });
+  writeFileSync(join(d, "a.txt"), "x"); execFileSync("git", ["-C", d, "add", "-A"], { env });
+  execFileSync("git", ["-C", d, "commit", "-qm", "c1"], { env });
+  const sha = execFileSync("git", ["-C", d, "rev-parse", "HEAD"], { env, encoding: "utf8" }).trim();
+  execFileSync(process.execPath, [CLI, "init", d, "-q"], { env });
+  execFileSync(process.execPath, [CLI, "annotate", sha, "decided X", d, "--by", "codex", "-q"], { env });
+  const out = execFileSync(process.execPath, [CLI, "doctor", d], { env, encoding: "utf8" });
+  assert.match(out, /draft annotation.*await human acceptance/);
+  // doctor is read-only: no acceptance journal is created by inspecting
+  assert.ok(!existsSync(join(d, "annotation-reviews.jsonl")));
+  rmSync(d, { recursive: true, force: true });
+});
