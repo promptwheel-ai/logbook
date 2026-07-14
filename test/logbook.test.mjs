@@ -23,6 +23,8 @@ import {
   parseReviews, foldRatifications, verificationSummary, collectChangedPaths, parseAnnotations,
   saveRejection, saveVerification, spanGrounded, reviewKey,
   appendPrivateLine, renderLeads, writeCheckMetrics, pendingDrafts,
+  saveMachineCard, editCard, loadCardRecords, foldCards, cardIdFor, revHashFor,
+  parseCards, spanGroundedStrict,
 } from "../bin/logbook.mjs";
 
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "bin", "logbook.mjs");
@@ -2231,5 +2233,88 @@ test("verify: evidence-bearing verdicts only; a challenge flags re-review withou
   assert.equal(out.leads[0].applicability, "active"); // machine challenge did NOT rewrite the human decision
   assert.equal(out.leads[0].challenged, true);
   assert.match(out.message, /challenged — human re-review needed/);
+  rmSync(r, { recursive: true, force: true });
+});
+
+// ---------- Stage 1: revision-bound decision cards (identity model) ----------
+test("machine card: a diff-grounded span (right path/side) stores rev 1 with a stable cardId", () => {
+  const { r, sha } = mkAcceptRepo();
+  const res = saveMachineCard(r, r, { sha, claim: "sync.Pool removed", span: "v2", side: "diff", path: "src/cache.ts", by: "codex" });
+  assert.ok(res.card, res.error);
+  assert.equal(res.card.rev, 1);
+  assert.equal(res.card.sourceType, "machine_source");
+  assert.equal(res.card.cardId, cardIdFor(res.card.sha, "sync.Pool removed", "codex"));
+  assert.equal(res.card.revHash, revHashFor(res.card)); // self-consistent
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("machine card: a message-side span is grounded; a non-substring span is rejected", () => {
+  const { r, sha } = mkAcceptRepo();
+  assert.ok(saveMachineCard(r, r, { sha, claim: "c", span: "remove sync.Pool", side: "message", by: "codex" }).card);
+  assert.match(saveMachineCard(r, r, { sha, claim: "c", span: "not present anywhere", side: "message", by: "codex" }).error, /verbatim substring/);
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("machine card: a span from the message does NOT validate as diff-side, and file-A span rejects for file-B", () => {
+  const r = mkdtempSync(join(tmpdir(), "logbook-card2-"));
+  const env = { GIT_AUTHOR_NAME: "T", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "T", GIT_COMMITTER_EMAIL: "t@t" };
+  const g = (...a) => execFileSync("git", ["-C", r, ...a], { env, encoding: "utf8" });
+  g("init", "-q"); mkdirSync(join(r, "src"));
+  writeFileSync(join(r, "src", "a.ts"), "alpha\n"); writeFileSync(join(r, "src", "b.ts"), "beta\n");
+  g("add", "-A"); g("commit", "-qm", "seed");
+  writeFileSync(join(r, "src", "a.ts"), "ALPHA_NEW\n"); writeFileSync(join(r, "src", "b.ts"), "BETA_NEW\n");
+  g("add", "-A"); g("commit", "-qm", "the-subject-word");
+  const sha = g("rev-parse", "HEAD").trim();
+  // "the-subject-word" is only in the message, so it must fail as a diff span
+  assert.equal(spanGroundedStrict(r, sha, "the-subject-word", "diff", "src/a.ts"), false);
+  // ALPHA_NEW is in a.ts, not b.ts — must reject when path is b.ts
+  assert.equal(spanGroundedStrict(r, sha, "ALPHA_NEW", "diff", "src/b.ts"), false);
+  assert.equal(spanGroundedStrict(r, sha, "ALPHA_NEW", "diff", "src/a.ts"), true);
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("machine card: identical re-draft is idempotent (no duplicate journal line)", () => {
+  const { r, sha } = mkAcceptRepo();
+  const first = saveMachineCard(r, r, { sha, claim: "x", span: "v2", side: "diff", path: "src/cache.ts", by: "codex" });
+  const second = saveMachineCard(r, r, { sha, claim: "x", span: "v2", side: "diff", path: "src/cache.ts", by: "codex" });
+  assert.ok(second.idempotent);
+  assert.equal(loadCardRecords(r).length, 1);
+  assert.equal(first.card.cardId, second.card.cardId);
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("multiple cards may reference one commit (distinct claims => distinct cardIds)", () => {
+  const { r, sha } = mkAcceptRepo();
+  const a = saveMachineCard(r, r, { sha, claim: "reason one", span: "v2", side: "diff", path: "src/cache.ts", by: "codex" });
+  const b = saveMachineCard(r, r, { sha, claim: "reason two", span: "remove sync.Pool", side: "message", by: "codex" });
+  assert.notEqual(a.card.cardId, b.card.cardId);
+  assert.equal(foldCards(loadCardRecords(r)).size, 2);
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("human edit creates revision N+1 (human_attestation, no span) superseding the machine rev", () => {
+  const { r, sha } = mkAcceptRepo();
+  const m = saveMachineCard(r, r, { sha, claim: "machine draft", span: "v2", side: "diff", path: "src/cache.ts", by: "codex" });
+  const e = editCard(r, r, { cardId: m.card.cardId, claim: "human: this also broke customer-X", by: "alice" });
+  assert.ok(e.card, e.error);
+  assert.equal(e.card.rev, 2);
+  assert.equal(e.card.sourceType, "human_attestation");
+  assert.equal(e.card.span, null); // off-git context needs no span
+  assert.equal(e.card.supersedes, m.card.revHash);
+  const cur = foldCards(loadCardRecords(r)).get(m.card.cardId);
+  assert.equal(cur.rev, 2); // latest revision wins
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("strict card parse: a tampered revHash is malformed (fails self-consistency)", () => {
+  const { r, sha } = mkAcceptRepo();
+  saveMachineCard(r, r, { sha, claim: "x", span: "v2", side: "diff", path: "src/cache.ts", by: "codex" });
+  const p = join(r, "decision-cards.jsonl");
+  const rec = JSON.parse(readFileSync(p, "utf8").trim());
+  rec.claim = "SILENTLY CHANGED"; // revHash no longer matches
+  writeFileSync(p, JSON.stringify(rec) + "\n");
+  const parsed = parseCards(readFileSync(p, "utf8"));
+  assert.equal(parsed.malformed, true);
+  assert.equal(parsed.records.length, 0);
   rmSync(r, { recursive: true, force: true });
 });

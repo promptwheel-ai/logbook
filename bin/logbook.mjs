@@ -1676,6 +1676,124 @@ export function verificationSummary(verifications, key) {
     checks: mine.length, lastChecked: mine.map((v) => v.at).sort().at(-1) || null };
 }
 
+// ---- Revision-bound decision cards (Stage 1: additive identity model) -------
+// Identity is CARD_ID (stable across edits), not the commit SHA — so multiple
+// cards can reference one commit and re-annotation cannot silently shift a
+// review onto a different draft. A human edit creates a new REVISION that
+// supersedes the prior one; reviews/observations later bind CARD_ID@REVHASH.
+const CARD_SOURCES = new Set(["machine_source", "human_attestation"]);
+export function cardIdFor(sha, claim, by) {
+  return sha256(`card\0${sha}\0${String(claim)}\0${String(by)}`);
+}
+export function revHashFor(rec) {
+  return sha256(JSON.stringify({
+    cardId: rec.cardId, rev: rec.rev, sourceType: rec.sourceType,
+    claim: rec.claim, span: rec.span || "", side: rec.side || "",
+    paths: [...(rec.paths || [])].sort(),
+  }));
+}
+
+// Machine spans must be verbatim in the NAMED side (message or diff), and a
+// diff span must belong to the NAMED changed path — not merely present anywhere
+// in `git show` (which could match an unrelated file or the commit message).
+export function spanGroundedStrict(repo, sha, span, side, path) {
+  if (span == null || span === "") return false; // machine_source requires a span
+  const norm = (s) => String(s).replace(/\r\n/g, "\n");
+  if (side === "message") {
+    const r = spawnSync("git", ["-C", repo, "show", "-s", "--format=%B", sha], { encoding: "utf8", maxBuffer: 1 << 30 });
+    return r.status === 0 && norm(r.stdout).includes(norm(span));
+  }
+  if (side === "diff") {
+    if (!path) return false;
+    const r = spawnSync("git", ["-C", repo, "show", "--no-color", "--format=", sha, "--", path], { encoding: "utf8", maxBuffer: 1 << 30 });
+    return r.status === 0 && r.stdout.trim() !== "" && norm(r.stdout).includes(norm(span));
+  }
+  return false;
+}
+
+export function parseCards(text) {
+  const records = []; let malformed = false;
+  for (const line of String(text || "").split("\n")) {
+    if (!line.trim()) continue;
+    let c; try { c = JSON.parse(line); } catch { malformed = true; continue; }
+    const ok = c && HASH64.test(c.cardId) && Number.isInteger(c.rev) && c.rev >= 1 &&
+      HASH64.test(c.revHash) && FULL_SHA.test(c.sha) && CARD_SOURCES.has(c.sourceType) &&
+      typeof c.claim === "string" && c.claim.trim() &&
+      Array.isArray(c.paths) && c.paths.every((p) => typeof p === "string" && normalizeScope(p) === p) &&
+      typeof c.by === "string" && typeof c.at === "string" &&
+      revHashFor(c) === c.revHash; // self-consistent hash
+    if (ok) records.push(c); else malformed = true;
+  }
+  return { records, malformed };
+}
+
+// Current state per card: the highest-rev record. Returns Map cardId -> record.
+export function foldCards(records) {
+  const cur = new Map();
+  for (const c of records) { const p = cur.get(c.cardId); if (!p || c.rev > p.rev) cur.set(c.cardId, c); }
+  return cur;
+}
+
+export function loadCardRecords(dir) {
+  const p = join(dir, "decision-cards.jsonl");
+  return existsSync(p) ? parseCards(readFileSync(p, "utf8")).records : [];
+}
+
+// Write a NEW machine_source card (rev 1). span must be grounded in the named
+// side/path. cardId is derived from the originating assertion so identical
+// re-drafts are idempotent (same cardId + same revHash => no-op).
+export function saveMachineCard(repo, dir, { sha, claim, span, side, path, by }) {
+  const rev = spawnSync("git", ["-C", repo, "rev-parse", "--verify", "--quiet", `${sha}^{commit}`], { encoding: "utf8" });
+  const full = (rev.stdout || "").trim();
+  if (rev.status !== 0 || !FULL_SHA.test(full)) return { error: `commit not found or unreachable: ${sha}` };
+  if (!claim || !String(claim).trim()) return { error: "a card needs a claim" };
+  const sd = side || "diff";
+  if (sd !== "message" && sd !== "diff") return { error: "--side must be message | diff" };
+  const paths = sd === "diff" ? (path ? [normalizeScope(path)].filter(Boolean) : []) : [];
+  if (sd === "diff" && !paths.length) return { error: "a diff-grounded card needs --file <changed path>" };
+  const spanVal = span != null ? String(span).slice(0, 600) : null;
+  if (!spanGroundedStrict(repo, full, spanVal, sd, paths[0]))
+    return { error: `--span is not a verbatim substring of the ${sd}${sd === "diff" ? ` of ${paths[0]}` : ""} at ${full.slice(0, 12)}` };
+  if (!noNL(by)) return { error: "author may not contain newlines" };
+  const rec = { cardId: cardIdFor(full, claim, by || "agent"), rev: 1, revHash: "",
+    sha: full, sourceType: "machine_source", claim: String(claim).slice(0, 400),
+    paths, side: sd, span: spanVal, by: by || "agent", at: today(), supersedes: null };
+  rec.revHash = revHashFor(rec);
+  const existing = loadCardRecords(dir).find((c) => c.cardId === rec.cardId && c.revHash === rec.revHash);
+  if (existing) return { card: existing, idempotent: true };
+  appendPrivateLine(join(realpathSync(dir), "decision-cards.jsonl"), JSON.stringify(rec) + "\n");
+  return { card: rec };
+}
+
+// Human edit -> new revision (N+1) superseding the current one. sourceType
+// human_attestation carries off-git context with NO span requirement; a human
+// may also re-ground a machine card. Never sidecar metadata — always a revision.
+export function editCard(repo, dir, { cardId, claim, span, side, path, by, sourceType }) {
+  const current = foldCards(loadCardRecords(dir)).get(cardId);
+  if (!current) return { error: `no card ${String(cardId).slice(0, 12)} to edit` };
+  const st = sourceType || "human_attestation";
+  if (!CARD_SOURCES.has(st)) return { error: "sourceType must be machine_source | human_attestation" };
+  if (!claim || !String(claim).trim()) return { error: "an edit needs a claim" };
+  if (!noNL(by)) return { error: "author may not contain newlines" };
+  let paths = current.paths, sd = current.side, spanVal = current.span;
+  if (st === "machine_source") {
+    sd = side || current.side || "diff";
+    paths = sd === "diff" ? (path ? [normalizeScope(path)].filter(Boolean) : current.paths) : [];
+    spanVal = span != null ? String(span).slice(0, 600) : current.span;
+    if (!spanGroundedStrict(repo, current.sha, spanVal, sd, paths[0]))
+      return { error: `re-grounded --span is not verbatim in the ${sd} at ${current.sha.slice(0, 12)}` };
+  } else { // human_attestation: off-git, no span; keep or set paths
+    sd = null; spanVal = null;
+    if (path) paths = [normalizeScope(path)].filter(Boolean);
+  }
+  const rec = { cardId, rev: current.rev + 1, revHash: "", sha: current.sha, sourceType: st,
+    claim: String(claim).slice(0, 400), paths, side: sd, span: spanVal, by: by || "human",
+    at: today(), supersedes: current.revHash };
+  rec.revHash = revHashFor(rec);
+  appendPrivateLine(join(realpathSync(dir), "decision-cards.jsonl"), JSON.stringify(rec) + "\n");
+  return { card: rec };
+}
+
 // Drafts awaiting a human: annotations with no CURRENT active acceptance of
 // their exact bytes. Read-only, local (a maintainer's "what needs review"
 // view). The skill surfaces this; it must never accept on the human's behalf.
