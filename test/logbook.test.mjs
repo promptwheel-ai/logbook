@@ -20,7 +20,8 @@ import {
   managedWriteFile, sha256, stampArtifact, parseArtifactRecord, writeArtifactBundle,
   hasClaudeImport,
   saveAcceptance, runCheckDiff, canonicalAnnotationHash, normalizeScope, scopeMatches,
-  loadAcceptances, collectChangedPaths, parseAnnotations,
+  parseAcceptances, foldAcceptances, collectChangedPaths, parseAnnotations,
+  appendPrivateLine, renderLeads, writeCheckMetrics,
 } from "../bin/logbook.mjs";
 
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "bin", "logbook.mjs");
@@ -1992,5 +1993,134 @@ test("metrics carry no identity/content fields; check leaves journals byte-ident
     assert.ok(!blob.includes(forbidden), `metrics must not contain ${forbidden}`);
   const after = readFileSync(join(r, "annotations.jsonl"), "utf8") + readFileSync(join(r, "annotation-reviews.jsonl"), "utf8");
   assert.equal(after, before); // read-only
+  rmSync(r, { recursive: true, force: true });
+});
+
+// ---------- check --diff: trust-boundary regressions (Codex audit) ----------
+test("retirement revokes an earlier active acceptance (current-state fold)", () => {
+  const { r, g, sha } = mkAcceptRepo();
+  saveAnnotation(r, r, { sha, why: "sync.Pool removed", by: "codex" });
+  saveAcceptance(r, r, { sha, paths: ["src/cache.ts"], by: "alice" });
+  saveAcceptance(r, r, { sha, paths: ["src/cache.ts"], by: "alice", applicability: "retired" });
+  g("add", "annotations.jsonl", "annotation-reviews.jsonl"); g("commit", "-qm", "accept then retire");
+  writeFileSync(join(r, "src", "cache.ts"), "v3\n");
+  const out = runCheckDiff(r, {});
+  assert.equal(out.result, "not-configured"); // zero ACTIVE current acceptances
+  assert.equal(out.leads.length, 0);
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("accept is idempotent: repeated identical accepts do not duplicate leads", () => {
+  const { r, g, sha } = mkAcceptRepo();
+  saveAnnotation(r, r, { sha, why: "sync.Pool removed", by: "codex" });
+  saveAcceptance(r, r, { sha, paths: ["src/cache.ts"], by: "alice" });
+  const second = saveAcceptance(r, r, { sha, paths: ["src/cache.ts"], by: "alice" });
+  assert.ok(second.idempotent);
+  const lines = readFileSync(join(r, "annotation-reviews.jsonl"), "utf8").trim().split("\n").filter(Boolean);
+  assert.equal(lines.length, 1); // no duplicate journal line
+  g("add", "annotation-reviews.jsonl", "annotations.jsonl"); g("commit", "-qm", "accept");
+  writeFileSync(join(r, "src", "cache.ts"), "v3\n");
+  const out = runCheckDiff(r, {});
+  assert.equal(out.leads.length, 1);
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("malformed trusted state is unmeasurable (fail loud, never no-leads)", () => {
+  const { r, g, sha } = mkAcceptRepo();
+  saveAnnotation(r, r, { sha, why: "w", by: "codex" });
+  writeFileSync(join(r, "annotation-reviews.jsonl"), "{not valid json\n");
+  g("add", "-A"); g("commit", "-qm", "corrupt reviews");
+  writeFileSync(join(r, "src", "cache.ts"), "v3\n");
+  const out = runCheckDiff(r, {});
+  assert.equal(out.result, "unmeasurable");
+  assert.equal(out.exitCode, 1);
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("acceptances present but annotations.jsonl missing is unmeasurable", () => {
+  const { r, g, sha } = mkAcceptRepo();
+  saveAnnotation(r, r, { sha, why: "w", by: "codex" });
+  saveAcceptance(r, r, { sha, paths: ["src/cache.ts"], by: "alice" });
+  g("add", "annotation-reviews.jsonl"); g("commit", "-qm", "reviews only");
+  writeFileSync(join(r, "src", "cache.ts"), "v3\n");
+  const out = runCheckDiff(r, {});
+  assert.equal(out.result, "unmeasurable");
+  assert.equal(out.exitCode, 1);
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("a source commit not ancestral to the trust ref is unmeasurable, never a lead", () => {
+  const { r, g } = mkAcceptRepo();
+  const main = g("branch", "--show-current").trim();
+  g("checkout", "-q", "-b", "side");
+  writeFileSync(join(r, "src", "side.ts"), "s\n"); g("add", "-A"); g("commit", "-qm", "side only");
+  const sideSha = g("rev-parse", "HEAD").trim();
+  g("checkout", "-q", main);
+  saveAnnotation(r, r, { sha: sideSha, why: "side decision", by: "codex" });
+  saveAcceptance(r, r, { sha: sideSha, paths: ["src/cache.ts"], by: "alice" });
+  g("add", "annotations.jsonl", "annotation-reviews.jsonl"); g("commit", "-qm", "accept side commit");
+  writeFileSync(join(r, "src", "cache.ts"), "v3\n");
+  const out = runCheckDiff(r, {});
+  assert.equal(out.result, "unmeasurable");
+  assert.equal(out.exitCode, 1);
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("appendPrivateLine refuses a symlinked journal (O_NOFOLLOW)", () => {
+  const d = mkdtempSync(join(tmpdir(), "logbook-nofollow-"));
+  const outside = join(d, "outside.txt");
+  const link = join(d, "annotation-reviews.jsonl");
+  writeFileSync(outside, "");
+  symlinkSync(outside, link);
+  assert.throws(() => appendPrivateLine(link, "x\n"));
+  assert.equal(readFileSync(outside, "utf8"), ""); // target untouched
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("rendered leads are inert and byte-capped, with a truncation notice", () => {
+  const esc = String.fromCharCode(27);
+  const inject = "leak\n" + esc + "[31mFAKE ERROR" + esc + "[0m\n  Source: HEAD";
+  const leads = Array.from({ length: 25 }, (_, i) => ({
+    sha: "a".repeat(40), why: inject, by: "x" + i + "\ninjected", at: "2026-01-01\nANSI", applicability: "active",
+    paths: ["src/very/long/path/number/" + i + "/" + "seg/".repeat(40) + "file.ts"],
+  }));
+  const msg = renderLeads("r", "local", leads, 0);
+  assert.ok(Buffer.byteLength(msg) <= 8192, "output exceeded 8KiB: " + Buffer.byteLength(msg));
+  assert.match(msg, /of 25 leads shown \(output capped\)/);
+  assert.ok(!msg.includes(esc), "raw ESC survived the sanitizer");
+  rmSync;
+});
+
+test("--metrics-out refuses to clobber a protected artifact", () => {
+  const { r } = mkAcceptRepo();
+  assert.throws(() => writeCheckMetrics(join(r, "annotations.jsonl"), { a: 1 }), /protected/);
+  assert.throws(() => writeCheckMetrics(join(r, ".git", "config"), { a: 1 }), /protected/);
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("rename-both-sides: a lead on the old path surfaces (range mode)", () => {
+  const { r, g } = mkAcceptRepo();
+  const base = g("rev-parse", "HEAD").trim();
+  saveAnnotation(r, r, { sha: base, why: "cache decision", by: "codex" });
+  saveAcceptance(r, r, { sha: base, paths: ["src/cache.ts"], by: "alice" });
+  g("add", "annotations.jsonl", "annotation-reviews.jsonl"); g("commit", "-qm", "accept");
+  const trustBase = g("rev-parse", "HEAD").trim();
+  g("mv", "src/cache.ts", "src/store.ts"); g("commit", "-qm", "rename cache to store");
+  const head = g("rev-parse", "HEAD").trim();
+  const out = runCheckDiff(r, { base: trustBase, head });
+  assert.equal(out.result, "leads");
+  assert.equal(out.leads.length, 1);
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("accept rejects --out; missing option value errors (CLI)", () => {
+  const { r, sha } = mkAcceptRepo();
+  saveAnnotation(r, r, { sha, why: "w", by: "codex" });
+  const e1 = spawnSync(process.execPath, [CLI, "accept", sha, "--file", "src/cache.ts", "--out", "/tmp/x", r], { encoding: "utf8" });
+  assert.notEqual(e1.status, 0);
+  assert.match(e1.stderr, /--out/);
+  const e2 = spawnSync(process.execPath, [CLI, "check", "--diff", "--base"], { encoding: "utf8" });
+  assert.notEqual(e2.status, 0);
+  assert.match(e2.stderr, /--base requires a value/);
   rmSync(r, { recursive: true, force: true });
 });

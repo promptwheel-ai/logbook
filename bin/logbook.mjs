@@ -17,7 +17,8 @@ import { spawnSync } from "node:child_process";
 import { createHash, timingSafeEqual } from "node:crypto";
 import {
   writeFileSync, existsSync, realpathSync, readFileSync, mkdirSync, lstatSync,
-  renameSync, unlinkSync, chmodSync,
+  renameSync, unlinkSync, chmodSync, openSync, fstatSync, writeSync, closeSync,
+  constants as FS,
 } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { resolve, join, basename, dirname, relative, isAbsolute, sep } from "node:path";
@@ -1601,16 +1602,35 @@ export function scopeMatches(scope, path) {
   return path === scope;
 }
 
-export function loadAcceptances(text) {
-  const out = [];
+const FULL_SHA = /^[0-9a-f]{40}$/;
+
+// Strict: any non-blank line that is not a well-formed acceptance makes the
+// trusted state MALFORMED. Fail-open (skip + report clean) is a security bug —
+// a corrupted or crafted journal must be unmeasurable, never no-leads.
+export function parseAcceptances(text) {
+  const records = [];
+  let malformed = false;
   for (const line of String(text || "").split("\n")) {
     if (!line.trim()) continue;
-    let a; try { a = JSON.parse(line); } catch { continue; }
-    if (a && a.type === "acceptance" && typeof a.sha === "string" &&
-        typeof a.annotationSha256 === "string" && Array.isArray(a.paths) && a.paths.length)
-      out.push(a);
+    let a; try { a = JSON.parse(line); } catch { malformed = true; continue; }
+    const ok = a && a.type === "acceptance" && FULL_SHA.test(a.sha) &&
+      typeof a.annotationSha256 === "string" && /^[0-9a-f]{64}$/.test(a.annotationSha256) &&
+      Array.isArray(a.paths) && a.paths.length &&
+      a.paths.every((p) => typeof p === "string" && normalizeScope(p) === p) &&
+      ["active", "uncertain", "retired"].includes(a.applicability) &&
+      typeof a.acceptedBy === "string" && typeof a.acceptedAt === "string";
+    if (ok) records.push(a); else malformed = true;
   }
-  return out;
+  return { records, malformed };
+}
+
+// Fold to current state: last write per decision identity (sha + bound
+// annotation hash) wins entirely — its paths and applicability. Makes repeated
+// accepts idempotent and lets a later `retired` record revoke an earlier lead.
+export function foldAcceptances(records) {
+  const cur = new Map();
+  for (const a of records) cur.set(`${a.sha}\0${a.annotationSha256}`, a);
+  return [...cur.values()];
 }
 
 // Read a committed journal from a trust ref (BASE for a range, HEAD locally).
@@ -1622,27 +1642,44 @@ export function readRefFile(repo, ref, filename) {
   return null; // absent at ref
 }
 
+// Append one line to a private append-only journal without a TOCTOU window:
+// O_NOFOLLOW refuses a symlinked leaf at open time, and we fstat the FD we hold
+// (not the path) so the file cannot be swapped between check and write.
+export function appendPrivateLine(path, line) {
+  const fd = openSync(path, FS.O_WRONLY | FS.O_APPEND | FS.O_CREAT | FS.O_NOFOLLOW, 0o600);
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile() || st.nlink > 1)
+      throw new Error(`refusing append through non-private regular file: ${path}`);
+    writeSync(fd, line);
+  } finally { closeSync(fd); }
+}
+
 export function saveAcceptance(repo, dir, { sha, paths, by, applicability }) {
   const rev = spawnSync("git", ["-C", repo, "rev-parse", "--verify", "--quiet", `${sha}^{commit}`], { encoding: "utf8" });
   const full = (rev.stdout || "").trim();
-  if (rev.status !== 0 || !full) return { error: `commit not found or unreachable: ${sha}` };
+  if (rev.status !== 0 || !FULL_SHA.test(full)) return { error: `commit not found or unreachable: ${sha}` };
   const ann = loadAnnotations(dir).find((a) => a.sha === full);
   if (!ann) return { error: `no annotation to accept for ${full.slice(0, 12)} — run: logbook annotate ${full.slice(0, 12)} "<why>" first` };
-  const scopes = [...new Set((paths || []).map(normalizeScope).filter(Boolean))];
+  const scopes = [...new Set((paths || []).map(normalizeScope).filter(Boolean))].sort();
   if (!scopes.length) return { error: "acceptance requires at least one --file or --dir path scope" };
   const app = applicability || "active";
   if (!["active", "uncertain", "retired"].includes(app)) return { error: "applicability must be active | uncertain | retired" };
+  if (by != null && /[\r\n]/.test(by)) return { error: "attestor (--by) may not contain newlines" };
   const now = new Date();
   const local = new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
-  const ev = { type: "acceptance", sha: full, annotationSha256: canonicalAnnotationHash(ann),
+  const hash = canonicalAnnotationHash(ann);
+  const ev = { type: "acceptance", sha: full, annotationSha256: hash,
     paths: scopes, applicability: app, acceptedBy: by || "human", acceptedAt: local };
+  // idempotent: if the CURRENT folded state for this decision already matches
+  // (modulo date), don't append a duplicate line that would double the metrics.
   const p = join(realpathSync(dir), "annotation-reviews.jsonl");
-  if (existsSync(p)) {
-    const st = lstatSync(p);
-    if (!st.isFile() || st.isSymbolicLink() || st.nlink > 1)
-      throw new Error(`refusing acceptance append through non-private regular file: ${p}`);
-  }
-  writeFileSync(p, JSON.stringify(ev) + "\n", { flag: "a" });
+  const existingText = existsSync(p) ? readFileSync(p, "utf8") : "";
+  const cur = foldAcceptances(parseAcceptances(existingText).records).find((a) => a.sha === full && a.annotationSha256 === hash);
+  if (cur && cur.applicability === app && cur.acceptedBy === ev.acceptedBy &&
+      cur.paths.length === scopes.length && cur.paths.every((x, i) => x === scopes[i]))
+    return { accepted: cur, annotation: ann, idempotent: true };
+  appendPrivateLine(p, JSON.stringify(ev) + "\n");
   return { accepted: ev, annotation: ann };
 }
 
@@ -1686,34 +1723,52 @@ export function runCheckDiff(repo, { base, head } = {}) {
   const m = { schema: "logbook-check-metrics-v1", mode, result: "unmeasurable",
     changedPathCount: 0, acceptedDecisionCount: 0, matchedDecisionCount: 0,
     leadCount: 0, ignoredDraftCount: 0, unmeasurableCount: 0 };
+  const unmeasurable = (why) => { m.unmeasurableCount = Math.max(1, m.unmeasurableCount); m.result = "unmeasurable";
+    return { exitCode: 1, result: "unmeasurable", metrics: m, leads: [], message: `unmeasurable: ${why} (exit nonzero — not "clean").` }; };
+
+  // resolve the trust ref to an immutable commit; source commits must be
+  // ancestral to THIS, so a side-branch or symbolic ref cannot surface.
+  const tc = spawnSync("git", ["-C", repo, "rev-parse", "--verify", "--quiet", `${trustRef}^{commit}`], { encoding: "utf8" });
+  const trustCommit = (tc.stdout || "").trim();
+  if (tc.status !== 0 || !FULL_SHA.test(trustCommit)) return unmeasurable(`trust ref ${trustRef} does not resolve to a commit`);
 
   const changed = collectChangedPaths(repo, { base, head });
-  if (changed.error) { m.unmeasurableCount = 1; return { exitCode: 1, result: "unmeasurable", metrics: m, message: `unmeasurable: ${changed.error}` }; }
+  if (changed.error) return unmeasurable(changed.error);
   m.changedPathCount = changed.paths.length;
 
   const accText = readRefFile(repo, trustRef, "annotation-reviews.jsonl");
   if (accText === null)
-    return { exitCode: 0, result: "not-configured", metrics: { ...m, result: "not-configured" },
+    return { exitCode: 0, result: "not-configured", leads: [], metrics: { ...m, result: "not-configured" },
       message: `no accepted decisions configured at ${trustRef} — no accepted-decision conclusion possible (this is not "clean").` };
-  const annById = parseAnnotations(readRefFile(repo, trustRef, "annotations.jsonl"));
-  const acceptances = loadAcceptances(accText);
-  m.acceptedDecisionCount = acceptances.length;
+  const parsed = parseAcceptances(accText);
+  if (parsed.malformed) return unmeasurable(`the accepted-decision journal at ${trustRef} is malformed`);
+  const annText = readRefFile(repo, trustRef, "annotations.jsonl");
+  if (annText === null && parsed.records.length) return unmeasurable(`accepted decisions exist but annotations.jsonl is missing at ${trustRef}`);
+  const annById = parseAnnotations(annText);
+
+  const folded = foldAcceptances(parsed.records);
+  const active = folded.filter((a) => a.applicability !== "retired");
+  m.acceptedDecisionCount = active.length;
+  if (!active.length)
+    return { exitCode: 0, result: "not-configured", leads: [], metrics: { ...m, result: "not-configured" },
+      message: `no active accepted decisions at ${trustRef} — no accepted-decision conclusion possible (this is not "clean").` };
 
   const changedList = changed.paths;
   const leads = [];
-  for (const acc of acceptances) {
-    if (acc.applicability === "retired") continue;
+  for (const acc of active) {
     const ann = annById.get(acc.sha);
-    if (!ann || canonicalAnnotationHash(ann) !== acc.annotationSha256) { m.ignoredDraftCount++; continue; } // re-annotated / drifted / missing
-    const rev = spawnSync("git", ["-C", repo, "rev-parse", "--verify", "--quiet", `${acc.sha}^{commit}`], { encoding: "utf8" });
-    if (rev.status !== 0) { m.unmeasurableCount++; continue; } // source object unavailable at trust ref
+    if (!ann || canonicalAnnotationHash(ann) !== acc.annotationSha256) { m.ignoredDraftCount++; continue; } // drift/re-annotate: silently not a lead
+    // the cited commit must be a real, immutable, ANCESTRAL commit of the trust
+    // commit — not merely present in the object DB on some unmerged branch.
+    const anc = spawnSync("git", ["-C", repo, "merge-base", "--is-ancestor", acc.sha, trustCommit], { encoding: "utf8" });
+    if (anc.status !== 0) { m.unmeasurableCount++; continue; } // missing or non-ancestral => cannot trust
     const hitPaths = acc.paths.filter((scope) => changedList.some((p) => scopeMatches(scope, p)));
     if (!hitPaths.length) continue;
     leads.push({ sha: acc.sha, why: ann.why, by: acc.acceptedBy, at: acc.acceptedAt, applicability: acc.applicability, paths: hitPaths });
   }
   m.matchedDecisionCount = leads.length; m.leadCount = leads.length;
-  // Never turn "unmeasurable" into clean: a missing source object is an
-  // incomplete measurement, exit nonzero even if some leads were found.
+  // never turn "unmeasurable" into clean: a non-ancestral/missing source is an
+  // incomplete measurement — exit nonzero even if some leads were found.
   const incomplete = m.unmeasurableCount > 0;
   m.result = incomplete ? "unmeasurable" : (leads.length ? "leads" : "no-leads");
   return { exitCode: incomplete ? 1 : 0, result: m.result, metrics: m, leads,
@@ -1721,28 +1776,52 @@ export function runCheckDiff(repo, { base, head } = {}) {
 }
 
 export function renderLeads(name, mode, leads, unmeasurable = 0) {
-  const cap = 8192;
-  const lines = [];
-  if (!leads.length) lines.push(`logbook check (${mode}): 0 accepted decision leads touch this diff.`);
-  else lines.push(`logbook check (${mode}): ${leads.length} accepted decision lead${leads.length > 1 ? "s" : ""} touch${leads.length > 1 ? "" : "es"} this diff`);
-  for (const l of leads.slice(0, 20)) {
-    const why = sanitizeContextText(l.why, 512, { markdown: false });
-    const paths = l.paths.map((p) => sanitizeContextText(p, 256, { markdown: false })).join(", ");
+  const CAP = 8192, MAXROWS = 20, RESERVE = 400; // reserve for the trailing notices
+  const s = (v, n) => sanitizeContextText(String(v ?? ""), n, { markdown: false }); // every field is untrusted
+  const parts = [leads.length
+    ? `logbook check (${mode}): ${leads.length} accepted decision lead${leads.length === 1 ? "" : "s"} touch this diff`
+    : `logbook check (${mode}): 0 accepted decision leads touch this diff.`];
+  let bytes = Buffer.byteLength(parts[0]), shown = 0;
+  for (const l of leads) {
+    if (shown >= MAXROWS) break;
     const tag = l.applicability === "uncertain" ? " [applicability: uncertain]" : "";
-    lines.push(`\n${paths}${tag}\n  Prior reviewed rationale: ${why}\n  Source: ${l.sha}   (verify: git show ${l.sha})\n  Accepted by ${sanitizeContextText(l.by, 128, { markdown: false })} on ${l.at}`);
-    if (lines.join("\n").length > cap) { lines.push("\n… (truncated)"); break; }
+    const row = `\n${l.paths.map((p) => s(p, 256)).join(", ")}${tag}` +
+      `\n  Prior reviewed rationale: ${s(l.why, 512)}` +
+      `\n  Source: ${s(l.sha, 64)}   (verify: git show ${s(l.sha, 64)})` +
+      `\n  Accepted by ${s(l.by, 128)} on ${s(l.at, 32)}`;
+    if (bytes + Buffer.byteLength(row) > CAP - RESERVE) break;
+    parts.push(row); bytes += Buffer.byteLength(row); shown++;
   }
-  if (leads.length) lines.push(`\nLead, not verdict: path overlap proves relevance only, not a semantic conflict. Verify the source and confirm the constraint still applies.`);
-  if (unmeasurable) lines.push(`\nunmeasurable: ${unmeasurable} accepted decision(s) cite a source object unavailable at the trust ref (exit nonzero — not clean).`);
-  return lines.join("\n");
+  if (shown < leads.length) parts.push(`\n… ${shown} of ${leads.length} leads shown (output capped).`);
+  if (leads.length) parts.push(`\nLead, not verdict: path overlap proves relevance only, not a semantic conflict. Verify the source and confirm the constraint still applies.`);
+  if (unmeasurable) parts.push(`\nunmeasurable: ${unmeasurable} accepted decision(s) cite a source not ancestral/available at the trust ref (exit nonzero — not "clean").`);
+  return parts.join("");
 }
 
+const PROTECTED_ARTIFACTS = new Set([
+  "annotations.jsonl", "annotation-reviews.jsonl", "events.jsonl",
+  "LOGBOOK.md", "JOURNEY.md", "AGENTS.md", "CLAUDE.md", ".cursorrules",
+]);
+// opt-in, local, atomic, aggregate-only. Refuse a protected artifact / .git
+// path so --metrics-out cannot clobber a journal, and use an O_EXCL|O_NOFOLLOW
+// temp so a pre-planted symlink at the predictable temp name cannot redirect
+// the write. Throws on any failure so the caller can exit nonzero.
 export function writeCheckMetrics(target, metrics) {
-  // opt-in, local, atomic, aggregate-only — no repo name, paths, SHAs, prose,
-  // authors, timestamps, or machine identifiers. Incidence/coverage/noise only.
-  const tmp = `${target}.tmp-${process.pid}`;
-  writeFileSync(tmp, JSON.stringify(metrics, null, 2) + "\n");
-  renameSync(tmp, target);
+  const t = resolve(target);
+  if (PROTECTED_ARTIFACTS.has(basename(t)) || t.split(sep).includes(".git"))
+    throw new Error(`refusing to write metrics over a protected path: ${target}`);
+  const data = JSON.stringify(metrics, null, 2) + "\n";
+  const tmp = `${t}.tmp.${process.pid}.${managedTempId++}`;
+  let fd;
+  try {
+    fd = openSync(tmp, FS.O_WRONLY | FS.O_CREAT | FS.O_EXCL | FS.O_NOFOLLOW, 0o600);
+    writeSync(fd, data); closeSync(fd); fd = undefined;
+    renameSync(tmp, t);
+  } catch (e) {
+    if (fd !== undefined) { try { closeSync(fd); } catch { /* ignore */ } }
+    try { unlinkSync(tmp); } catch { /* ignore */ }
+    throw e;
+  }
 }
 
 // Claude imports @paths only from prose, not fenced/inline examples. Doctor
@@ -2062,16 +2141,15 @@ export function parseArgs(argv) {
     else if (a === "accept") o.cmd = "accept";
     else if (a === "check") o.cmd = "check";
     else if (a === "--diff") o.diff = true;
-    else if (a === "--base") o.base = argv[++i];
-    else if (a === "--head") o.head = argv[++i];
-    else if (a === "--applicability") o.applicability = argv[++i];
-    else if (a === "--metrics-out") o.metricsOut = argv[++i];
+    else if (a === "--base") { if (i + 1 >= argv.length) o._missing = "--base"; else o.base = argv[++i]; }
+    else if (a === "--head") { if (i + 1 >= argv.length) o._missing = "--head"; else o.head = argv[++i]; }
+    else if (a === "--applicability") { if (i + 1 >= argv.length) o._missing = "--applicability"; else o.applicability = argv[++i]; }
+    else if (a === "--metrics-out") { if (i + 1 >= argv.length) o._missing = "--metrics-out"; else o.metricsOut = argv[++i]; }
     else if (a === "--dir") {
-      let d = argv[++i];
-      if (d && !d.endsWith("/")) d += "/";
-      if (d) (o.files ||= []).push(d);
+      if (i + 1 >= argv.length) o._missing = "--dir";
+      else { let d = argv[++i]; if (d && !d.endsWith("/")) d += "/"; if (d) (o.files ||= []).push(d); }
     }
-    else if (a === "--by") o.by = argv[++i];
+    else if (a === "--by") { if (i + 1 >= argv.length) o._missing = "--by"; else o.by = argv[++i]; }
     else if (a === "--file") {
       o.file = argv[++i];
       (o.files ||= []).push(o.file);
@@ -2113,6 +2191,10 @@ async function main() {
     const { readFileSync } = await import("node:fs");
     const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
     return console.log(pkg.version);
+  }
+  if (o._missing) {
+    console.error(`  ${o._missing} requires a value`);
+    process.exit(1);
   }
   if (o.files?.some((file) => typeof file !== "string" || !file.length)) {
     console.error("logbook: --file requires a non-empty path substring");
@@ -2193,7 +2275,11 @@ async function main() {
       console.error(`  usage: logbook accept <sha> --file <path> [--dir <prefix>] [--by <who>] [--applicability active|uncertain|retired]`);
       process.exit(1);
     }
-    const dir = o.out ? resolve(o.out) : repo;
+    if (o.out) {
+      console.error(`  accept does not support --out: acceptances must live at the repo root so check --diff reads them from the trust ref`);
+      process.exit(1);
+    }
+    const dir = repo;
     const res = saveAcceptance(repo, dir, { sha: o.sha, paths: o.files, by: o.by, applicability: o.applicability });
     if (res.error) { console.error(`  ${res.error}`); process.exit(1); }
     const ev = res.accepted;
@@ -2214,12 +2300,14 @@ async function main() {
       process.exit(1);
     }
     const r = runCheckDiff(repo, { base: o.base, head: o.head });
+    let exitCode = r.exitCode;
     if (o.metricsOut) {
-      try { writeCheckMetrics(resolve(o.metricsOut), r.metrics); }
-      catch (e) { console.error(`  could not write metrics: ${e.message}`); }
+      // a requested-but-failed metrics write is a failure, not a silent success
+      try { writeCheckMetrics(o.metricsOut, r.metrics); }
+      catch (e) { console.error(`  metrics write failed: ${e.message}`); exitCode = 1; }
     }
     console.log(r.message);
-    process.exitCode = r.exitCode;
+    process.exitCode = exitCode;
     return;
   }
 
