@@ -1787,6 +1787,9 @@ export function doctorRepo(repo) {
       : homeRelative ? `~/${homeRelative}`
         : codexRelative ? `$CODEX_HOME/${codexRelative}`
           : basename(skill);
+    // Doctor output is meant to be pasted into cross-platform bug reports;
+    // keep its redacted display paths stable instead of leaking OS separators.
+    skillDisplay = skillDisplay.split(sep).join("/");
   }
   if (skill) add("pass", "skill", `discoverable Logbook skill found at ${sanitizeContextText(skillDisplay, 1024, { markdown: false })}`);
   else add("warn", "skill", "no valid Logbook skill found at conventional repo or home locations",
