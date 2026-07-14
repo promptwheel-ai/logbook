@@ -62,6 +62,20 @@ causes you verified in the actual diffs, and treat old annotations as aged
 testimony — the fact never changes, but its force can (a "reverted because
 webpack4 broke" constraint stops binding once webpack4 is dead).
 
+Annotate LAZILY — one revert you actually investigated at a time — never bulk-
+generate annotations across a repo's whole history (that fabricates rationale
+and floods review). Every annotation you write is a DRAFT: it is inert and does
+NOT surface in `logbook check --diff` (the diff-time preflight) until a human
+explicitly ratifies it. That ratification is a human attestation, scoped to
+paths — NEVER run `accept` yourself. After annotating, tell the human the draft
+awaits their review, and surface what is pending:
+
+```bash
+npx @promptwheel/logbook pending    # draft annotations no human has accepted yet
+# a maintainer then runs, for the ones they trust:
+#   npx @promptwheel/logbook accept SHA --file path/to/file --by their-name
+```
+
 ## Querying the full record (events.jsonl)
 
 The digest truncates with "…and N more — full record in events.jsonl". When

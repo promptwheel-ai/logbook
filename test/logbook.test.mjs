@@ -21,7 +21,7 @@ import {
   hasClaudeImport,
   saveAcceptance, runCheckDiff, canonicalAnnotationHash, normalizeScope, scopeMatches,
   parseAcceptances, foldAcceptances, collectChangedPaths, parseAnnotations,
-  appendPrivateLine, renderLeads, writeCheckMetrics,
+  appendPrivateLine, renderLeads, writeCheckMetrics, pendingDrafts,
 } from "../bin/logbook.mjs";
 
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "bin", "logbook.mjs");
@@ -2122,5 +2122,19 @@ test("accept rejects --out; missing option value errors (CLI)", () => {
   const e2 = spawnSync(process.execPath, [CLI, "check", "--diff", "--base"], { encoding: "utf8" });
   assert.notEqual(e2.status, 0);
   assert.match(e2.stderr, /--base requires a value/);
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("pending: lists drafts with no active acceptance; retiring re-pends", () => {
+  const { r, sha } = mkAcceptRepo();
+  // two drafts on the same repo (annotate a second commit too)
+  saveAnnotation(r, r, { sha, why: "decision A", by: "codex" });
+  const first = execFileSync("git", ["-C", r, "rev-list", "--max-parents=0", "HEAD"], { encoding: "utf8" }).trim();
+  saveAnnotation(r, r, { sha: first, why: "decision B", by: "codex" });
+  assert.equal(pendingDrafts(r).length, 2); // nothing accepted yet
+  saveAcceptance(r, r, { sha, paths: ["src/cache.ts"], by: "alice" });
+  assert.equal(pendingDrafts(r).length, 1); // one ratified, one still pending
+  saveAcceptance(r, r, { sha, paths: ["src/cache.ts"], by: "alice", applicability: "retired" });
+  assert.equal(pendingDrafts(r).length, 2); // retired => no active acceptance => pending again
   rmSync(r, { recursive: true, force: true });
 });

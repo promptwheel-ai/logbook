@@ -1633,6 +1633,18 @@ export function foldAcceptances(records) {
   return [...cur.values()];
 }
 
+// Drafts awaiting a human: annotations with no CURRENT active acceptance of
+// their exact bytes. Read-only, local (a maintainer's "what needs review"
+// view). The skill surfaces this; it must never accept on the human's behalf.
+export function pendingDrafts(dir) {
+  const anns = loadAnnotations(dir);
+  const p = join(dir, "annotation-reviews.jsonl");
+  const accText = existsSync(p) ? readFileSync(p, "utf8") : "";
+  const active = foldAcceptances(parseAcceptances(accText).records).filter((a) => a.applicability !== "retired");
+  const accepted = new Set(active.map((a) => `${a.sha}\0${a.annotationSha256}`));
+  return anns.filter((a) => !accepted.has(`${a.sha}\0${canonicalAnnotationHash(a)}`));
+}
+
 // Read a committed journal from a trust ref (BASE for a range, HEAD locally).
 // Returns null when absent at the ref (means "no accepted decisions", not an
 // error); throws only on a real git failure the caller reports as unmeasurable.
@@ -2112,6 +2124,8 @@ function usage() {
                                   read-only diff-time preflight: accepted decisions
                                   whose path scope the change touches (non-blocking;
                                   exits nonzero only when unmeasurable, never "clean")
+    logbook pending [path]        draft annotations no human has accepted yet
+                                  (they stay inert until a maintainer runs accept)
     logbook [path] --json         structured events to stdout (writes nothing)
 
   options:
@@ -2140,6 +2154,7 @@ export function parseArgs(argv) {
     else if (a === "annotate") o.cmd = "annotate";
     else if (a === "accept") o.cmd = "accept";
     else if (a === "check") o.cmd = "check";
+    else if (a === "pending") o.cmd = "pending";
     else if (a === "--diff") o.diff = true;
     else if (a === "--base") { if (i + 1 >= argv.length) o._missing = "--base"; else o.base = argv[++i]; }
     else if (a === "--head") { if (i + 1 >= argv.length) o._missing = "--head"; else o.head = argv[++i]; }
@@ -2308,6 +2323,20 @@ async function main() {
     }
     console.log(r.message);
     process.exitCode = exitCode;
+    return;
+  }
+
+  if (o.cmd === "pending") {
+    const dir = o.out ? resolve(o.out) : repo;
+    const drafts = pendingDrafts(dir);
+    if (!drafts.length) { if (!o.quiet) console.log("  no draft annotations awaiting acceptance"); return; }
+    if (!o.quiet) {
+      console.log(`  ${C.bold}${drafts.length}${C.r} draft annotation${drafts.length === 1 ? "" : "s"} awaiting human acceptance ${C.dim}(inert — never surface in check --diff until accepted)${C.r}\n`);
+      for (const a of drafts.slice(0, 50))
+        console.log(`  ${a.sha.slice(0, 8)}  ${sanitizeContextText(a.why, 160, { markdown: false })}  ${C.dim}(by ${sanitizeContextText(a.by, 64, { markdown: false })}, ${a.date})${C.r}`);
+      if (drafts.length > 50) console.log(`  ${C.dim}… and ${drafts.length - 50} more${C.r}`);
+      console.log(`\n  ${C.dim}a maintainer reviews the diff and runs: logbook accept SHA --file <path> --by <who>${C.r}\n`);
+    }
     return;
   }
 
