@@ -53,8 +53,12 @@ WHY something happened — a revert's failure mode, a suppression's cause —
 save it so the next session gets it free instead of re-investigating:
 
 ```bash
-npx @promptwheel/logbook annotate SHA "one specific sentence" --by MODEL
+npx @promptwheel/logbook annotate SHA "one specific sentence" --span "exact quote from the commit" --by MODEL
 ```
+
+`--span` must be a verbatim substring of the commit (message + diff) or the draft
+is rejected — quote what you actually read, never paraphrase into the span. This
+makes the card glance-reviewable by a human without re-running git.
 
 Annotations are sha-keyed, attributed, dated, and merged into LOGBOOK.md as
 "why (inferred)" lines on future runs. Judgments, not records: only annotate
@@ -89,6 +93,22 @@ This is the SAME lazy loop run on purpose, not a shortcut: for each item, run
 draft. Do NOT batch-generate rationale you did not verify — an un-grounded card
 is the failure mode the human gate exists to catch. The worklist is deterministic
 (the CLI names what warrants a why); the investigation and drafting are yours.
+
+## Reinforce accepted decisions during related work
+
+When your work brings you to an ALREADY-ACCEPTED decision (surfaced by
+`check --diff` or `context`), record an evidence-bearing check so the memory
+stays accurate over time:
+
+```bash
+npx @promptwheel/logbook verify SHA --verdict confirmed|challenged|unmeasurable --note "what you checked"
+```
+
+`challenged` (the constraint may no longer hold) raises human re-review priority
+— it does NOT change the decision; only a human's `accept --applicability` does.
+NEVER record `confirmed` for a card you did not actually re-check against the
+current code: a correlated confirmation by the same model is a self-reinforcing
+hallucination, not evidence. Every check must cite what you looked at in `--note`.
 
 ## Querying the full record (events.jsonl)
 

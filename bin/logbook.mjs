@@ -1537,16 +1537,21 @@ export function loadAnnotations(dir) {
   return [...bySha.values()];
 }
 
-export function saveAnnotation(repo, dir, { sha, why, by }) {
+export function saveAnnotation(repo, dir, { sha, why, by, span }) {
   const r = spawnSync("git", ["-C", repo, "rev-parse", "--verify", "--quiet", `${sha}^{commit}`], { encoding: "utf8" });
   const full = (r.stdout || "").trim();
   if (r.status !== 0 || !full) return null;
   const now = new Date();
   const local = new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+  const spanVal = span != null && span !== "" ? String(span).slice(0, 600) : null;
+  // a structured card's quote must be verbatim from the commit, or abstain
+  if (spanVal && !spanGrounded(repo, full, spanVal))
+    return { error: `--span is not a verbatim substring of ${full.slice(0, 12)} (message + diff); quote it exactly or omit it` };
   const a = { sha: full, why: String(why).slice(0, 400), by: by || "agent", date: local };
-  // idempotent: an identical annotation (same sha+why+by) is a no-op, not
-  // a duplicate line — repeated MCP retries must not grow the file
-  const existing = loadAnnotations(dir).find((x) => x.sha === a.sha && x.why === a.why && x.by === a.by);
+  if (spanVal) a.span = spanVal;
+  // idempotent: an identical card (same sha+why+by+span) is a no-op, not a
+  // duplicate line — repeated MCP/agent retries must not grow the file
+  const existing = loadAnnotations(dir).find((x) => x.sha === a.sha && x.why === a.why && x.by === a.by && (x.span || "") === (a.span || ""));
   if (existing) return existing;
   const annotationsPath = join(realpathSync(dir), "annotations.jsonl");
   if (existsSync(annotationsPath)) {
@@ -1574,8 +1579,22 @@ export function noteFor(notes, e) {
 // acceptance can never drift onto edited prose. Nothing here is trust that a
 // biological human reviewed the card; it is an explicit, scoped, base-ref
 // attestation whose worth the field metrics measure.
+// The card's identity binds its full content — claim, source span, author, date
+// — so editing any of them invalidates a prior review (no drift onto changed
+// prose). span defaults to "" for legacy free-prose annotations.
 export function canonicalAnnotationHash(a) {
-  return sha256(JSON.stringify({ sha: a.sha, why: a.why, by: a.by, date: a.date }));
+  return sha256(JSON.stringify({ sha: a.sha, why: a.why, by: a.by, date: a.date, span: a.span || "" }));
+}
+
+// One documented normalization for mechanical span validation: CRLF -> LF only.
+// A card's quoted span MUST be a verbatim contiguous substring of the commit
+// (message + diff) after this — no stitching, no ellipsis.
+export function spanGrounded(repo, sha, span) {
+  if (span == null || span === "") return true; // no span asserted
+  const r = spawnSync("git", ["-C", repo, "show", "--no-color", sha], { encoding: "utf8", maxBuffer: 1 << 30 });
+  if (r.status !== 0) return false;
+  const norm = (s) => String(s).replace(/\r\n/g, "\n");
+  return norm(r.stdout).includes(norm(span));
 }
 
 export function parseAnnotations(text) {
@@ -1603,34 +1622,58 @@ export function scopeMatches(scope, path) {
 }
 
 const FULL_SHA = /^[0-9a-f]{40}$/;
+const HASH64 = /^[0-9a-f]{64}$/;
+export const reviewKey = (r) => `${r.sha}\0${r.annotationSha256}`;
 
-// Strict: any non-blank line that is not a well-formed acceptance makes the
-// trusted state MALFORMED. Fail-open (skip + report clean) is a security bug —
-// a corrupted or crafted journal must be unmeasurable, never no-leads.
-export function parseAcceptances(text) {
-  const records = [];
+// One review journal, three event types: acceptance (ratify + optional human
+// amendment), rejection, and verification (a later agent confirms a card still
+// holds, or flags drift). Strict: any non-blank line that is not a well-formed
+// event makes the trusted state MALFORMED — fail-open would be a security bug.
+export function parseReviews(text) {
+  const ratifications = [], verifications = [];
   let malformed = false;
   for (const line of String(text || "").split("\n")) {
     if (!line.trim()) continue;
     let a; try { a = JSON.parse(line); } catch { malformed = true; continue; }
-    const ok = a && a.type === "acceptance" && FULL_SHA.test(a.sha) &&
-      typeof a.annotationSha256 === "string" && /^[0-9a-f]{64}$/.test(a.annotationSha256) &&
-      Array.isArray(a.paths) && a.paths.length &&
-      a.paths.every((p) => typeof p === "string" && normalizeScope(p) === p) &&
-      ["active", "uncertain", "retired"].includes(a.applicability) &&
-      typeof a.acceptedBy === "string" && typeof a.acceptedAt === "string";
-    if (ok) records.push(a); else malformed = true;
+    if (!a || !FULL_SHA.test(a.sha) || !HASH64.test(a.annotationSha256)) { malformed = true; continue; }
+    if (a.type === "acceptance") {
+      const ok = Array.isArray(a.paths) && a.paths.length &&
+        a.paths.every((p) => typeof p === "string" && normalizeScope(p) === p) &&
+        ["active", "uncertain", "retired"].includes(a.applicability) &&
+        typeof a.acceptedBy === "string" && typeof a.acceptedAt === "string" &&
+        (a.amendment == null || typeof a.amendment === "string");
+      if (ok) ratifications.push(a); else malformed = true;
+    } else if (a.type === "rejection") {
+      if (typeof a.by === "string" && typeof a.at === "string") ratifications.push(a); else malformed = true;
+    } else if (a.type === "verification") {
+      // evidence-bearing: a check must say what it looked at, or it is noise
+      if (["confirmed", "challenged", "unmeasurable"].includes(a.verdict) &&
+          typeof a.by === "string" && typeof a.at === "string" &&
+          typeof a.note === "string" && a.note.trim())
+        verifications.push(a); else malformed = true;
+    } else malformed = true;
   }
-  return { records, malformed };
+  return { ratifications, verifications, malformed };
 }
 
-// Fold to current state: last write per decision identity (sha + bound
-// annotation hash) wins entirely — its paths and applicability. Makes repeated
-// accepts idempotent and lets a later `retired` record revoke an earlier lead.
-export function foldAcceptances(records) {
+// Current ratification per card identity (sha + bound card hash): last write
+// wins, whether acceptance or rejection. Idempotent repeats; retirement or a
+// later rejection revokes an earlier accept.
+export function foldRatifications(ratifications) {
   const cur = new Map();
-  for (const a of records) cur.set(`${a.sha}\0${a.annotationSha256}`, a);
-  return [...cur.values()];
+  for (const a of ratifications) cur.set(reviewKey(a), a);
+  return cur;
+}
+
+// NOT a confidence tally: repeated confirmations by the same model are
+// correlated and can reinforce a shared hallucination, so a count is
+// misleading. What matters is a CHALLENGE — a machine check that the card may
+// no longer hold — which raises human re-review priority. It never rewrites the
+// accepted applicability; only a human does that.
+export function verificationSummary(verifications, key) {
+  const mine = verifications.filter((v) => reviewKey(v) === key);
+  return { challenged: mine.some((v) => v.verdict === "challenged"),
+    checks: mine.length, lastChecked: mine.map((v) => v.at).sort().at(-1) || null };
 }
 
 // Drafts awaiting a human: annotations with no CURRENT active acceptance of
@@ -1640,9 +1683,8 @@ export function pendingDrafts(dir) {
   const anns = loadAnnotations(dir);
   const p = join(dir, "annotation-reviews.jsonl");
   const accText = existsSync(p) ? readFileSync(p, "utf8") : "";
-  const active = foldAcceptances(parseAcceptances(accText).records).filter((a) => a.applicability !== "retired");
-  const accepted = new Set(active.map((a) => `${a.sha}\0${a.annotationSha256}`));
-  return anns.filter((a) => !accepted.has(`${a.sha}\0${canonicalAnnotationHash(a)}`));
+  const resolved = foldRatifications(parseReviews(accText).ratifications); // accepted OR rejected == dealt with
+  return anns.filter((a) => !resolved.has(reviewKey({ sha: a.sha, annotationSha256: canonicalAnnotationHash(a) })));
 }
 
 // Read a committed journal from a trust ref (BASE for a range, HEAD locally).
@@ -1667,32 +1709,66 @@ export function appendPrivateLine(path, line) {
   } finally { closeSync(fd); }
 }
 
-export function saveAcceptance(repo, dir, { sha, paths, by, applicability }) {
+function resolveAnnotated(repo, dir, sha) {
   const rev = spawnSync("git", ["-C", repo, "rev-parse", "--verify", "--quiet", `${sha}^{commit}`], { encoding: "utf8" });
   const full = (rev.stdout || "").trim();
   if (rev.status !== 0 || !FULL_SHA.test(full)) return { error: `commit not found or unreachable: ${sha}` };
   const ann = loadAnnotations(dir).find((a) => a.sha === full);
-  if (!ann) return { error: `no annotation to accept for ${full.slice(0, 12)} — run: logbook annotate ${full.slice(0, 12)} "<why>" first` };
+  if (!ann) return { error: `no draft annotation for ${full.slice(0, 12)} — run: logbook annotate ${full.slice(0, 12)} "<why>" first` };
+  return { full, ann };
+}
+const today = () => { const n = new Date(); return new Date(n.getTime() - n.getTimezoneOffset() * 60000).toISOString().slice(0, 10); };
+const noNL = (v) => v == null || !/[\r\n]/.test(v);
+
+export function saveAcceptance(repo, dir, { sha, paths, by, applicability, amendment }) {
+  const rr = resolveAnnotated(repo, dir, sha);
+  if (rr.error) return rr;
+  const { full, ann } = rr;
   const scopes = [...new Set((paths || []).map(normalizeScope).filter(Boolean))].sort();
   if (!scopes.length) return { error: "acceptance requires at least one --file or --dir path scope" };
   const app = applicability || "active";
   if (!["active", "uncertain", "retired"].includes(app)) return { error: "applicability must be active | uncertain | retired" };
-  if (by != null && /[\r\n]/.test(by)) return { error: "attestor (--by) may not contain newlines" };
-  const now = new Date();
-  const local = new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+  if (!noNL(by) || !noNL(amendment)) return { error: "attestor/amendment may not contain newlines" };
   const hash = canonicalAnnotationHash(ann);
   const ev = { type: "acceptance", sha: full, annotationSha256: hash,
-    paths: scopes, applicability: app, acceptedBy: by || "human", acceptedAt: local };
-  // idempotent: if the CURRENT folded state for this decision already matches
-  // (modulo date), don't append a duplicate line that would double the metrics.
+    paths: scopes, applicability: app, acceptedBy: by || "human", acceptedAt: today() };
+  if (amendment) ev.amendment = String(amendment).slice(0, 800);
   const p = join(realpathSync(dir), "annotation-reviews.jsonl");
   const existingText = existsSync(p) ? readFileSync(p, "utf8") : "";
-  const cur = foldAcceptances(parseAcceptances(existingText).records).find((a) => a.sha === full && a.annotationSha256 === hash);
-  if (cur && cur.applicability === app && cur.acceptedBy === ev.acceptedBy &&
+  const cur = foldRatifications(parseReviews(existingText).ratifications).get(reviewKey(ev));
+  if (cur && cur.type === "acceptance" && cur.applicability === app && cur.acceptedBy === ev.acceptedBy &&
+      (cur.amendment || "") === (ev.amendment || "") &&
       cur.paths.length === scopes.length && cur.paths.every((x, i) => x === scopes[i]))
     return { accepted: cur, annotation: ann, idempotent: true };
   appendPrivateLine(p, JSON.stringify(ev) + "\n");
   return { accepted: ev, annotation: ann };
+}
+
+export function saveRejection(repo, dir, { sha, by, reason }) {
+  const rr = resolveAnnotated(repo, dir, sha);
+  if (rr.error) return rr;
+  if (!noNL(by) || !noNL(reason)) return { error: "attestor/reason may not contain newlines" };
+  const ev = { type: "rejection", sha: rr.full, annotationSha256: canonicalAnnotationHash(rr.ann), by: by || "human", at: today() };
+  if (reason) ev.reason = String(reason).slice(0, 400);
+  appendPrivateLine(join(realpathSync(dir), "annotation-reviews.jsonl"), JSON.stringify(ev) + "\n");
+  return { rejected: ev };
+}
+
+// Reinforce loop: a later agent doing related work records an EVIDENCE-BEARING
+// check — confirmed / challenged / unmeasurable, with a note of what it looked
+// at. A challenge raises human re-review priority; it never changes the
+// accepted applicability (only a human `accept --applicability` does).
+export function saveVerification(repo, dir, { sha, by, verdict, note }) {
+  const rr = resolveAnnotated(repo, dir, sha);
+  if (rr.error) return rr;
+  const v = ["confirmed", "challenged", "unmeasurable"].includes(verdict) ? verdict : null;
+  if (!v) return { error: "verdict must be confirmed | challenged | unmeasurable" };
+  if (!note || !String(note).trim()) return { error: "verification requires --note describing the evidence you checked" };
+  if (!noNL(by) || !noNL(note)) return { error: "attestor/note may not contain newlines" };
+  const ev = { type: "verification", sha: rr.full, annotationSha256: canonicalAnnotationHash(rr.ann),
+    by: by || "agent", at: today(), verdict: v, note: String(note).slice(0, 400) };
+  appendPrivateLine(join(realpathSync(dir), "annotation-reviews.jsonl"), JSON.stringify(ev) + "\n");
+  return { verification: ev };
 }
 
 // Changed paths: local (tracked-vs-HEAD + untracked non-ignored) or a
@@ -1752,14 +1828,14 @@ export function runCheckDiff(repo, { base, head } = {}) {
   if (accText === null)
     return { exitCode: 0, result: "not-configured", leads: [], metrics: { ...m, result: "not-configured" },
       message: `no accepted decisions configured at ${trustRef} — no accepted-decision conclusion possible (this is not "clean").` };
-  const parsed = parseAcceptances(accText);
-  if (parsed.malformed) return unmeasurable(`the accepted-decision journal at ${trustRef} is malformed`);
+  const parsed = parseReviews(accText);
+  if (parsed.malformed) return unmeasurable(`the review journal at ${trustRef} is malformed`);
   const annText = readRefFile(repo, trustRef, "annotations.jsonl");
-  if (annText === null && parsed.records.length) return unmeasurable(`accepted decisions exist but annotations.jsonl is missing at ${trustRef}`);
+  if (annText === null && parsed.ratifications.length) return unmeasurable(`reviews exist but annotations.jsonl is missing at ${trustRef}`);
   const annById = parseAnnotations(annText);
 
-  const folded = foldAcceptances(parsed.records);
-  const active = folded.filter((a) => a.applicability !== "retired");
+  const active = [...foldRatifications(parsed.ratifications).values()]
+    .filter((r) => r.type === "acceptance" && r.applicability !== "retired"); // a later rejection/retire drops it
   m.acceptedDecisionCount = active.length;
   if (!active.length)
     return { exitCode: 0, result: "not-configured", leads: [], metrics: { ...m, result: "not-configured" },
@@ -1776,7 +1852,10 @@ export function runCheckDiff(repo, { base, head } = {}) {
     if (anc.status !== 0) { m.unmeasurableCount++; continue; } // missing or non-ancestral => cannot trust
     const hitPaths = acc.paths.filter((scope) => changedList.some((p) => scopeMatches(scope, p)));
     if (!hitPaths.length) continue;
-    leads.push({ sha: acc.sha, why: ann.why, by: acc.acceptedBy, at: acc.acceptedAt, applicability: acc.applicability, paths: hitPaths });
+    const vs = verificationSummary(parsed.verifications, reviewKey(acc));
+    leads.push({ sha: acc.sha, why: ann.why, span: ann.span, amendment: acc.amendment,
+      by: acc.acceptedBy, at: acc.acceptedAt, applicability: acc.applicability, paths: hitPaths,
+      challenged: vs.challenged });
   }
   m.matchedDecisionCount = leads.length; m.leadCount = leads.length;
   // never turn "unmeasurable" into clean: a non-ancestral/missing source is an
@@ -1797,10 +1876,12 @@ export function renderLeads(name, mode, leads, unmeasurable = 0) {
   for (const l of leads) {
     if (shown >= MAXROWS) break;
     const tag = l.applicability === "uncertain" ? " [applicability: uncertain]" : "";
+    const vtag = l.challenged ? "  ! challenged — human re-review needed" : "";
     const row = `\n${l.paths.map((p) => s(p, 256)).join(", ")}${tag}` +
-      `\n  Prior reviewed rationale: ${s(l.why, 512)}` +
-      `\n  Source: ${s(l.sha, 64)}   (verify: git show ${s(l.sha, 64)})` +
-      `\n  Accepted by ${s(l.by, 128)} on ${s(l.at, 32)}`;
+      `\n  Reviewed decision: ${s(l.why, 512)}` +
+      (l.span ? `\n  Grounded in: "${s(l.span, 400)}"` : "") +
+      (l.amendment ? `\n  Human note: ${s(l.amendment, 400)}` : "") +
+      `\n  Source: ${s(l.sha, 64)} — accepted by ${s(l.by, 128)} on ${s(l.at, 32)}${vtag}`;
     if (bytes + Buffer.byteLength(row) > CAP - RESERVE) break;
     parts.push(row); bytes += Buffer.byteLength(row); shown++;
   }
@@ -2122,12 +2203,17 @@ function usage() {
                                   filter the full event record (JSONL out)
     logbook context [path] [query filters] [--file S ...] [--cursor TOKEN]
                                   bounded context in query order (20 rows / 8KB)
-    logbook annotate SHA "WHY" [path] [--by WHO]
-                                  persist WHY a commit happened (lazy enrichment:
-                                  when your agent investigates a revert, keep it)
-    logbook accept SHA --file P [--dir P/] [--by WHO] [--applicability A]
-                                  human attestation that a DRAFT annotation is
-                                  correct + scoped; only accepted decisions surface
+    logbook annotate SHA "WHY" [--span "exact quote from commit"] [path] [--by WHO]
+                                  draft a WHY a commit happened (--span must be a
+                                  verbatim substring of the commit, or it's rejected)
+    logbook accept SHA --file P [--dir P/] [--amend "human note"] [--by WHO] [--applicability A]
+                                  human ratifies a DRAFT (approve), optionally adding
+                                  an off-git note; only accepted decisions surface
+    logbook reject SHA [--by WHO] [--reason "..."]
+                                  human rejects a draft (drops from pending, never surfaces)
+    logbook verify SHA --verdict confirmed|challenged|unmeasurable --note "evidence" [--by WHO]
+                                  evidence-bearing check by a later agent; a challenge
+                                  raises human re-review priority, never changes the decision
     logbook check --diff [--base SHA --head SHA] [--metrics-out PATH] [path]
                                   read-only diff-time preflight: accepted decisions
                                   whose path scope the change touches (non-blocking;
@@ -2164,10 +2250,17 @@ export function parseArgs(argv) {
     else if (a === "context") o.cmd = "context";
     else if (a === "annotate") o.cmd = "annotate";
     else if (a === "accept") o.cmd = "accept";
+    else if (a === "reject") o.cmd = "reject";
+    else if (a === "verify") o.cmd = "verify";
     else if (a === "check") o.cmd = "check";
     else if (a === "pending") o.cmd = "pending";
     else if (a === "refine") o.cmd = "refine";
     else if (a === "--diff") o.diff = true;
+    else if (a === "--span") { if (i + 1 >= argv.length) o._missing = "--span"; else o.span = argv[++i]; }
+    else if (a === "--amend") { if (i + 1 >= argv.length) o._missing = "--amend"; else o.amend = argv[++i]; }
+    else if (a === "--note") { if (i + 1 >= argv.length) o._missing = "--note"; else o.note = argv[++i]; }
+    else if (a === "--verdict") { if (i + 1 >= argv.length) o._missing = "--verdict"; else o.verdict = argv[++i]; }
+    else if (a === "--reason") { if (i + 1 >= argv.length) o._missing = "--reason"; else o.reason = argv[++i]; }
     else if (a === "--base") { if (i + 1 >= argv.length) o._missing = "--base"; else o.base = argv[++i]; }
     else if (a === "--head") { if (i + 1 >= argv.length) o._missing = "--head"; else o.head = argv[++i]; }
     else if (a === "--applicability") { if (i + 1 >= argv.length) o._missing = "--applicability"; else o.applicability = argv[++i]; }
@@ -2203,8 +2296,8 @@ export function parseArgs(argv) {
     // annotate <sha> "<why>" [repo] — sha and why are positional
     o.sha = rest[0]; o.why = rest[1];
     if (rest[2]) o.repo = rest[2];
-  } else if (o.cmd === "accept") {
-    // accept <sha> [repo] — sha is positional; scope via --file/--dir
+  } else if (o.cmd === "accept" || o.cmd === "reject" || o.cmd === "verify") {
+    // <sha> [repo] — sha positional; scope via --file/--dir (accept only)
     o.sha = rest[0];
     if (rest[1]) o.repo = rest[1];
   } else if (rest.length) o.repo = rest[0];
@@ -2260,11 +2353,12 @@ async function main() {
     }
     const dir = o.out ? resolve(o.out) : repo;
     mkdirSync(dir, { recursive: true });
-    const a = saveAnnotation(repo, dir, { sha: o.sha, why: o.why, by: o.by });
+    const a = saveAnnotation(repo, dir, { sha: o.sha, why: o.why, by: o.by, span: o.span });
     if (!a) {
       console.error(`  not a commit in this repo: ${o.sha}`);
       process.exit(1);
     }
+    if (a.error) { console.error(`  ${a.error}`); process.exit(1); }
     // merge into LOGBOOK.md now if a complete ledger is on disk (sub-second
     // via reuse) — a session that finds fresh artifacts won't re-run the CLI,
     // so "next run" may never come
@@ -2307,12 +2401,34 @@ async function main() {
       process.exit(1);
     }
     const dir = repo;
-    const res = saveAcceptance(repo, dir, { sha: o.sha, paths: o.files, by: o.by, applicability: o.applicability });
+    const res = saveAcceptance(repo, dir, { sha: o.sha, paths: o.files, by: o.by, applicability: o.applicability, amendment: o.amend });
     if (res.error) { console.error(`  ${res.error}`); process.exit(1); }
     const ev = res.accepted;
     if (!o.quiet) {
-      console.log(`  ${C.good}✓${C.r} accepted decision ${C.bold}${ev.sha.slice(0, 8)}${C.r} for ${ev.paths.map((p) => sanitizeContextText(p, 256, { markdown: false })).join(", ")} ${C.dim}(${ev.applicability}, by ${sanitizeContextText(ev.acceptedBy, 128, { markdown: false })}, ${ev.acceptedAt})${C.r}`);
+      console.log(`  ${C.good}✓${C.r} accepted decision ${C.bold}${ev.sha.slice(0, 8)}${C.r} for ${ev.paths.map((p) => sanitizeContextText(p, 256, { markdown: false })).join(", ")} ${C.dim}(${ev.applicability}${ev.amendment ? ", + human note" : ""}, by ${sanitizeContextText(ev.acceptedBy, 128, { markdown: false })}, ${ev.acceptedAt})${C.r}`);
       console.log(`  ${C.dim}commit annotation-reviews.jsonl on the trusted branch for check --diff to honor it${C.r}\n`);
+    }
+    return;
+  }
+
+  if (o.cmd === "reject") {
+    if (!o.sha) { console.error(`  usage: logbook reject <sha> [--by <who>] [--reason "<why>"] [path]`); process.exit(1); }
+    if (o.out) { console.error(`  reject does not support --out`); process.exit(1); }
+    const res = saveRejection(repo, repo, { sha: o.sha, by: o.by, reason: o.reason });
+    if (res.error) { console.error(`  ${res.error}`); process.exit(1); }
+    if (!o.quiet) console.log(`  ${C.good}✓${C.r} rejected draft ${C.bold}${res.rejected.sha.slice(0, 8)}${C.r} ${C.dim}(by ${sanitizeContextText(res.rejected.by, 128, { markdown: false })}, ${res.rejected.at}) — it will not surface and drops from pending${C.r}\n`);
+    return;
+  }
+
+  if (o.cmd === "verify") {
+    if (!o.sha) { console.error(`  usage: logbook verify <sha> --verdict confirmed|challenged|unmeasurable --note "<evidence>" [--by <who>] [path]`); process.exit(1); }
+    if (o.out) { console.error(`  verify does not support --out`); process.exit(1); }
+    const res = saveVerification(repo, repo, { sha: o.sha, by: o.by, verdict: o.verdict, note: o.note });
+    if (res.error) { console.error(`  ${res.error}`); process.exit(1); }
+    const v = res.verification;
+    if (!o.quiet) {
+      const flag = v.verdict === "challenged" ? " — raises human re-review priority (does NOT change the decision)" : "";
+      console.log(`  ${C.good}✓${C.r} ${v.verdict} check on ${C.bold}${v.sha.slice(0, 8)}${C.r} ${C.dim}(by ${sanitizeContextText(v.by, 128, { markdown: false })}, ${v.at})${C.r}${C.dim}${flag}${C.r}\n`);
     }
     return;
   }
@@ -2404,7 +2520,7 @@ async function main() {
       const f = (e.files || [])[0] || "";
       console.log(`  ${e.sha}  ${C.dim}[${kind}]${C.r}  ${sanitizeContextText(e.subject || "", 120, { markdown: false })}`);
       console.log(`    ${C.dim}${sanitizeContextText(f, 200, { markdown: false })} — verify: git show ${e.fullSha}${C.r}`);
-      console.log(`    ${C.dim}then draft: logbook annotate ${e.fullSha} "verified why" --by MODEL${C.r}`);
+      console.log(`    ${C.dim}then draft: logbook annotate ${e.fullSha} "verified why" --span "exact quote from the diff" --by MODEL${C.r}`);
     }
     if (notable.length > limit) console.log(`\n  ${C.dim}… and ${notable.length - limit} more (raise with --limit)${C.r}`);
     if (capped) console.error(`  analysis capped at ${fmt(o.max)} commits — use -n for a larger window`);

@@ -20,7 +20,8 @@ import {
   managedWriteFile, sha256, stampArtifact, parseArtifactRecord, writeArtifactBundle,
   hasClaudeImport,
   saveAcceptance, runCheckDiff, canonicalAnnotationHash, normalizeScope, scopeMatches,
-  parseAcceptances, foldAcceptances, collectChangedPaths, parseAnnotations,
+  parseReviews, foldRatifications, verificationSummary, collectChangedPaths, parseAnnotations,
+  saveRejection, saveVerification, spanGrounded, reviewKey,
   appendPrivateLine, renderLeads, writeCheckMetrics, pendingDrafts,
 } from "../bin/logbook.mjs";
 
@@ -1904,7 +1905,7 @@ test("check: a DRAFT annotation never surfaces (no accepted decisions => not-con
 
 test("accept requires an existing annotation and >=1 path scope", () => {
   const { r, sha } = mkAcceptRepo();
-  assert.match(saveAcceptance(r, r, { sha, paths: ["src/cache.ts"], by: "a" }).error, /no annotation/);
+  assert.match(saveAcceptance(r, r, { sha, paths: ["src/cache.ts"], by: "a" }).error, /no draft annotation/);
   saveAnnotation(r, r, { sha, why: "why", by: "codex" });
   assert.match(saveAcceptance(r, r, { sha, paths: [], by: "a" }).error, /path scope/);
   assert.ok(saveAcceptance(r, r, { sha, paths: ["src/cache.ts"], by: "a" }).accepted);
@@ -1921,7 +1922,7 @@ test("check LOCAL: accepted decision surfaces only when a changed path hits its 
   const hit = runCheckDiff(r, {});
   assert.equal(hit.result, "leads"); assert.equal(hit.exitCode, 0);
   assert.equal(hit.leads.length, 1);
-  assert.match(hit.message, /git show/);
+  assert.match(hit.message, /Reviewed decision/);
   // touch an unrelated file only
   g("checkout", "--", "src/cache.ts"); writeFileSync(join(r, "src", "other.ts"), "x\n");
   const miss = runCheckDiff(r, {});
@@ -2135,7 +2136,7 @@ test("pending: lists drafts with no active acceptance; retiring re-pends", () =>
   saveAcceptance(r, r, { sha, paths: ["src/cache.ts"], by: "alice" });
   assert.equal(pendingDrafts(r).length, 1); // one ratified, one still pending
   saveAcceptance(r, r, { sha, paths: ["src/cache.ts"], by: "alice", applicability: "retired" });
-  assert.equal(pendingDrafts(r).length, 2); // retired => no active acceptance => pending again
+  assert.equal(pendingDrafts(r).length, 1); // retired is a human decision — resolved, not re-pending
   rmSync(r, { recursive: true, force: true });
 });
 
@@ -2175,4 +2176,60 @@ test("refine: lists un-annotated reverts; annotating drops them from the worklis
   const out2 = execFileSync(process.execPath, [CLI, "refine", d], { env, encoding: "utf8" });
   assert.ok(!out2.includes(revert), "an annotated decision leaves the worklist");
   rmSync(d, { recursive: true, force: true });
+});
+
+test("annotate --span: verbatim quote is stored; a non-substring span is rejected", () => {
+  const { r, sha } = mkAcceptRepo(); // commit subject: "remove sync.Pool"
+  const bad = saveAnnotation(r, r, { sha, why: "w", by: "codex", span: "this text is not in the commit" });
+  assert.match(bad.error, /verbatim substring/);
+  const good = saveAnnotation(r, r, { sha, why: "removed the pool", by: "codex", span: "remove sync.Pool" });
+  assert.equal(good.span, "remove sync.Pool");
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("spanGrounded: verbatim substring check (empty span = no assertion)", () => {
+  const { r, sha } = mkAcceptRepo();
+  assert.ok(spanGrounded(r, sha, "remove sync.Pool"));
+  assert.ok(!spanGrounded(r, sha, "definitely not present zzz"));
+  assert.ok(spanGrounded(r, sha, ""));
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("accept --amend: the human's off-git note surfaces in check", () => {
+  const { r, g, sha } = mkAcceptRepo();
+  saveAnnotation(r, r, { sha, why: "pool removed", by: "codex" });
+  saveAcceptance(r, r, { sha, paths: ["src/cache.ts"], by: "alice", amendment: "also caused the customer-X incident" });
+  g("add", "-A"); g("commit", "-qm", "accept+amend");
+  writeFileSync(join(r, "src", "cache.ts"), "v3\n");
+  const out = runCheckDiff(r, {});
+  assert.equal(out.leads.length, 1);
+  assert.match(out.message, /Human note: also caused the customer-X incident/);
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("reject: a rejected draft does not surface and drops from pending", () => {
+  const { r, sha } = mkAcceptRepo();
+  saveAnnotation(r, r, { sha, why: "pool removed", by: "codex" });
+  assert.equal(pendingDrafts(r).length, 1);
+  const res = saveRejection(r, r, { sha, by: "alice", reason: "wrong reading" });
+  assert.ok(res.rejected);
+  assert.equal(pendingDrafts(r).length, 0); // resolved, stops nagging
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("verify: evidence-bearing verdicts only; a challenge flags re-review without changing applicability", () => {
+  const { r, g, sha } = mkAcceptRepo();
+  saveAnnotation(r, r, { sha, why: "pool removed", by: "codex" });
+  saveAcceptance(r, r, { sha, paths: ["src/cache.ts"], by: "alice" });
+  assert.match(saveVerification(r, r, { sha, by: "agent", verdict: "confirmed" }).error, /note/); // evidence required
+  assert.match(saveVerification(r, r, { sha, by: "agent", verdict: "bogus", note: "x" }).error, /verdict/);
+  saveVerification(r, r, { sha, by: "agent", verdict: "challenged", note: "a new pool appeared in v3" });
+  g("add", "-A"); g("commit", "-qm", "accept+challenge");
+  writeFileSync(join(r, "src", "cache.ts"), "v3\n");
+  const out = runCheckDiff(r, {});
+  assert.equal(out.leads.length, 1); // still surfaces
+  assert.equal(out.leads[0].applicability, "active"); // machine challenge did NOT rewrite the human decision
+  assert.equal(out.leads[0].challenged, true);
+  assert.match(out.message, /challenged — human re-review needed/);
+  rmSync(r, { recursive: true, force: true });
 });
