@@ -2037,10 +2037,10 @@ export function parseDecisionCard(text) {
 export const DECISION_PLANE = "decisions";   // human-reviewed
 export const LEAD_PLANE = "leads";           // policy-published (machine)
 function readPlane(repo, ref, plane) {
-  const out = { cards: [], malformed: [] };
+  const out = { cards: [], malformed: [], unreadable: false };
   let ls;
   try { ls = gitRaw(repo, ["ls-tree", "-r", "--name-only", "-z", ref, "--", `.logbook/${plane}/`]); }
-  catch { return out; }                                                    // plane absent at ref => empty
+  catch { out.unreadable = true; return out; }                             // cannot enumerate the trusted plane => unmeasurable, NOT "absent"
   for (const path of ls.split("\0").filter(Boolean)) {
     if (!path.endsWith(".json")) continue;
     let text; try { text = gitRaw(repo, ["show", `${ref}:${path}`]); } catch { out.malformed.push(path); continue; }
@@ -2060,6 +2060,7 @@ export function checkDecisions(repo, { base, head } = {}) {
   if (!commit) return { result: "unmeasurable", exitCode: 1, leads: [], malformedCount: 0, message: `unmeasurable: cannot resolve trust ref ${trustRef} (not "clean").` };
   const decisions = readPlane(repo, trustRef, DECISION_PLANE);
   const leads = readPlane(repo, trustRef, LEAD_PLANE);
+  if (decisions.unreadable || leads.unreadable) return { result: "unmeasurable", exitCode: 1, leads: [], malformedCount: 0, message: `unmeasurable: cannot enumerate the trusted decision plane at ${trustRef} (not "clean").` };
   const malformed = [...decisions.malformed, ...leads.malformed];
   const curPolicy = loadTrustedPolicy(repo, commit);   // for read-time re-validation of policy-published leads
   const out = [];
@@ -2201,10 +2202,19 @@ function loadTrustedPolicy(repo, commit) {
 // re-enable), OR any local entry exists at the path (lstat — a dangling symlink
 // counts). Rechecked immediately before every install.
 function killSwitchEngaged(repo, commit) {
-  const c = rawGitStatus(repo, ["cat-file", "-e", `${commit}:.logbook/AUTOMATION_DISABLED`]);
-  if (c.status === 0) return "committed";
-  try { lstatSync(join(realpathSync(repo), ".logbook", "AUTOMATION_DISABLED")); return "local"; }
-  catch (e) { if (e.code !== "ENOENT") return "local"; }
+  // committed marker at the trusted tree — fail CLOSED whenever its state cannot be
+  // determined (unreadable tree, or an entry whose blob is unavailable): absent and
+  // unmeasurable must not collapse into "not engaged".
+  const ls = rawGitStatus(repo, ["ls-tree", "-z", commit, "--", ".logbook/AUTOMATION_DISABLED"]);
+  if (ls.status !== 0) return "unmeasurable";                       // cannot read the trusted tree
+  if (ls.stdout && ls.stdout.trim()) {                              // a tree entry exists
+    const c = rawGitStatus(repo, ["cat-file", "-e", `${commit}:.logbook/AUTOMATION_DISABLED`]);
+    return c.status === 0 ? "committed" : "unmeasurable";           // entry present but blob unavailable => block
+  }
+  // definitively absent from the trusted tree => consult the local marker
+  let local; try { local = join(realpathSync(repo), ".logbook", "AUTOMATION_DISABLED"); } catch { return "unmeasurable"; }
+  try { lstatSync(local); return "local"; }
+  catch (e) { if (e.code !== "ENOENT") return "unmeasurable"; }     // local lstat error (not "absent") => block
   return null;
 }
 function isAncestor(repo, sha, ref) {
@@ -2278,7 +2288,7 @@ export function withPublishLock(repo, fn) {
   for (;;) {
     try { mkdirSync(lockDir); break; }
     catch (e) {
-      if (e.code !== "EEXIST") throw e;
+      if (e.code !== "EEXIST") return { __lock: "error", error: `cannot acquire publication lock: ${e.code || e.message}` }; // EACCES/EPERM/etc => structured, never escape the contract
       if (process.hrtime.bigint() - start > budget) return { __lock: "timeout", error: "publication lock held — if no logbook process is running, remove logbook-publish.lock from the git common dir manually" };
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
     }

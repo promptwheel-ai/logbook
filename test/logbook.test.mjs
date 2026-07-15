@@ -3437,3 +3437,45 @@ test("closure: a kill switch engaged MID-RUN stops installs and reports an incom
   assert.equal(r.exitCode, 1);
   rmSync(d, { recursive: true, force: true });
 });
+
+// ---------- git-files Stage 3 CLOSURE 2: absent != unmeasurable (fail-closed) --------------
+
+test("closure2: a committed kill switch whose BLOB is unavailable fails closed (no publication)", () => {
+  const { d, g, sha } = policyRepo("ckblob-", GOOD_TOML);
+  writeFileSync(join(d, ".logbook", "AUTOMATION_DISABLED"), "disabled by policy\n");
+  g("add", "-A"); g("commit", "-qm", "kill switch");
+  const commit = g("rev-parse", "HEAD").trim();
+  const blob = g("rev-parse", "HEAD:.logbook/AUTOMATION_DISABLED").trim();
+  rmSync(join(d, ".logbook", "AUTOMATION_DISABLED"));                          // remove LOCAL marker; only the committed one is in play
+  rmSync(join(d, ".git", "objects", blob.slice(0, 2), blob.slice(2)));        // tree entry remains, blob object gone
+  const r = publishPolicyLeads(d, [goodCand(sha)], { trustRef: commit });
+  assert.equal(r.published, 0); assert.equal(r.exitCode, 1);                   // absent != unmeasurable: must NOT publish
+  assert.equal(leadCount(d), 0);
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("closure2: an unreadable trusted decision plane is unmeasurable at read (never clean/not-configured)", () => {
+  const { d, g, sha } = poolRepo("cenum-");
+  writeCard(d, g, "leads", mkDecision({ sha, evidenceFile: "src/db.js", span: "createPool", scopes: ["src/db.js"], by: "auto" }));
+  g("commit", "-qm", "publish lead"); const base = g("rev-parse", "HEAD").trim();
+  const ltree = g("rev-parse", base + ":.logbook/leads").trim();
+  rmSync(join(d, ".git", "objects", ltree.slice(0, 2), ltree.slice(2)));       // leads subtree entry remains, object unreadable
+  const res = checkDecisions(d, { base, head: base });                         // base==head: the diff never reads the missing subtree
+  assert.equal(res.result, "unmeasurable"); assert.equal(res.exitCode, 1);     // NOT "not-configured", NOT exit 0
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("closure2: a non-EEXIST lock-acquisition error returns the structured contract (never throws)", () => {
+  const { d, sha } = policyRepo("clacc-", GOOD_TOML);
+  const gitDir = join(d, ".git");
+  chmodSync(gitDir, 0o500);                                     // deny creating the lock dir in the common dir => EACCES
+  let r, threw = null;
+  try { r = publishPolicyLeads(d, [goodCand(sha)]); }
+  catch (e) { threw = e; }
+  finally { chmodSync(gitDir, 0o755); }                         // restore so rmSync/cleanup works
+  assert.equal(threw, null, "lock EACCES must not escape as a thrown error");
+  assert.equal(r.published, 0); assert.equal(r.incomplete, true); assert.equal(r.exitCode, 1);
+  assert.match(r.error, /lock/);
+  assert.ok(Array.isArray(r.skipped));                          // full structured shape, not a bare rethrow
+  rmSync(d, { recursive: true, force: true });
+});
