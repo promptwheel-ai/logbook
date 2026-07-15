@@ -2167,6 +2167,49 @@ export function autopublish(repo, candidates, policy) {
   return { published, skipped, existingBefore: existing };
 }
 
+// ---- Stage 4a: legacy journal -> inert git-files DRAFTS ---------------------
+// The pre-card journal (annotations.jsonl) becomes local, gitignored, INERT
+// drafts under .logbook/drafts/ — legacy_unverified, transferring NO authority
+// (old acceptances/scopes grant nothing; a human RE-ACCEPTS by promoting a draft
+// into decisions/). Every transformation and dropped row is REPORTED. Scope
+// defaults to the commit's own changed files (a suggestion the human can edit).
+const cleanLegacyText = (v, max) => String(v ?? "").replace(new RegExp("[" + CTRL_SRC + "]", "g"), " ").trim().slice(0, max);
+function commitChangedFiles(repo, sha) {
+  const r = gitBuf(repo, ["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", "--root", "--find-renames", "--no-textconv", sha]);
+  if (r.status !== 0) return [];
+  return r.stdout.toString("utf8").split("\0").map((s) => s.trim()).filter((s) => okScope(s)).slice(0, 25);
+}
+export function migrateLegacyToDrafts(repo, dir = repo) {
+  const anns = loadAnnotations(dir);
+  const draftsDir = join(realpathSync(repo), ".logbook", "drafts");
+  const drafted = [], skipped = [], seen = new Set();
+  for (const ann of anns) {
+    if (!ann || typeof ann.sha !== "string" || !OID.test(ann.sha)) { skipped.push({ reason: "bad-sha" }); continue; }
+    const claim = cleanLegacyText(ann.why, MAX_CLAIM);
+    if (!claim) { skipped.push({ reason: "empty-why", sha: ann.sha }); continue; }
+    const scopes = commitChangedFiles(repo, ann.sha);
+    if (!scopes.length) { skipped.push({ reason: "no-changed-files", sha: ann.sha }); continue; }
+    const spanRaw = cleanLegacyText(ann.span, MAX_SPAN);
+    const card = { schema: DECISION_SCHEMA, cardId: "", sha: ann.sha, sourceType: "legacy_unverified",
+      claim, side: null, evidenceFile: null, span: spanRaw || null, scopes,
+      by: cleanLegacyText(ann.by, MAX_BY) || "unknown",
+      at: /^\d{4}-\d{2}-\d{2}$/.test(String(ann.date || "")) ? ann.date : "1970-01-01" };
+    card.cardId = decisionCardId(card);
+    if (!validDecisionCard(card)) { skipped.push({ reason: "invalid", sha: ann.sha }); continue; }
+    if (seen.has(card.cardId)) { skipped.push({ reason: "duplicate", sha: ann.sha }); continue; }
+    seen.add(card.cardId);
+    mkdirSync(draftsDir, { recursive: true });
+    writeFileSync(join(draftsDir, card.cardId + ".json"), serializeDecisionCard(card));
+    drafted.push(card);
+  }
+  // drafts are LOCAL + inert — keep them out of git.
+  if (drafted.length) {
+    const gi = join(realpathSync(repo), ".logbook", ".gitignore");
+    if (!existsSync(gi)) { mkdirSync(join(realpathSync(repo), ".logbook"), { recursive: true }); writeFileSync(gi, "drafts/\n"); }
+  }
+  return { drafted, skipped };
+}
+
 export function parseCards(text) {
   const records = []; let malformed = false;
   for (const line of String(text || "").split("\n")) {

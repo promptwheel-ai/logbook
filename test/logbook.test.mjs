@@ -26,7 +26,7 @@ import {
   saveMachineCard, editCard, foldCards, cardIdFor, revHashFor,
   parseCards, spanGroundedStrict, groundStatus, loadCards, validCardRecord,
   decisionCardId, validDecisionCard, serializeDecisionCard, parseDecisionCard, DECISION_SCHEMA,
-  checkDecisions, renderDecisionLeads, parsePolicy, loadPolicy, autopublish,
+  checkDecisions, renderDecisionLeads, parsePolicy, loadPolicy, autopublish, migrateLegacyToDrafts,
   projectLegacyAnnotation, projectLegacy, CARD_SCHEMA, canonicalCardLine,
 } from "../bin/logbook.mjs";
 
@@ -3124,5 +3124,35 @@ test("gitfiles stage3: autopublish enforces the per-run cap", () => {
   ], policy);
   assert.equal(r.published.length, 1);
   assert.ok(r.skipped.some((s) => s.reason === "run-cap"));
+  rmSync(d, { recursive: true, force: true });
+});
+
+// ---------- git-files platform Stage 4a: legacy journal -> inert drafts -------
+test("gitfiles stage4a: legacy annotations migrate to INERT drafts (no authority; scopes = changed files; gitignored)", () => {
+  const { d, sha } = poolRepo("logbook-mig-");
+  saveAnnotation(d, d, { sha, why: "pool added because raw connections exhausted the db under load", by: "gpt" });
+  const res = migrateLegacyToDrafts(d);
+  assert.equal(res.drafted.length, 1);
+  const card = res.drafted[0];
+  assert.equal(card.sourceType, "legacy_unverified");
+  assert.deepEqual(card.scopes, ["src/db.js"]);                    // the pool commit's changed file
+  assert.ok(existsSync(join(d, ".logbook", "drafts", card.cardId + ".json")));
+  assert.ok(!existsSync(join(d, ".logbook", "decisions")));        // ZERO authority migrated
+  assert.ok(!existsSync(join(d, ".logbook", "leads")));
+  assert.match(readFileSync(join(d, ".logbook", ".gitignore"), "utf8"), /drafts\//);
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("gitfiles stage4a: migration reports skipped rows (bad sha / empty why), never fabricates", () => {
+  const { d, g, sha } = poolRepo("logbook-mig2-");
+  const init = g("rev-parse", "HEAD~1").trim();                     // distinct sha (loadAnnotations dedups per sha)
+  writeFileSync(join(d, "annotations.jsonl"),
+    JSON.stringify({ sha, why: "good one", by: "x", date: "2024-01-01" }) + "\n" +
+    JSON.stringify({ sha: "notasha", why: "bad sha", by: "x", date: "2024-01-01" }) + "\n" +
+    JSON.stringify({ sha: init, why: "   ", by: "x", date: "2024-01-01" }) + "\n");
+  const res = migrateLegacyToDrafts(d);
+  assert.equal(res.drafted.length, 1);                             // "good one"
+  assert.ok(res.skipped.some((s) => s.reason === "bad-sha"));
+  assert.ok(res.skipped.some((s) => s.reason === "empty-why"));
   rmSync(d, { recursive: true, force: true });
 });
