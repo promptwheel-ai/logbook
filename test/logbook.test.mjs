@@ -3450,7 +3450,23 @@ test("closure2: a committed kill switch whose BLOB is unavailable fails closed (
   rmSync(join(d, ".git", "objects", blob.slice(0, 2), blob.slice(2)));        // tree entry remains, blob object gone
   const r = publishPolicyLeads(d, [goodCand(sha)], { trustRef: commit });
   assert.equal(r.published, 0); assert.equal(r.exitCode, 1);                   // absent != unmeasurable: must NOT publish
+  assert.equal(r.incomplete, true);                                           // unmeasurable, not an ordinary engaged kill switch
+  assert.match(r.error, /unmeasurable/);                                       // explicit tri-state: state undetermined
   assert.equal(leadCount(d), 0);
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("closure2: a definitively engaged committed kill switch is the ORDINARY disabled result (incomplete:false)", () => {
+  const { d, g, sha } = policyRepo("ckdef-", GOOD_TOML);
+  writeFileSync(join(d, ".logbook", "AUTOMATION_DISABLED"), "disabled\n");
+  g("add", "-A"); g("commit", "-qm", "kill switch");
+  const commit = g("rev-parse", "HEAD").trim();
+  rmSync(join(d, ".logbook", "AUTOMATION_DISABLED"));                          // committed marker present + retrievable; no local marker
+  const r = publishPolicyLeads(d, [goodCand(sha)], { trustRef: commit });
+  assert.equal(r.published, 0); assert.equal(r.exitCode, 1);
+  assert.equal(r.incomplete, false);                                          // definitively engaged => ordinary, NOT unmeasurable
+  assert.match(r.error, /kill switch/);
+  assert.doesNotMatch(r.error, /unmeasurable/);
   rmSync(d, { recursive: true, force: true });
 });
 

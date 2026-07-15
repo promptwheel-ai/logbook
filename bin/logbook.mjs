@@ -2348,6 +2348,12 @@ export function publishPolicyLeads(repo, candidates, { trustRef = "HEAD" } = {})
   const counts = { published: 0, idempotent: 0, conflicts: 0, unmeasurable: 0, skipped: [], incomplete: false };
   // every path returns counts + exitCode; nonzero when anything is unfinished.
   const done = (extra = {}) => { const r = { ...counts, ...extra }; r.exitCode = (r.error || r.incomplete || r.unmeasurable > 0 || r.conflicts > 0) ? 1 : 0; return r; };
+  // tri-state kill switch: an UNMEASURABLE marker (state we could not determine) is
+  // incomplete + explicitly unmeasurable; a DEFINITIVELY engaged marker is the
+  // ordinary disabled result. Never collapse "unmeasurable" into "engaged".
+  const killResult = (state, engagedMsg) => state === "unmeasurable"
+    ? done({ error: "kill switch state unmeasurable", incomplete: true })
+    : done({ error: engagedMsg });
   if (!Array.isArray(candidates)) return done({ error: "candidates must be an array" }); // a Set/iterable would bypass the .length cap
   if (candidates.length > MAX_CANDIDATES) return done({ error: `too many candidates (>${MAX_CANDIDATES})` });
   const commit = resolveTrustCommit(repo, trustRef);
@@ -2355,7 +2361,7 @@ export function publishPolicyLeads(repo, candidates, { trustRef = "HEAD" } = {})
   const pol = loadTrustedPolicy(repo, commit);
   if (pol.error) return done({ error: pol.error });
   const policy = pol.policy;
-  if (killSwitchEngaged(repo, commit)) return done({ error: "automation disabled (kill switch)" });
+  { const ks = killSwitchEngaged(repo, commit); if (ks) return killResult(ks, "automation disabled (kill switch)"); }
   // ---- pure evaluation (no writes) ----
   const byId = new Map(), ordered = [];
   for (const cand of candidates) {
@@ -2382,7 +2388,7 @@ export function publishPolicyLeads(repo, candidates, { trustRef = "HEAD" } = {})
   const installable = ordered.filter((r) => !r.conflict);
   // ---- locked: revalidate, count union, install atomically ----
   const locked = withPublishLock(repo, () => {
-    if (killSwitchEngaged(repo, commit)) return done({ error: "kill switch engaged before install", incomplete: true });
+    { const ks = killSwitchEngaged(repo, commit); if (ks) return ks === "unmeasurable" ? done({ error: "kill switch state unmeasurable", incomplete: true }) : done({ error: "kill switch engaged before install", incomplete: true }); }
     const pol2 = loadTrustedPolicy(repo, commit);
     if (pol2.error || pol2.text !== pol.text) return done({ error: "policy changed mid-run", incomplete: true });
     const pin = pinPlaneDir(repo, LEAD_PLANE);
