@@ -2058,8 +2058,12 @@ export function checkDecisions(repo, { base, head } = {}) {
   consider(leads.cards, "policy-published");
   const accepted = decisions.cards.length + leads.cards.length;
   const result = out.length ? "leads" : (accepted ? "no-leads" : "not-configured");
-  return { result, exitCode: malformed.length ? 1 : 0, mode, trustRef, leads: out,
-    malformed, malformedCount: malformed.length, acceptedCount: accepted, changedCount: changed.paths.length };
+  const demoted = out.filter((l) => !l.authoritative).length;
+  // malformed OR a surfaced lead whose evidence no longer re-grounds is UNMEASURABLE
+  // for that decision — never report it as clean (exit nonzero).
+  return { result, exitCode: (malformed.length || demoted) ? 1 : 0, mode, trustRef, leads: out,
+    malformed, malformedCount: malformed.length, demotedCount: demoted,
+    acceptedCount: accepted, changedCount: changed.paths.length };
 }
 
 // Deterministic, sanitized rendering; every field is untrusted repo-controlled text.

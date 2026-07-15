@@ -3047,6 +3047,7 @@ test("gitfiles stage2: a machine card whose evidence no longer grounds is DEMOTE
   writeFileSync(join(d, "src", "db.js"), "x\n"); g("add", "-A"); g("commit", "-qm", "touch");
   const res = checkDecisions(d, { base, head: g("rev-parse", "HEAD").trim() });
   assert.equal(res.leads.length, 1); assert.equal(res.leads[0].authoritative, false);
+  assert.equal(res.exitCode, 1);                           // a demoted (unverifiable) lead is unmeasurable, never clean
   assert.match(renderDecisionLeads(res), /evidence no longer verifiable.*NOT authoritative/s);
   rmSync(d, { recursive: true, force: true });
 });
