@@ -206,7 +206,7 @@ test("query after a CLI-written ledger: identical schema (cache-invariant)", asy
 test("digest renders through the same pipeline", async () => {
   const text = await callTool("logbook_digest", { repo });
   assert.match(text, /The Logbook of/);
-  assert.match(text, /Historical signal/);
+  assert.match(text, /History inventory/);
 });
 
 test("audit on the clean fixture reports clean, not an error", async () => {

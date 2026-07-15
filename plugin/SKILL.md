@@ -24,8 +24,9 @@ After running:
 1. Read `$(git rev-parse --show-toplevel)/LOGBOOK.md` completely before any
    history query. Do not replace this step with a broad keyword search.
 2. Relay "What a fresh session should know" plus the 2-3 most notable findings.
-   If Historical signal is LOW, use it only as a hotspot map; otherwise inspect
-   task-relevant do-not-retry entries and fragile areas.
+   Use the raw history inventory as orientation, not a task-level risk score;
+   inspect task-relevant do-not-retry, test-trust, and reviewed-annotation
+   entries regardless of repo-wide totals.
 3. TRIAGE, don't parrot: the logbook is the recall layer; you are the precision
    layer. Cross-reference leads against the current task and verify any claim
    you act on with `git show <sha>`. Confirm it still applies at HEAD.

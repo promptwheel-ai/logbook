@@ -129,8 +129,9 @@ to read the history first:
 ## Repo memory
 Before planning or editing:
 1. Read LOGBOOK.md at the repo root completely before any history query.
-2. If Historical signal is LOW, use it only as a hotspot map. Otherwise,
-   inspect task-relevant do-not-retry entries and fragile areas.
+2. Use the raw history inventory as orientation, not a task-level risk score.
+   Inspect task-relevant do-not-retry, test-trust, and reviewed-annotation
+   entries regardless of repo-wide totals.
 3. For complete do-not-retry coverage, inspect all relevant paths:
    npx -y @promptwheel/logbook context --file path/to/file --revert
    Repeat --file for each other relevant path. If output says NEXT, repeat the

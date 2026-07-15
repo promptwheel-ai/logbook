@@ -565,13 +565,20 @@ function spanHuman(days) {
 const fmt = (x) => x.toLocaleString("en-US");
 const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
-// Honest first-run expectation: a young or linear history has little
-// recoverable decision memory, and the digest should SAY so instead of
-// letting "memory" overclaim a hotspot map.
-export function signalGrade(A) {
+// Literal inventory, not a task-risk score. Repository-wide LOW/MEDIUM/HIGH
+// thresholds were never normalized or validated against outcomes; task-local
+// checks use present / absent / unmeasurable instead.
+export function historyInventory(A) {
   const reverts = A.reverts.length, fragile = A.fragile.length,
     supp = A.suspEvents.length, weak = A.weaken.length;
   const parts = `${reverts} revert${reverts === 1 ? "" : "s"} · ${fragile} repeated-fix area${fragile === 1 ? "" : "s"} · ${supp} suppression event${supp === 1 ? "" : "s"} · ${weak} weakening event${weak === 1 ? "" : "s"}`;
+  return { reverts, fragile, suppressions: supp, weakenings: weak, parts,
+    empty: reverts === 0 && fragile === 0 && supp === 0 && weak === 0 };
+}
+// Deprecated compatibility export for callers of the pre-platform API. No
+// production behavior, benchmark, or authority decision consumes this grade.
+export function signalGrade(A) {
+  const { reverts, fragile, suppressions: supp, weakenings: weak, parts } = historyInventory(A);
   if (reverts === 0 && fragile === 0 && supp <= 1 && weak <= 1)
     return { level: "LOW", parts, note: "little recoverable decision history — the digest is mostly a hotspot map" };
   // the note names what actually fired, so a suppression-driven HIGH does
@@ -602,8 +609,8 @@ export function renderLogbookMd(name, A, shallow, capped, notes = []) {
   L.push(`# The Logbook of ${safePath(name)}`);
   L.push(``, `_${UNTRUSTED_EVIDENCE_WARNING}_`);
   {
-    const g = signalGrade(A);
-    L.push(``, `_Historical signal: **${g.level}** (${g.parts}) — ${g.note}._`);
+    const inventory = historyInventory(A);
+    L.push(``, `_History inventory: ${inventory.parts}${inventory.empty ? " — no extracted decision-history leads in this window; the digest is mostly a hotspot map" : ""}._`);
   }
   L.push(``);
   L.push(`_${fmt(A.n)} commit${A.n === 1 ? "" : "s"} (${A.spanStart} → ${A.spanEnd}), ${fmt(A.filesTouched)} file${A.filesTouched === 1 ? "" : "s"} touched, ${plural(A.authors, "author")}._`);
@@ -2058,7 +2065,7 @@ function decodeUtf8Strict(buf) { try { return UTF8_STRICT.decode(buf); } catch {
 // regular-file blob, missing, oversized (>MAX_CARD_BYTES), invalid UTF-8, or unparseable.
 // Fail-closed: any enumeration/batch failure, or a plane whose in-bounds bytes exceed
 // PLANE_AGGREGATE_BYTES, => { unreadable:true }.
-function readPlaneBlobs(repo, ref, plane) {
+function readPlaneBlobs(repo, ref, plane, parseRecord = parseDecisionCard) {
   const dead = { unreadable: true, entries: [] };
   const prefix = `.logbook/${plane}/`;
   // Object type of a path at ref (non-recursive), or "absent"/"error".
@@ -2100,7 +2107,7 @@ function readPlaneBlobs(repo, ref, plane) {
     raw.push({ path, oid: (regular && okBlob) ? meta[2] : null });
   }
   const uniq = [...new Set(raw.map((e) => e.oid).filter(Boolean))];
-  const cardByOid = new Map();
+  const recordByOid = new Map();
   if (uniq.length) {
     const bc = gitBuf(repo, ["cat-file", "--batch-check"], { input: uniq.join("\n") + "\n", maxBuffer: uniq.length * 256 + (1 << 20) });
     if (bc.status !== 0 || bc.error) return dead;
@@ -2133,7 +2140,7 @@ function readPlaneBlobs(repo, ref, plane) {
         const size = parseInt(parts[2], 10);
         if (!Number.isFinite(size)) return false;
         const text = decodeUtf8Strict(b.slice(pos, pos + size));          // invalid UTF-8 => null => malformed
-        cardByOid.set(parts[0], text === null ? null : parseDecisionCard(text));
+        recordByOid.set(parts[0], text === null ? null : parseRecord(text));
         pos += size + 1;                                                   // content + trailing LF
       }
       chunk = []; chunkBytes = 0;
@@ -2145,7 +2152,7 @@ function readPlaneBlobs(repo, ref, plane) {
     }
     if (!flush()) return dead;
   }
-  const entries = raw.map((e) => ({ path: e.path, card: e.oid && cardByOid.has(e.oid) ? cardByOid.get(e.oid) : null }));
+  const entries = raw.map((e) => ({ path: e.path, record: e.oid && recordByOid.has(e.oid) ? recordByOid.get(e.oid) : null }));
   return { unreadable: false, entries };
 }
 export function readPlane(repo, ref, plane) {
@@ -2153,7 +2160,7 @@ export function readPlane(repo, ref, plane) {
   const pb = readPlaneBlobs(repo, ref, plane);
   if (pb.unreadable) { out.unreadable = true; return out; }                // cannot enumerate the trusted plane => unmeasurable, NOT "absent"
   const seen = new Set();
-  for (const { path, card } of pb.entries) {
+  for (const { path, record: card } of pb.entries) {
     if (!card || basename(path) !== card.cardId + ".json") { out.malformed.push(path); continue; } // filename==id anchor
     if (seen.has(card.cardId)) { out.malformed.push(path); continue; }     // duplicate cardId => malformed (ids must be unique)
     seen.add(card.cardId);
@@ -2183,8 +2190,12 @@ export function checkDecisions(repo, { base, head } = {}) {
   if (changed.error) return unm(changed.error);
   const decisions = readPlane(repo, commit, DECISION_PLANE);               // pinned to the immutable trust commit, not the symbolic ref
   const leads = readPlane(repo, commit, LEAD_PLANE);
-  if (decisions.unreadable || leads.unreadable) return unm(`cannot enumerate the trusted decision plane at ${trustRef}`);
-  const malformed = [...decisions.malformed, ...leads.malformed];
+  const reviews = readReviewPlane(repo, commit);
+  if (decisions.unreadable || leads.unreadable || reviews.unreadable)
+    return unm(`cannot enumerate the trusted decision/review planes at ${trustRef}`);
+  const state = validateDispositionState(decisions.cards, leads.cards, reviews.reviews);
+  const malformed = [...decisions.malformed, ...leads.malformed, ...reviews.malformed, ...state.issues];
+  const reviewById = state.reviewById;
   const curPolicy = loadTrustedPolicy(repo, commit);   // for read-time re-validation of policy-published leads
   const out = [];
   // Read-time revalidation (do NOT infer authority from placement alone): the
@@ -2198,6 +2209,14 @@ export function checkDecisions(repo, { base, head } = {}) {
       const machine = card.sourceType === "machine_source";
       const gs = machine ? groundStatus(repo, card.sha, card.span, card.side, card.evidenceFile) : "grounded";
       if (machine && gs !== "grounded") reasons.push(`evidence ${gs}`);
+      let review = null, reviewVerified = false;
+      if (tier === "human-reviewed") {
+        review = reviewById.get(card.cardId) || null;
+        if (!review) reasons.push("missing byte-bound human review");
+        else if (review.verdict !== "accepted" && review.verdict !== "edited") reasons.push(`review verdict ${review.verdict}`);
+        else if (review.decisionCardSha256 !== sha256(serializeDecisionCard(card))) reasons.push("review does not bind these decision bytes");
+        else reviewVerified = true;
+      }
       if (tier === "policy-published") {
         if (!machine) reasons.push("policy lead is not machine-source"); // a leads/ card must be a machine lead, never an ungrounded human/legacy card
         if (curPolicy.error) reasons.push("policy absent/disabled");
@@ -2206,7 +2225,7 @@ export function checkDecisions(repo, { base, head } = {}) {
           if (az.reason) reasons.push(`policy: ${az.reason}`);
         }
       }
-      out.push({ tier, card, path, groundStatus: gs, authoritative: reasons.length === 0, reasons });
+      out.push({ tier, card, path, review, reviewVerified, groundStatus: gs, authoritative: reasons.length === 0, reasons });
     }
   };
   consider(decisions.cards, "human-reviewed");
@@ -2230,12 +2249,15 @@ export function renderDecisionLeads(res) {
     : `logbook check (${res.mode}): 0 decision leads touch this diff.`];
   const rows = [...res.leads].sort((a, b) => (a.card.cardId < b.card.cardId ? -1 : 1)); // deterministic order
   for (const l of rows) {
-    const tierTag = l.tier === "human-reviewed" ? "[human-reviewed]" : "[policy-published — machine lead, not a human decision]";
+    const tierTag = l.tier === "human-reviewed"
+      ? (l.reviewVerified ? "[human-reviewed]" : "[decision file — human review unverified]")
+      : "[policy-published — machine lead, not a human decision]";
     const demote = l.authoritative ? "" : `\n  ! NOT authoritative (${s((l.reasons || []).join("; "), 200)}) — re-review`;
     parts.push(`\n${l.card.scopes.map((p) => s(p, 256)).join(", ")} ${tierTag}` +
       `\n  Decision: ${s(l.card.claim, 512)}` +
       (l.card.span ? `\n  Grounded in: "${s(l.card.span, 400)}" (${s(l.card.sha, 12)})` : "") +
-      `\n  by ${s(l.card.by, 128)} on ${s(l.card.at, 32)}${demote}`);
+      `\n  proposed by ${s(l.card.by, 128)} on ${s(l.card.at, 32)}` +
+      (l.reviewVerified ? `\n  reviewed by ${s(l.review.reviewedBy, 128)} on ${s(l.review.reviewedAt, 32)}` : "") + demote);
   }
   if (res.malformedCount) parts.push(`\nunmeasurable: ${res.malformedCount} malformed card(s) in the trusted planes (exit nonzero — not "clean").`);
   if (res.leads.length) parts.push(`\nLead, not verdict: scope overlap proves relevance only. Verify the source and confirm the decision still applies.`);
@@ -2251,8 +2273,11 @@ export function renderDecisionLeads(res) {
 // NOTE: this measures REVIEW OUTCOMES, not semantic claim precision — a wrong claim a
 // human corrects still counts as "kept/edited". Genuine precision needs an explicit
 // correctness verdict + reviewer provenance, which is the plane review layer (Stage 4b).
-function dispositionLead(repo, cardId, dest, transform, by) {
-  if (!HASH64.test(cardId || "")) return { error: "invalid cardId" };
+function dispositionLeadUnlocked(repo, cardId, dest, transform, by) {
+  if (typeof cardId !== "string" || !HASH64.test(cardId)) return { error: "invalid cardId" };
+  if (!okText(by, MAX_BY)) return { error: "reviewer identity requires an explicit --by value" };
+  const materialized = requireMaterializedTrustPlanes(repo);
+  if (materialized.error) return materialized;
   const leads = readPlane(repo, "HEAD", LEAD_PLANE);
   if (leads.unreadable) return { error: "committed leads unreadable (unmeasurable)" };
   const found = leads.cards.find((c) => c.card.cardId === cardId);
@@ -2261,11 +2286,11 @@ function dispositionLead(repo, cardId, dest, transform, by) {
   const leadPin = pinPlaneDir(repo, LEAD_PLANE);                          // real dir only — no symlink redirect for the delete
   if (leadPin.error) return { error: leadPin.error };
   const leadFile = join(leadPin.dir, cardId + ".json");
-  let st; try { st = lstatSync(leadFile); } catch { return { error: "worktree lead file missing (already dispositioned?)" }; }
-  if (!st.isFile() || st.nlink !== 1) return { error: "worktree lead is not a regular file" };
-  let wtBytes; try { wtBytes = readFileSync(leadFile, "utf8"); } catch (e) { return { error: `cannot read worktree lead: ${e.code}` }; }
-  if (wtBytes !== serializeDecisionCard(found.card)) return { error: "worktree lead has local edits — commit or discard them first" }; // never silently discard
-  const staged = [`.logbook/${LEAD_PLANE}/${cardId}.json`];
+  const sourceBytes = serializeDecisionCard(found.card);
+  const wt = readRegularUtf8NoFollow(leadFile);
+  if (wt.error) return { error: `cannot read worktree lead: ${wt.error}` };
+  if (wt.text !== sourceBytes) return { error: "worktree lead has local edits — commit or discard them first" }; // never silently discard
+  const staged = [];
   const t = transform ? transform(found.card) : null;                    // accept: install a decision; reject: null
   if (t && t.error) return t;
   if (t) {
@@ -2276,12 +2301,26 @@ function dispositionLead(repo, cardId, dest, transform, by) {
     if (res.error) return { error: res.error };
     staged.push(`.logbook/${dest}/${cardId}.json`);
   }
-  const rev = writeReview(repo, { cardId, source: "lead", verdict: t ? (t.disposition === "edited" ? "edited" : "accepted") : "rejected", by }); // reviewer provenance, separate from the machine proposer
+  const rev = writeReview(repo, { cardId, source: "lead",
+    verdict: t ? (t.disposition === "edited" ? "edited" : "accepted") : "rejected", by,
+    sourceBytes, decisionBytes: t ? t.content : null }); // exact source + result bytes are bound to the human review
   if (rev.error) return rev;
   staged.push(`.logbook/${REVIEW_PLANE}/${cardId}.json`);
-  try { unlinkSync(leadFile); } catch (e) { return { error: `${dest || "review"} written but lead not removed (${e.code}) — re-run to complete` }; } // recoverable: re-run is idempotent
-  try { git(repo, ["add", "--", ...staged]); } catch (e) { return { error: `git add failed: ${e.message}` }; } // stage ONLY source+dest+review, never `add -A`
-  return { cardId, disposition: t ? t.disposition : "rejected", reviewedBy: cleanLegacyText(by, MAX_BY) || "human" };
+  // Stage the bound review/result before consuming the source. A failed index
+  // operation leaves the source intact, so the exact transition is retryable.
+  try { git(repo, ["add", "--", ...staged]); }
+  catch (e) { return { error: `git add failed; source retained for retry: ${e.message}` }; }
+  try { git(repo, ["rm", "--cached", "--ignore-unmatch", "--", `.logbook/${LEAD_PLANE}/${cardId}.json`]); }
+  catch (e) { return { error: `git index removal failed; source retained for retry: ${e.message}` }; }
+  try { unlinkSync(leadFile); }
+  catch (e) { return { error: `${dest || "review"} staged but lead not removed (${e.code}) — re-run to complete` }; }
+  return { cardId, disposition: t ? t.disposition : "rejected", reviewedBy: by };
+}
+function dispositionLead(repo, cardId, dest, transform, by) {
+  const out = withPublishLock(repo, () => dispositionLeadUnlocked(repo, cardId, dest, transform, by));
+  if (out && out.__lock) return { error: out.error };
+  if (out && out.cleanupWarning) return { ...out, error: out.cleanupWarning };
+  return out;
 }
 export function acceptLead(repo, cardId, { editClaim, by } = {}) {
   return dispositionLead(repo, cardId, DECISION_PLANE, (card) => {
@@ -2299,19 +2338,26 @@ export function acceptLead(repo, cardId, { editClaim, by } = {}) {
 export function rejectLead(repo, cardId, { by } = {}) { return dispositionLead(repo, cardId, null, null, by); }
 // THE INSTRUMENT (honest): review outcomes of machine leads over plane history. Fails
 // CLOSED when history cannot be trusted (shallow/too-large/malformed) and returns
-// nonzero then. Rejection is NOT inferred from disappearance — a vanished lead is
-// reported as "vanished (unverified: rejected OR retired)". Accepted-vs-edited compares
-// the CLAIM specifically. Genuine semantic precision requires an explicit verdict (Stage 4b).
+// nonzero then. Outcomes come only from exact, source-byte-bound review verdicts;
+// disappearance without a review remains unmeasurable rather than becoming rejection.
 const OUTCOMES_MAX_LEADS = 20000;
 export function computeReviewOutcomes(repo, { ref = "HEAD" } = {}) {
   try { lstatSync(join(realpathSync(repo), ".git", "shallow")); return { error: "shallow clone — history incomplete (git fetch --unshallow)", exitCode: 1 }; }
   catch (e) { if (e.code !== "ENOENT") return { error: `cannot check history: ${e.code}`, exitCode: 1 }; }
-  const curLeads = readPlane(repo, ref, LEAD_PLANE), curDecisions = readPlane(repo, ref, DECISION_PLANE);
-  if (curLeads.unreadable || curDecisions.unreadable) return { error: "trusted planes unreadable", exitCode: 1 };
-  const decClaim = new Map(curDecisions.cards.map((c) => [c.card.cardId, c.card.claim]));
-  const stillLead = new Set(curLeads.cards.map((c) => c.card.cardId));
+  const commit = resolveTrustCommit(repo, ref);
+  if (!commit) return { error: `cannot resolve trust ref ${ref}`, exitCode: 1 };
+  const curLeads = readPlane(repo, commit, LEAD_PLANE), curDecisions = readPlane(repo, commit, DECISION_PLANE);
+  const curReviews = readReviewPlane(repo, commit);
+  if (curLeads.unreadable || curDecisions.unreadable || curReviews.unreadable ||
+      curLeads.malformed.length || curDecisions.malformed.length || curReviews.malformed.length)
+    return { error: "trusted lead/decision/review planes unreadable or malformed", exitCode: 1 };
+  const current = validateDispositionState(curDecisions.cards, curLeads.cards, curReviews.reviews);
+  if (!current.valid) return { error: "trusted disposition state is inconsistent", exitCode: 1 };
+  const decisions = new Map([...current.decisionById].map(([id, entry]) => [id, entry.card]));
+  const reviews = new Map([...current.reviewById].filter(([, review]) => review.source === "lead"));
+  const stillLead = new Set(current.leadById.keys());
   let log;
-  try { log = gitRaw(repo, ["log", ref, "--reverse", "--diff-filter=A", "--name-only", "--format=%H", "--", `.logbook/${LEAD_PLANE}/`]); }
+  try { log = gitRaw(repo, ["log", commit, "--reverse", "--diff-filter=A", "--name-only", "--format=%H", "--", `.logbook/${LEAD_PLANE}/`]); }
   catch { return { error: "cannot read plane history", exitCode: 1 }; }
   const prefix = `.logbook/${LEAD_PLANE}/`, firstAdd = new Map(); let cur = null;
   for (const raw of log.split("\n")) {
@@ -2323,7 +2369,7 @@ export function computeReviewOutcomes(repo, { ref = "HEAD" } = {}) {
     }
   }
   if (firstAdd.size > OUTCOMES_MAX_LEADS) return { error: `too many leads in history (>${OUTCOMES_MAX_LEADS}) to measure`, exitCode: 1 };
-  const ids = [...firstAdd.keys()], origClaim = new Map(), machineIds = []; let historyIncomplete = false;
+  const ids = [...firstAdd.keys()], sourceHash = new Map(), machineIds = []; let historyIncomplete = false;
   if (ids.length) {
     const specs = ids.map((id) => `${firstAdd.get(id)}:${prefix}${id}.json`);
     const r = gitBuf(repo, ["cat-file", "--batch"], { input: specs.join("\n") + "\n", maxBuffer: (1 << 20) + ids.length * (MAX_CARD_BYTES + 256) });
@@ -2334,23 +2380,39 @@ export function computeReviewOutcomes(repo, { ref = "HEAD" } = {}) {
       const parts = b.slice(pos, nl).toString("latin1").split(" "); pos = nl + 1;
       if (parts[1] !== "blob") { if (parts[1] === "missing") { historyIncomplete = true; idx++; continue; } return { error: "malformed lead history", exitCode: 1 }; }
       const size = parseInt(parts[2], 10); if (!Number.isFinite(size)) return { error: "malformed lead history", exitCode: 1 };
-      const card = (() => { const x = decodeUtf8Strict(b.slice(pos, pos + size)); return x != null ? parseDecisionCard(x) : null; })();
-      if (card && card.sourceType === "machine_source") { origClaim.set(ids[idx], card.claim); machineIds.push(ids[idx]); } // count MACHINE leads only
+      const text = decodeUtf8Strict(b.slice(pos, pos + size));
+      const card = text != null ? parseDecisionCard(text) : null;
+      if (card && card.cardId !== ids[idx]) historyIncomplete = true;      // filename/history identity mismatch is unmeasurable, never silently excluded
+      else if (card && card.sourceType === "machine_source") {
+        sourceHash.set(ids[idx], sha256(text)); machineIds.push(ids[idx]);
+      } // count MACHINE leads only
       else if (!card) historyIncomplete = true;                          // malformed historical card => unclassifiable, flagged
       pos += size + 1; idx++;                                            // a non-machine card in leads/ is excluded (not a machine lead)
     }
   }
-  let asIs = 0, edited = 0, keptUnknown = 0, pending = 0, vanished = 0;
+  let asIs = 0, edited = 0, rejected = 0, pending = 0, vanishedUnreviewed = 0;
   for (const id of machineIds) {
-    if (stillLead.has(id)) { pending++; continue; }
-    if (decClaim.has(id)) {
-      const orig = origClaim.get(id);
-      if (orig === undefined) keptUnknown++;                             // kept, but original claim unreadable => can't classify
-      else if (orig === decClaim.get(id)) asIs++; else edited++;         // compare the CLAIM specifically
-    } else vanished++;                                                    // NOT inferred as rejection: rejected OR retired, unverified
+    const review = reviews.get(id);
+    if (!review) {
+      if (stillLead.has(id)) pending++;
+      else { vanishedUnreviewed++; historyIncomplete = true; }
+      continue;
+    }
+    if (stillLead.has(id) || review.sourceCardSha256 !== sourceHash.get(id)) { historyIncomplete = true; continue; }
+    if (review.verdict === "rejected") {
+      if (decisions.has(id) || review.decisionCardSha256 !== null) historyIncomplete = true;
+      else rejected++;
+      continue;
+    }
+    const decision = decisions.get(id);
+    if (!decision || review.decisionCardSha256 !== sha256(serializeDecisionCard(decision))) { historyIncomplete = true; continue; }
+    if (review.verdict === "accepted") asIs++;
+    else if (review.verdict === "edited") edited++;
+    else historyIncomplete = true;
   }
-  const kept = asIs + edited + keptUnknown, reviewed = kept + vanished;
-  return { published: machineIds.length, pending, kept, acceptedAsIs: asIs, edited, keptUnknown, vanished, reviewed,
+  for (const [id] of reviews) if (!sourceHash.has(id)) historyIncomplete = true; // review whose originating lead history is unavailable
+  const kept = asIs + edited, reviewed = kept + rejected;
+  return { published: machineIds.length, pending, kept, acceptedAsIs: asIs, edited, rejected, vanishedUnreviewed, reviewed,
     keptRate: reviewed ? kept / reviewed : null, unchangedAcceptRate: kept ? asIs / kept : null,
     historyIncomplete, exitCode: historyIncomplete ? 1 : 0 };
 }
@@ -2362,8 +2424,9 @@ export function renderReviewOutcomes(res) {
     "(REVIEW OUTCOMES, not semantic claim precision — that needs an explicit correctness verdict)",
     `  published:             ${res.published}`,
     `  pending (unreviewed):  ${res.pending}`,
-    `  kept (in decisions):   ${res.kept}   [accepted-as-is ${res.acceptedAsIs}, edited ${res.edited}${res.keptUnknown ? `, unclassifiable ${res.keptUnknown}` : ""}]`,
-    `  vanished (rejected OR retired — UNVERIFIED): ${res.vanished}`,
+    `  kept (in decisions):   ${res.kept}   [accepted-as-is ${res.acceptedAsIs}, edited ${res.edited}]`,
+    `  rejected (explicit):   ${res.rejected}`,
+    `  vanished without review (unmeasurable): ${res.vanishedUnreviewed}`,
     "",
     `  kept rate (of reviewed):          ${pct(res.keptRate)}`,
     `  unchanged-accept rate (of kept):  ${pct(res.unchangedAcceptRate)}`,
@@ -2376,65 +2439,172 @@ export function renderReviewOutcomes(res) {
 // A committed, explicit REVIEW record captures reviewer provenance (who vouched, when,
 // verdict) SEPARATELY from the card's proposer (`by`), so an accepted card never
 // silently claims a machine/agent as its human reviewer.
-const REVIEW_SCHEMA = 1, REVIEW_PLANE = "reviews";
-const REVIEW_KEYS = new Set(["schema", "cardId", "source", "verdict", "reviewedBy", "reviewedAt"]);
-const REVIEW_ORDER = ["schema", "cardId", "source", "verdict", "reviewedBy", "reviewedAt"];
+export const REVIEW_SCHEMA = 2, REVIEW_PLANE = "reviews";
+const REVIEW_KEYS = new Set(["schema", "cardId", "source", "verdict", "sourceCardSha256", "decisionCardSha256", "reviewedBy", "reviewedAt"]);
+const REVIEW_ORDER = ["schema", "cardId", "source", "verdict", "sourceCardSha256", "decisionCardSha256", "reviewedBy", "reviewedAt"];
 const REVIEW_VERDICTS = new Set(["accepted", "edited", "rejected"]);
 const REVIEW_SOURCES = new Set(["draft", "lead"]);
 function validReview(r) {
   if (!r || typeof r !== "object" || Array.isArray(r)) return false;
   for (const k of Object.keys(r)) if (!REVIEW_KEYS.has(k)) return false;
-  return r.schema === REVIEW_SCHEMA && HASH64.test(r.cardId || "") && REVIEW_SOURCES.has(r.source) &&
-    REVIEW_VERDICTS.has(r.verdict) && okText(r.reviewedBy, MAX_BY) && typeof r.reviewedAt === "string" && /^\d{4}-\d{2}-\d{2}$/.test(r.reviewedAt);
+  return r.schema === REVIEW_SCHEMA && typeof r.cardId === "string" && HASH64.test(r.cardId) &&
+    REVIEW_SOURCES.has(r.source) && REVIEW_VERDICTS.has(r.verdict) &&
+    typeof r.sourceCardSha256 === "string" && HASH64.test(r.sourceCardSha256) &&
+    ((r.verdict === "rejected" && r.decisionCardSha256 === null) ||
+      (r.verdict !== "rejected" && typeof r.decisionCardSha256 === "string" && HASH64.test(r.decisionCardSha256))) &&
+    okText(r.reviewedBy, MAX_BY) && typeof r.reviewedAt === "string" && /^\d{4}-\d{2}-\d{2}$/.test(r.reviewedAt);
 }
 export function serializeReview(r) { const o = {}; for (const k of REVIEW_ORDER) o[k] = r[k] === undefined ? null : r[k]; return JSON.stringify(o, null, 2) + "\n"; }
 export function parseReview(text) { let r; try { r = JSON.parse(text); } catch { return null; } if (!validReview(r)) return null; if (serializeReview(r) !== text) return null; return r; }
+function readReviewPlane(repo, ref) {
+  const out = { reviews: [], malformed: [], unreadable: false };
+  const pb = readPlaneBlobs(repo, ref, REVIEW_PLANE, parseReview);
+  if (pb.unreadable) { out.unreadable = true; return out; }
+  const seen = new Set();
+  for (const { path, record: review } of pb.entries) {
+    if (!review || basename(path) !== review.cardId + ".json" || seen.has(review.cardId)) {
+      out.malformed.push(path);
+      continue;
+    }
+    seen.add(review.cardId);
+    out.reviews.push({ path, review });
+  }
+  return out;
+}
+
+// One invariant for every consumer of the trust planes. A decision is
+// human-reviewed only when an accepted/edited review binds its exact canonical
+// bytes; a rejection can never coexist with a decision; and a disposed card can
+// never remain a policy lead. Callers may add structural reader errors to
+// `issues`, but must not reinterpret these relationships independently.
+export function validateDispositionState(decisions = [], leads = [], reviews = []) {
+  const issues = [], decisionById = new Map(), leadById = new Map(), reviewById = new Map();
+  const add = (map, id, value, kind) => {
+    if (map.has(id)) issues.push(`duplicate-${kind}:${id}`);
+    else map.set(id, value);
+  };
+  for (const entry of decisions) add(decisionById, entry.card.cardId, entry, "decision");
+  for (const entry of leads) add(leadById, entry.card.cardId, entry, "lead");
+  for (const entry of reviews) add(reviewById, entry.review.cardId, entry.review, "review");
+
+  for (const [id, entry] of decisionById) {
+    const review = reviewById.get(id);
+    if (!review) { issues.push(`decision-missing-review:${id}`); continue; }
+    if (review.verdict !== "accepted" && review.verdict !== "edited") {
+      issues.push(`decision-review-verdict:${id}`); continue;
+    }
+    if (review.decisionCardSha256 !== sha256(serializeDecisionCard(entry.card)))
+      issues.push(`decision-review-byte-mismatch:${id}`);
+  }
+  for (const [id, review] of reviewById) {
+    const decision = decisionById.get(id);
+    if (review.verdict === "rejected") {
+      if (decision) issues.push(`rejected-review-has-decision:${id}`);
+    } else if (!decision) issues.push(`accepted-review-missing-decision:${id}`);
+    else if (review.decisionCardSha256 !== sha256(serializeDecisionCard(decision.card)))
+      issues.push(`accepted-review-byte-mismatch:${id}`);
+    if (leadById.has(id)) issues.push(`lead-review-overlap:${id}`);
+  }
+  for (const id of leadById) if (decisionById.has(id)) issues.push(`lead-decision-overlap:${id}`);
+  return { valid: issues.length === 0, issues, decisionById, leadById, reviewById };
+}
 function todayLocal() { const n = new Date(); return new Date(n.getTime() - n.getTimezoneOffset() * 60000).toISOString().slice(0, 10); }
-function writeReview(repo, { cardId, source, verdict, by }) {
-  const rec = { schema: REVIEW_SCHEMA, cardId, source, verdict, reviewedBy: cleanLegacyText(by, MAX_BY) || "human", reviewedAt: todayLocal() };
+function writeReview(repo, { cardId, source, verdict, by, sourceBytes, decisionBytes = null }) {
+  if (!okText(by, MAX_BY)) return { error: "reviewer identity requires an explicit --by value" };
+  if (typeof sourceBytes !== "string" || !sourceBytes.length) return { error: "source card bytes are required" };
+  if ((verdict === "rejected") !== (decisionBytes === null)) return { error: "review decision binding does not match verdict" };
+  if (decisionBytes !== null && (typeof decisionBytes !== "string" || !decisionBytes.length)) return { error: "decision card bytes are required" };
+  const rec = { schema: REVIEW_SCHEMA, cardId, source, verdict, sourceCardSha256: sha256(sourceBytes),
+    decisionCardSha256: decisionBytes === null ? null : sha256(decisionBytes),
+    reviewedBy: by, reviewedAt: todayLocal() };
   if (!validReview(rec)) return { error: "invalid review record" };
   const pin = pinPlaneDir(repo, REVIEW_PLANE);
   if (pin.error) return { error: pin.error };
+  const existingPath = join(pin.dir, cardId + ".json");
+  const matchesIntent = (prior) => prior && REVIEW_ORDER.filter((k) => k !== "reviewedAt").every((k) => prior[k] === rec[k]);
+  const existing = readRegularUtf8NoFollow(existingPath);
+  if (!existing.error) {
+    const prior = parseReview(existing.text);
+    return matchesIntent(prior) ? { ok: true, review: prior, idempotent: true } : { error: `a different review record ${cardId} already exists` };
+  }
+  if (existing.error !== "missing") return { error: `unsafe existing review: ${existing.error}` };
   const res = installCard(pin.dir, cardId, serializeReview(rec));         // atomic, symlink-safe; conflict => a different review already exists
-  if (res.conflict) return { error: `a different review record ${cardId} already exists` };
+  if (res.conflict) {
+    const raced = readRegularUtf8NoFollow(existingPath);
+    const prior = raced.error ? null : parseReview(raced.text);
+    return matchesIntent(prior) ? { ok: true, review: prior, idempotent: true } : { error: `a different review record ${cardId} already exists` };
+  }
   if (res.error) return { error: res.error };
-  return { ok: true };
+  return { ok: true, review: rec };
 }
-// annotate: write a canonical, INERT draft card (never surfaces in check). Same shape as
-// migration, from CLI args; a --span must be verbatim in the commit, or abstain.
-export function annotateDraft(repo, { sha, why, span, by }) {
+// Annotate: write a canonical, INERT draft card (never surfaces in check).
+// A human/off-git assertion carries no fake evidence. If evidence is supplied,
+// its side/path are explicit and the raw-object grounder must verify it.
+export function annotateDraft(repo, { sha, why, span, side, evidenceFile, by }) {
   const r = rawGitStatus(repo, ["rev-parse", "--verify", "--quiet", `${sha}^{commit}`]);
   const full = r.status === 0 ? r.stdout.trim() : null;
   if (!full || !OID.test(full)) return { error: `no such commit ${sha}` };
-  const claim = cleanLegacyText(why, MAX_CLAIM);
-  if (!claim) return { error: "empty why" };
-  const spanVal = span != null && span !== "" ? String(span).slice(0, MAX_SPAN) : null;
-  if (spanVal && !spanGrounded(repo, full, spanVal)) return { error: `--span is not a verbatim substring of ${full.slice(0, 12)} (message + diff); quote it exactly or omit it` };
+  if (!okText(why, MAX_CLAIM)) return { error: "why is empty, unsafe, or too long" };
+  if (by !== undefined && !okText(by, MAX_BY)) return { error: "proposer identity is unsafe or too long" };
+  const claim = why, proposer = by || "agent";
+  let sourceType = "human_attestation", spanVal = null, sourceSide = null, sourceFile = null;
+  if (span !== undefined && span !== null && span !== "") {
+    if (!okText(span, MAX_SPAN)) return { error: "span is empty, unsafe, or too long" };
+    if (side !== "message" && side !== "diff") return { error: "a span requires --side message|diff" };
+    if (side === "message" && evidenceFile != null) return { error: "message evidence must not name --evidence-file" };
+    if (side === "diff" && !okEvPath(evidenceFile)) return { error: "diff evidence requires a literal --evidence-file path" };
+    const gs = groundStatus(repo, full, span, side, evidenceFile ?? null);
+    if (gs === "unmeasurable") return { error: "could not verify span against raw git objects (unmeasurable)" };
+    if (gs !== "grounded") return { error: "span is not evidence at the named commit side/path" };
+    sourceType = "machine_source"; spanVal = span; sourceSide = side; sourceFile = evidenceFile ?? null;
+  } else if (side != null || evidenceFile != null) return { error: "--side/--evidence-file require --span" };
   const scopes = commitChangedFiles(repo, full);
   if (!scopes.length) return { error: "commit changed no scopable files" };
-  const card = { schema: DECISION_SCHEMA, cardId: "", sha: full, sourceType: "legacy_unverified", claim, side: null, evidenceFile: null, span: spanVal, scopes, by: cleanLegacyText(by, MAX_BY) || "agent", at: todayLocal() };
+  const card = { schema: DECISION_SCHEMA, cardId: "", sha: full, sourceType, claim,
+    side: sourceSide, evidenceFile: sourceFile, span: spanVal, scopes, by: proposer, at: todayLocal() };
   card.cardId = decisionCardId(card);
   if (!validDecisionCard(card)) return { error: "resulting draft is invalid" };
+  const ignored = ensureDraftsIgnored(repo);
+  if (ignored.error) return { error: ignored.error };
   const pin = pinPlaneDir(repo, "drafts");
   if (pin.error) return { error: pin.error };
   const res = installCard(pin.dir, card.cardId, serializeDecisionCard(card));
   if (res.conflict) return { error: "a different draft with this id already exists" };
   if (res.error) return { error: res.error };
-  const gi = join(realpathSync(repo), ".logbook", ".gitignore");         // drafts are local + inert — keep them out of git
-  if (!existsSync(gi)) writeFileSync(gi, "drafts/\n");
   return { cardId: card.cardId, sha: full };
 }
 // accept-draft: promote ONE exact local draft into decisions/ (a human vouch), optionally
 // narrowing scopes, and record reviewer provenance. The draft is local/gitignored, so its
 // removal is not staged; only the decision + review record are.
-export function acceptDraft(repo, cardId, { scopes, by } = {}) {
-  if (!HASH64.test(cardId || "")) return { error: "invalid cardId" };
+function acceptDraftUnlocked(repo, cardId, { scopes, by } = {}) {
+  if (typeof cardId !== "string" || !HASH64.test(cardId)) return { error: "invalid cardId" };
+  if (!okText(by, MAX_BY)) return { error: "reviewer identity requires an explicit --by value" };
+  const materialized = requireMaterializedTrustPlanes(repo);
+  if (materialized.error) return materialized;
   const dpin = pinPlaneDir(repo, "drafts");
   if (dpin.error) return { error: dpin.error };
   const draftFile = join(dpin.dir, cardId + ".json");
-  let text; try { text = readFileSync(draftFile, "utf8"); } catch { return { error: `no local draft ${cardId} (run annotate first)` }; }
-  const draft = parseDecisionCard(text);
+  const rr = readRegularUtf8NoFollow(draftFile);
+  if (rr.error) return { error: rr.error === "missing" ? `no local draft ${cardId} (run annotate first)` : `unsafe local draft: ${rr.error}` };
+  const text = rr.text, draft = parseDecisionCard(text);
   if (!draft || draft.cardId !== cardId) return { error: "draft is malformed" };
+  const trust = resolveTrustCommit(repo, "HEAD");
+  if (!trust || !isAncestor(repo, draft.sha, trust)) return { error: "draft source is not ancestral to HEAD (unmeasurable)" };
+  // A draft promotion may never leapfrog an existing policy lead with the same
+  // identity. Only accept-lead/reject-lead may disposition that source.
+  const committedLeads = readPlane(repo, trust, LEAD_PLANE);
+  if (committedLeads.unreadable || committedLeads.malformed.length)
+    return { error: "committed leads unreadable or malformed (unmeasurable)" };
+  const leadPin = pinPlaneDir(repo, LEAD_PLANE);
+  if (leadPin.error) return { error: leadPin.error };
+  const localLeads = worktreePlaneState(leadPin.dir);
+  if (localLeads.malformed) return { error: "worktree leads unreadable or malformed (unmeasurable)" };
+  if (committedLeads.cards.some(({ card }) => card.cardId === cardId) || localLeads.ids.has(cardId))
+    return { error: "a policy lead with this cardId already exists; disposition it with accept-lead or reject-lead" };
+  if (draft.sourceType === "machine_source") {
+    const gs = groundStatus(repo, draft.sha, draft.span, draft.side, draft.evidenceFile);
+    if (gs !== "grounded") return { error: `draft evidence ${gs}; refusing human promotion until re-verified` };
+  }
   let card = draft;
   if (scopes && scopes.length) {
     const sc = canonicalizeScopes(scopes);
@@ -2449,11 +2619,19 @@ export function acceptDraft(repo, cardId, { scopes, by } = {}) {
   const res = installCard(pin.dir, cardId, content);
   if (res.conflict) return { error: `a different decision ${cardId} already exists` };
   if (res.error) return { error: res.error };
-  const rev = writeReview(repo, { cardId, source: "draft", verdict: "accepted", by });
+  const rev = writeReview(repo, { cardId, source: "draft", verdict: "accepted", by,
+    sourceBytes: text, decisionBytes: content });
   if (rev.error) return { error: rev.error };
-  try { unlinkSync(draftFile); } catch (e) { if (e.code !== "ENOENT") return { error: `decision written but local draft not removed: ${e.code}` }; }
+  // Stage the exact review/result before consuming the local recovery source.
   try { git(repo, ["add", "--", `.logbook/${DECISION_PLANE}/${cardId}.json`, `.logbook/${REVIEW_PLANE}/${cardId}.json`]); } catch (e) { return { error: `git add failed: ${e.message}` }; }
-  return { cardId, disposition: "accepted", reviewedBy: cleanLegacyText(by, MAX_BY) || "human" };
+  try { unlinkSync(draftFile); } catch (e) { if (e.code !== "ENOENT") return { error: `decision staged but local draft not removed: ${e.code} — re-run to complete` }; }
+  return { cardId, disposition: "accepted", reviewedBy: by };
+}
+export function acceptDraft(repo, cardId, opts = {}) {
+  const out = withPublishLock(repo, () => acceptDraftUnlocked(repo, cardId, opts));
+  if (out && out.__lock) return { error: out.error };
+  if (out && out.cleanupWarning) return { ...out, error: out.cleanupWarning };
+  return out;
 }
 // Read at most `max` bytes from a REGULAR file or stdin (fd 0). Rejects FIFOs/devices
 // (fstat isFile), never follows a candidate path into a device, and caps the read so a
@@ -2605,6 +2783,53 @@ function authorizeScopesEvidence(card, policy) {
   }
   return { ok: true };
 }
+// Read one worktree trust artifact through the held file descriptor. The leaf may
+// not be a symlink, hardlink, FIFO/device, oversized file, invalid UTF-8, or mutate
+// while it is being read. Path replacement after open cannot redirect the held fd.
+function readRegularUtf8NoFollow(path, max = MAX_CARD_BYTES) {
+  let fd;
+  try { fd = openSync(path, FS.O_RDONLY | FS.O_NOFOLLOW | FS.O_NONBLOCK); }
+  catch (e) { return { error: e.code === "ENOENT" ? "missing" : `open ${e.code || e.message}` }; }
+  try {
+    const before = fstatSync(fd);
+    if (!before.isFile() || before.nlink !== 1) return { error: "not a private regular file" };
+    if (before.size > max) return { error: "file too large" };
+    const buf = Buffer.alloc(before.size); let off = 0;
+    while (off < buf.length) {
+      const n = readSync(fd, buf, off, buf.length - off, off);
+      if (!(n > 0)) return { error: "short read" };
+      off += n;
+    }
+    const after = fstatSync(fd);
+    if (after.dev !== before.dev || after.ino !== before.ino || after.nlink !== 1 ||
+        after.size !== before.size || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs)
+      return { error: "file changed while reading" };
+    const text = decodeUtf8Strict(buf);
+    return text === null ? { error: "invalid UTF-8" } : { text };
+  } catch (e) { return { error: e.code || e.message }; }
+  finally { try { closeSync(fd); } catch { /* ignore */ } }
+}
+
+// Drafts are local and inert. Keep that policy local too: use Git's own exclude
+// file instead of creating a tracked `.logbook/.gitignore` release artifact.
+function ensureDraftsIgnored(repo) {
+  let common;
+  try { common = gitRaw(repo, ["rev-parse", "--git-common-dir"]).trim(); }
+  catch { return { error: "cannot locate git common directory" }; }
+  const commonPath = isAbsolute(common) ? common : join(realpathSync(repo), common);
+  let realCommon;
+  try { realCommon = realpathSync(commonPath); } catch { return { error: "git common directory is unreadable" }; }
+  const info = join(realCommon, "info");
+  try { const st = lstatSync(info); if (!st.isDirectory()) return { error: "git info path is not a directory" }; }
+  catch (e) { if (e.code !== "ENOENT") return { error: `git info lstat ${e.code}` }; try { mkdirSync(info); } catch (x) { return { error: `cannot create git info directory: ${x.code || x.message}` }; } }
+  const path = join(info, "exclude"), rule = "/.logbook/drafts/";
+  const cur = readRegularUtf8NoFollow(path, 1 << 20);
+  if (!cur.error && cur.text.split(/\r?\n/).includes(rule)) return { ok: true };
+  if (cur.error && cur.error !== "missing") return { error: `cannot read git exclude: ${cur.error}` };
+  try { appendPrivateLine(path, `${cur.error === "missing" || !cur.text.endsWith("\n") ? "\n" : ""}${rule}\n`); }
+  catch (e) { return { error: `cannot update git exclude: ${e.message}` }; }
+  return { ok: true };
+}
 // Pin the plane directory: .logbook and .logbook/<plane> must be REAL directories
 // (not symlinks), resolving to exactly <real-repo>/.logbook/<plane>. Rejects a
 // leads->decisions redirect or any parent-directory redirection.
@@ -2620,6 +2845,17 @@ function pinPlaneDir(repo, plane) {
   if (real !== dir) return { error: `.logbook/${plane} redirects to ${real}` };
   return { dir };
 }
+// The conservative worktree overlay used by trust-plane mutations cannot infer
+// index-only entries hidden by sparse checkout. Fail closed instead of silently
+// treating an unmaterialized review/decision as absent; read-only checks remain
+// supported because they read immutable Git objects directly.
+function requireMaterializedTrustPlanes(repo) {
+  const r = rawGitStatus(repo, ["config", "--bool", "--get", "core.sparseCheckout"]);
+  if (r.status === 0 && r.stdout.trim() === "true")
+    return { error: "trust-plane mutations require a full worktree; disable sparse checkout or materialize .logbook/" };
+  if (r.status !== 0 && r.status !== 1) return { error: "cannot determine sparse-checkout state (unmeasurable)" };
+  return { ok: true };
+}
 let cardTmpCtr = 0;
 // Install a card by ATOMIC no-replace link. Existing target must be a regular
 // single-link file; byte-identical => idempotent, different => conflict. A failed
@@ -2628,9 +2864,9 @@ function installCard(dir, cardId, content) {
   const target = join(dir, cardId + ".json");
   let ex; try { ex = lstatSync(target); } catch (e) { if (e.code !== "ENOENT") return { error: `target lstat ${e.code}` }; }
   if (ex) {
-    if (!ex.isFile() || ex.nlink !== 1) return { error: "unsafe existing target (symlink / hardlink / fifo / dir)" };
-    let cur; try { cur = readFileSync(target, "utf8"); } catch { return { error: "target unreadable" }; }
-    return cur === content ? { idempotent: true } : { conflict: true };
+    const cur = readRegularUtf8NoFollow(target);
+    if (cur.error) return { error: `unsafe existing target: ${cur.error}` };
+    return cur.text === content ? { idempotent: true } : { conflict: true };
   }
   const tmp = join(dir, `.tmp.${process.pid}.${cardTmpCtr++}`);
   let fd;
@@ -2643,7 +2879,11 @@ function installCard(dir, cardId, content) {
   } catch (e) {
     if (fd !== undefined) { try { closeSync(fd); } catch { /* ignore */ } }
     try { unlinkSync(tmp); } catch { /* ignore */ }
-    return e.code === "EEXIST" ? { conflict: true } : { error: e.code || String(e) };
+    if (e.code === "EEXIST") {
+      const raced = readRegularUtf8NoFollow(target);
+      return !raced.error && raced.text === content ? { idempotent: true } : { conflict: true };
+    }
+    return { error: e.code || String(e) };
   }
   try { unlinkSync(tmp); } catch { /* ignore */ }
   return { installed: true };
@@ -2674,40 +2914,40 @@ export function withPublishLock(repo, fn) {
   }
   return out;
 }
-// Trusted committed leads at `commit`: raw-read + canonically parse + filename-bind
-// EACH .json. Any enumeration failure, missing/unreadable object, malformed card,
-// or filename!=cardId => malformed (=> publication is UNMEASURABLE, never fail-open
-// on filenames or an empty set).
-function trustedPlaneState(repo, commit, plane) {
-  const ids = new Set();
-  const pb = readPlaneBlobs(repo, commit, plane);                          // streamed, RAW, fail-closed
-  if (pb.unreadable) return { ids, malformed: true };
-  for (const { path, card } of pb.entries) {
-    if (!card || card.cardId + ".json" !== basename(path)) return { ids, malformed: true }; // any bad/oversized/misnamed entry => whole plane unmeasurable
-    if (ids.has(card.cardId)) return { ids, malformed: true };            // duplicate cardId => whole plane unmeasurable
-    ids.add(card.cardId);
-  }
-  return { ids, malformed: false };
-}
 // Worktree lead ids; malformed=true if ANY entry is unsafe/invalid (=> unmeasurable).
-function worktreePlaneState(dir) {
-  const ids = new Set();
+function worktreePlaneState(dir, parseRecord = parseDecisionCard) {
+  const ids = new Set(), records = [];
   // dir is guaranteed to exist by the preceding pinPlaneDir, so a readdir failure
   // (e.g. EACCES) is genuinely UNREADABLE, never legitimately absent: fail closed so
   // present-but-hidden cards cannot silently drop out of the quota union.
-  let files; try { files = readdirSync(dir); } catch { return { ids, malformed: true }; }
+  let files; try { files = readdirSync(dir); } catch { return { ids, records, malformed: true }; }
   for (const f of files) {
     if (f.startsWith(".tmp.")) continue;
     if (!f.endsWith(".json")) continue;
-    const p = join(dir, f);
-    let st; try { st = lstatSync(p); } catch { return { ids, malformed: true }; }
-    if (!st.isFile() || st.nlink !== 1) return { ids, malformed: true };
-    let text; try { text = readFileSync(p, "utf8"); } catch { return { ids, malformed: true }; }
-    const card = parseDecisionCard(text);
-    if (!card || card.cardId + ".json" !== f) return { ids, malformed: true };
-    ids.add(card.cardId);
+    const p = join(dir, f), rr = readRegularUtf8NoFollow(p);
+    if (rr.error) return { ids, records, malformed: true };
+    const record = parseRecord(rr.text);
+    if (!record || record.cardId + ".json" !== f || ids.has(record.cardId)) return { ids, records, malformed: true };
+    ids.add(record.cardId);
+    records.push({ path: p, record });
   }
-  return { ids, malformed: false };
+  return { ids, records, malformed: false };
+}
+// Conservative effective view for publication: committed records never vanish
+// merely because a sparse/dirty worktree omits them; a materialized record may
+// add a new id, but may not mutate immutable committed bytes in place.
+function overlayPlaneEntries(committed, worktree, field, serialize) {
+  const byId = new Map(), issues = [];
+  for (const entry of committed) byId.set(entry[field].cardId, entry);
+  for (const { path, record } of worktree.records) {
+    const prior = byId.get(record.cardId);
+    if (prior) {
+      if (serialize(prior[field]) !== serialize(record)) issues.push(`worktree-${field}-byte-mismatch:${record.cardId}`);
+      continue;
+    }
+    byId.set(record.cardId, { path, [field]: record });
+  }
+  return { entries: [...byId.values()], issues };
 }
 function buildAutoCard(cand) {
   return { schema: DECISION_SCHEMA, cardId: "", sha: cand && typeof cand.sha === "string" ? cand.sha : "",
@@ -2728,6 +2968,8 @@ export function publishPolicyLeads(repo, candidates, { trustRef = "HEAD" } = {})
     : done({ error: engagedMsg });
   if (!Array.isArray(candidates)) return done({ error: "candidates must be an array" }); // a Set/iterable would bypass the .length cap
   if (candidates.length > MAX_CANDIDATES) return done({ error: `too many candidates (>${MAX_CANDIDATES})` });
+  const materialized = requireMaterializedTrustPlanes(repo);
+  if (materialized.error) return done({ error: materialized.error, incomplete: true });
   const commit = resolveTrustCommit(repo, trustRef);
   if (!commit) return done({ error: `cannot resolve trust ref ${trustRef}` });
   const pol = loadTrustedPolicy(repo, commit);
@@ -2765,14 +3007,39 @@ export function publishPolicyLeads(repo, candidates, { trustRef = "HEAD" } = {})
     if (pol2.error || pol2.text !== pol.text) return done({ error: "policy changed mid-run", incomplete: true });
     const pin = pinPlaneDir(repo, LEAD_PLANE);
     if (pin.error) return done({ error: pin.error, incomplete: true });
-    const trusted = trustedPlaneState(repo, commit, LEAD_PLANE);                     // raw-read + parse + filename-bind every committed lead
-    if (trusted.malformed) return done({ error: "malformed/missing trusted lead — unmeasurable", incomplete: true });
+    const decisionPin = pinPlaneDir(repo, DECISION_PLANE);
+    if (decisionPin.error) return done({ error: decisionPin.error, incomplete: true });
+    const reviewPin = pinPlaneDir(repo, REVIEW_PLANE);
+    if (reviewPin.error) return done({ error: reviewPin.error, incomplete: true });
+    const trustedLeads = readPlane(repo, commit, LEAD_PLANE);
+    const trustedDecisions = readPlane(repo, commit, DECISION_PLANE);
+    const trustedReviews = readReviewPlane(repo, commit);
+    if (trustedLeads.unreadable || trustedDecisions.unreadable || trustedReviews.unreadable ||
+        trustedLeads.malformed.length || trustedDecisions.malformed.length || trustedReviews.malformed.length)
+      return done({ error: "malformed/missing trusted lead, decision, or review — unmeasurable", incomplete: true });
+    const trustedState = validateDispositionState(trustedDecisions.cards, trustedLeads.cards, trustedReviews.reviews);
+    if (!trustedState.valid)
+      return done({ error: "inconsistent trusted disposition state — unmeasurable", incomplete: true });
     const wt = worktreePlaneState(pin.dir);
     if (wt.malformed) return done({ error: "malformed/unsafe worktree lead — unmeasurable", incomplete: true });
-    const union = new Set([...trusted.ids, ...wt.ids]);                              // trusted-ref + worktree; a local delete can't restore quota
+    const wtDecisions = worktreePlaneState(decisionPin.dir);
+    const wtReviews = worktreePlaneState(reviewPin.dir, parseReview);
+    if (wtDecisions.malformed || wtReviews.malformed)
+      return done({ error: "malformed/unsafe worktree decision or review — unmeasurable", incomplete: true });
+    const effectiveLeads = overlayPlaneEntries(trustedLeads.cards, wt, "card", serializeDecisionCard);
+    const effectiveDecisions = overlayPlaneEntries(trustedDecisions.cards, wtDecisions, "card", serializeDecisionCard);
+    const effectiveReviews = overlayPlaneEntries(trustedReviews.reviews, wtReviews, "review", serializeReview);
+    if (effectiveLeads.issues.length || effectiveDecisions.issues.length || effectiveReviews.issues.length)
+      return done({ error: "worktree mutates immutable trust-plane bytes — unmeasurable", incomplete: true });
+    const effectiveState = validateDispositionState(effectiveDecisions.entries, effectiveLeads.entries, effectiveReviews.entries);
+    if (!effectiveState.valid)
+      return done({ error: "inconsistent effective disposition state — unmeasurable", incomplete: true });
+    const union = new Set(effectiveState.leadById.keys());                // committed + worktree; a local delete cannot restore quota
+    const dispositioned = new Set([...effectiveState.decisionById.keys(), ...effectiveState.reviewById.keys()]);
     for (const { card, content } of installable) {
       { const ks = killSwitchEngaged(repo, commit); if (ks) return done({ error: ks === "unmeasurable" ? "kill switch state unmeasurable" : "kill switch engaged during install", incomplete: true }); } // mid-run: stop, report the partial subset with an explicit reason
       if (counts.published >= policy.maxPerRun) { counts.skipped.push({ reason: "run-cap" }); continue; }
+      if (dispositioned.has(card.cardId)) { counts.skipped.push({ reason: "already-dispositioned" }); continue; }
       if (!union.has(card.cardId) && union.size >= policy.maxTotal) { counts.skipped.push({ reason: "total-cap" }); continue; }
       const res = installCard(pin.dir, card.cardId, content);
       if (res.idempotent) { counts.idempotent++; continue; }                         // consumes no quota
@@ -2801,6 +3068,8 @@ function commitChangedFiles(repo, sha) {
 }
 export function migrateLegacyToDrafts(repo, dir = repo) {
   const anns = loadAnnotations(dir);
+  const ignored = ensureDraftsIgnored(repo);
+  if (ignored.error) return { drafted: [], skipped: [{ reason: "unsafe-draft-ignore", detail: ignored.error }] };
   const pin = pinPlaneDir(repo, "drafts");            // real dir only (no symlink redirect)
   if (pin.error) return { drafted: [], skipped: [{ reason: "unsafe-drafts-dir", detail: pin.error }] };
   const drafted = [], skipped = [], seen = new Set();
@@ -2823,11 +3092,6 @@ export function migrateLegacyToDrafts(repo, dir = repo) {
     if (res.error) { skipped.push({ reason: "unsafe-target", sha: ann.sha, detail: res.error }); continue; }
     if (res.conflict) { skipped.push({ reason: "conflict", sha: ann.sha }); continue; } // existing edited draft — don't clobber
     drafted.push(card);
-  }
-  // drafts are LOCAL + inert — keep them out of git.
-  if (drafted.length) {
-    const gi = join(realpathSync(repo), ".logbook", ".gitignore");
-    if (!existsSync(gi)) { mkdirSync(join(realpathSync(repo), ".logbook"), { recursive: true }); writeFileSync(gi, "drafts/\n"); }
   }
   return { drafted, skipped };
 }
@@ -3664,11 +3928,11 @@ function usage() {
                                   publish caller-proposed machine LEADS (JSON on stdin or
                                   --candidates FILE) under the committed .logbook/policy.toml
                                   (grounding + ancestry + quota + kill switch enforced)
-    logbook accept-lead CARDID [--claim "corrected text"] [path]
+    logbook accept-lead CARDID --by WHO [--claim "corrected text"] [path]
                                   promote a policy-published machine LEAD to a
                                   human-reviewed decision (unchanged = accepted-as-is,
                                   --claim = edited); commit .logbook/ to record it
-    logbook reject-lead CARDID [path]
+    logbook reject-lead CARDID --by WHO [path]
                                   drop a machine lead (vanished); commit to record it
     logbook outcomes [path]       REVIEW OUTCOMES of machine leads across plane history
                                   (kept as-is / edited / pending / vanished) — NOT semantic
@@ -3720,6 +3984,8 @@ export function parseArgs(argv) {
     else if (a === "--candidates") { if (i + 1 >= argv.length) o._missing = "--candidates"; else o.candidates = argv[++i]; }
     else if (a === "--diff") o.diff = true;
     else if (a === "--span") { if (i + 1 >= argv.length) o._missing = "--span"; else o.span = argv[++i]; }
+    else if (a === "--side") { if (i + 1 >= argv.length) o._missing = "--side"; else o.side = argv[++i]; }
+    else if (a === "--evidence-file") { if (i + 1 >= argv.length) o._missing = "--evidence-file"; else o.evidenceFile = argv[++i]; }
     else if (a === "--amend") { if (i + 1 >= argv.length) o._missing = "--amend"; else o.amend = argv[++i]; }
     else if (a === "--note") { if (i + 1 >= argv.length) o._missing = "--note"; else o.note = argv[++i]; }
     else if (a === "--verdict") { if (i + 1 >= argv.length) o._missing = "--verdict"; else o.verdict = argv[++i]; }
@@ -3922,20 +4188,20 @@ async function main() {
     return;
   }
   if (o.cmd === "annotate-draft") {
-    const r = annotateDraft(repo, { sha: o.sha, why: o.why, span: o.span, by: o.by });
+    const r = annotateDraft(repo, { sha: o.sha, why: o.why, span: o.span, side: o.side, evidenceFile: o.evidenceFile, by: o.by });
     if (r.error) { console.error(`  annotate-draft: ${r.error}`); process.exit(1); }
-    console.log(`  annotate-draft: drafted ${r.cardId.slice(0, 12)}… for ${r.sha.slice(0, 8)} (inert; run: logbook accept-draft ${r.cardId.slice(0, 12)}… to promote)`);
+    console.log(`  annotate-draft: drafted ${r.cardId.slice(0, 12)}… for ${r.sha.slice(0, 8)} (inert; run: logbook accept-draft ${r.cardId} --by WHO to promote)`);
     return;
   }
   if (o.cmd === "accept-draft") {
-    if (!o.cardId) { console.error(`  usage: logbook accept-draft <cardId> [--file P ...] [--by WHO] [repo]`); process.exit(1); }
+    if (!o.cardId || !o.by) { console.error(`  usage: logbook accept-draft <cardId> --by WHO [--file P ...] [repo]`); process.exit(1); }
     const r = acceptDraft(repo, o.cardId, { scopes: o.files, by: o.by });
     if (r.error) { console.error(`  accept-draft: ${r.error}`); process.exit(1); }
     console.log(`  accept-draft: ${o.cardId.slice(0, 12)}… → decision (reviewed by ${r.reviewedBy}); commit .logbook/ to record it`);
     return;
   }
   if (o.cmd === "accept-lead" || o.cmd === "reject-lead") {
-    if (!o.cardId) { console.error(`  usage: logbook ${o.cmd} <cardId> [--claim "..."] [--by WHO] [repo]`); process.exit(1); }
+    if (!o.cardId || !o.by) { console.error(`  usage: logbook ${o.cmd} <cardId> --by WHO [--claim "..."] [repo]`); process.exit(1); }
     const r = o.cmd === "accept-lead"
       ? acceptLead(repo, o.cardId, { editClaim: o.claim, by: o.by })
       : rejectLead(repo, o.cardId, { by: o.by });
@@ -4122,10 +4388,11 @@ async function main() {
   });
 
   if (o.cmd === "init") {
-    const block = `\n## Repo memory\nBefore planning or editing:\n1. Read LOGBOOK.md at the repo root completely before any history query.\n2. If Historical signal is LOW, use it only as a hotspot map. Otherwise,\n   inspect task-relevant do-not-retry entries and fragile areas.\n3. For complete do-not-retry coverage, inspect all relevant paths:\n   npx -y @promptwheel/logbook context --file path/to/file --revert\n   Repeat --file for each other relevant path. If output says NEXT, repeat the\n   identical filters with --cursor TOKEN until END complete before concluding.\n4. Treat findings as leads, not verdicts. Verify claims with git show SHA and\n   confirm that the constraint still applies to the current tree.\nRefresh the record: npx -y @promptwheel/logbook\nCheck what is still silenced: npx -y @promptwheel/logbook audit\nWhen you investigate WHY a listed commit happened and verify it in the\ndiffs, persist it (replace SHA, the sentence, and MODEL with your own\nmodel name; never annotate guesses):\nnpx -y @promptwheel/logbook annotate SHA "one specific sentence" --by MODEL\n`;
+    const block = `\n## Repo memory\nBefore planning or editing:\n1. Read LOGBOOK.md at the repo root completely before any history query.\n2. Use the raw history inventory as orientation, not a task-level risk score.\n   Inspect task-relevant do-not-retry, test-trust, and reviewed-annotation\n   entries regardless of repo-wide totals.\n3. For complete do-not-retry coverage, inspect all relevant paths:\n   npx -y @promptwheel/logbook context --file path/to/file --revert\n   Repeat --file for each other relevant path. If output says NEXT, repeat the\n   identical filters with --cursor TOKEN until END complete before concluding.\n4. Treat findings as leads, not verdicts. Verify claims with git show SHA and\n   confirm that the constraint still applies to the current tree.\nRefresh the record: npx -y @promptwheel/logbook\nCheck what is still silenced: npx -y @promptwheel/logbook audit\nWhen you investigate WHY a listed commit happened and verify it in the\ndiffs, persist it (replace SHA, the sentence, and MODEL with your own\nmodel name; never annotate guesses):\nnpx -y @promptwheel/logbook annotate SHA "one specific sentence" --by MODEL\n`;
     // Migrate ONLY exact blocks generated by released versions. A user-edited
     // block is theirs, so the header alone is never permission to rewrite it.
     const oldBlocks = [
+      `\n## Repo memory\nBefore planning or editing:\n1. Read LOGBOOK.md at the repo root completely before any history query.\n2. If Historical signal is LOW, use it only as a hotspot map. Otherwise,\n   inspect task-relevant do-not-retry entries and fragile areas.\n3. For complete do-not-retry coverage, inspect all relevant paths:\n   npx -y @promptwheel/logbook context --file path/to/file --revert\n   Repeat --file for each other relevant path. If output says NEXT, repeat the\n   identical filters with --cursor TOKEN until END complete before concluding.\n4. Treat findings as leads, not verdicts. Verify claims with git show SHA and\n   confirm that the constraint still applies to the current tree.\nRefresh the record: npx -y @promptwheel/logbook\nCheck what is still silenced: npx -y @promptwheel/logbook audit\nWhen you investigate WHY a listed commit happened and verify it in the\ndiffs, persist it (replace SHA, the sentence, and MODEL with your own\nmodel name; never annotate guesses):\nnpx -y @promptwheel/logbook annotate SHA "one specific sentence" --by MODEL\n`,
       `\n## Repo memory\nBefore planning or editing:\n1. Read LOGBOOK.md at the repo root completely before any history query.\n2. If Historical signal is LOW, use it only as a hotspot map. Otherwise,\n   inspect task-relevant do-not-retry entries and fragile areas.\n3. For completeness, query relevant paths before broad terms:\n   npx -y @promptwheel/logbook query --file path/to/file --revert\n   If output says TRUNCATED, narrow filters or raise --limit before concluding.\n4. Treat findings as leads, not verdicts. Verify claims with git show SHA and\n   confirm that the constraint still applies to the current tree.\nRefresh the record: npx -y @promptwheel/logbook\nCheck what is still silenced: npx -y @promptwheel/logbook audit\nWhen you investigate WHY a listed commit happened and verify it in the\ndiffs, persist it (replace SHA, the sentence, and MODEL with your own\nmodel name; never annotate guesses):\nnpx -y @promptwheel/logbook annotate SHA "one specific sentence" --by MODEL\n`,
       `\n## Repo memory\nRead LOGBOOK.md (at the repo root) before proposing changes. If its\nHistorical signal is LOW, treat it as a hotspot map; otherwise check the\ndo-not-retry list and fragile areas before any large change. Refresh with:\nnpx -y @promptwheel/logbook\nCheck what is still silenced: npx -y @promptwheel/logbook audit\nWhen you investigate WHY a listed commit happened and verify it in the\ndiffs, persist it (replace SHA, the sentence, and MODEL with your own\nmodel name; never annotate guesses):\nnpx -y @promptwheel/logbook annotate SHA "one specific sentence" --by MODEL\n`,
       `\n## Repo memory\nRead LOGBOOK.md (at the repo root) before proposing changes. If its\nHistorical signal is LOW, treat it as a hotspot map; otherwise check the\ndo-not-retry list and fragile areas before any large change. Refresh with:\nnpx -y @promptwheel/logbook\nCheck what is still silenced: npx -y @promptwheel/logbook audit\nWhen you investigate WHY a listed commit happened and verify it in the\ndiffs, persist it (replace SHA and the sentence; never annotate guesses):\nnpx -y @promptwheel/logbook annotate SHA "one specific sentence" --by codex\n`,
@@ -4167,11 +4434,11 @@ async function main() {
     }
   }
   if (!o.quiet) {
-    const g = signalGrade(A);
+    const inventory = historyInventory(A);
     console.log(`  ${fmt(A.n)} commit${A.n === 1 ? "" : "s"}${capped ? ` (capped — use -n for more)` : ""} · ${fmt(A.filesTouched)} file${A.filesTouched === 1 ? "" : "s"} · ${spanHuman(A.spanDays)} · ${plural(A.authors, "author")}`);
-    console.log(`  historical signal: ${g.level === "LOW" ? C.dim : g.level === "HIGH" ? C.good : ""}${g.level}${C.r} ${C.dim}(${g.parts})${C.r}\n`);
-    if (g.level === "LOW" && o.cmd === "init")
-      console.log(`  ${C.dim}note: ${g.note} — the wiring stays useful, but expect hotspots, not war stories, until this repo has more history${C.r}\n`);
+    console.log(`  history inventory: ${C.dim}(${inventory.parts})${C.r}\n`);
+    if (inventory.empty && o.cmd === "init")
+      console.log(`  ${C.dim}note: no extracted decision-history leads in this window; use the digest as a hotspot map${C.r}\n`);
     console.log(`  ${C.good}✓${C.r} wrote ${C.bold}LOGBOOK.md${C.r}   ${C.dim}hotspots · do-not-retry · suppression ledger${notes.length ? ` · ${notes.length} why${notes.length === 1 ? "" : "s"}` : ""}${C.r}`);
     if (scanOk)
       console.log(`  ${C.good}✓${C.r} wrote ${C.bold}events.jsonl${C.r}   ${C.dim}${fmt(A.n)} structured event${A.n === 1 ? "" : "s"}${C.r}`);

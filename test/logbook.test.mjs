@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
   mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync,
-  symlinkSync, readdirSync, chmodSync, statSync, utimesSync,
+  symlinkSync, linkSync, readdirSync, chmodSync, statSync, utimesSync,
 } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import {
   SUPPRESS_PAT, classifyFile, parseArgs, collectEvents, diffScan, hotspots, analyze,
   renderLogbookMd, renderJourneyMd, journeyBeats, almanacStats,
-  loadAnnotations, saveAnnotation, loadEvents, kindAllowedInFile, signalGrade,
+  loadAnnotations, saveAnnotation, loadEvents, kindAllowedInFile, historyInventory, signalGrade,
   EXTRACTOR_VERSION, FORMAT_VERSION, CONTEXT_ORDER_VERSION,
   ORDERED_CONTEXT_FORMAT_VERSION, ORDERED_CONTEXT_ORDER_VERSION,
   CONTEXT_PAGE_MAX_ITEMS, CONTEXT_PAGE_MAX_BYTES, CONTEXT_ITEM_MAX_BYTES,
@@ -28,7 +28,7 @@ import {
   decisionCardId, validDecisionCard, serializeDecisionCard, parseDecisionCard, DECISION_SCHEMA,
   checkDecisions, renderDecisionLeads, parsePolicy, publishPolicyLeads, withPublishLock, migrateLegacyToDrafts, readPlane,
   acceptLead, rejectLead, computeReviewOutcomes, renderReviewOutcomes, renderPublish,
-  annotateDraft, acceptDraft, parseReview,
+  annotateDraft, acceptDraft, parseReview, serializeReview, REVIEW_SCHEMA,
   projectLegacyAnnotation, projectLegacy, CARD_SCHEMA, canonicalCardLine,
 } from "../bin/logbook.mjs";
 
@@ -95,7 +95,7 @@ test("classifyFile buckets correctly", () => {
   assert.equal(classifyFile("next-env.d.ts"), "gen");
 });
 
-test("signal grade: boundaries and driver-matched notes", () => {
+test("legacy signalGrade API remains compatible but does not control live behavior", () => {
   const mk = (r, f, sp, w) => ({ reverts: Array(r), fragile: Array(f), suspEvents: Array(sp), weaken: Array(w) });
   assert.equal(signalGrade(mk(0, 0, 0, 0)).level, "LOW");
   assert.equal(signalGrade(mk(0, 0, 1, 1)).level, "LOW");
@@ -109,7 +109,7 @@ test("signal grade: boundaries and driver-matched notes", () => {
   assert.match(signalGrade(mk(0, 0, 0, 100)).parts, /100 weakening/);
 });
 
-test("signal grade: honest LOW on thin history, not LOW on the fixture", () => {
+test("history inventory renders literal counts and an honest empty-window note", () => {
   const opts = { max: 5000, since: null, until: null };
   const events = collectEvents(repo, opts);
   diffScan(repo, events, opts);
@@ -118,8 +118,11 @@ test("signal grade: honest LOW on thin history, not LOW on the fixture", () => {
   const thin = { reverts: [], fragile: [], suspEvents: [], weaken: [] };
   const g = signalGrade(thin);
   assert.equal(g.level, "LOW");
+  assert.equal(historyInventory(thin).empty, true);
+  assert.match(historyInventory(A).parts, /revert/);
   assert.match(renderLogbookMd("x", { ...A, reverts: [], fragile: [], suspEvents: [], weaken: [] },
-    false, false), /Historical signal: \*\*LOW\*\*/);
+    false, false), /History inventory: 0 reverts.*mostly a hotspot map/);
+  assert.doesNotMatch(renderLogbookMd("x", A, false, false), /Historical signal|\*\*(?:LOW|MEDIUM|HIGH)\*\*/);
 });
 
 test("language-bound idioms only count in their own languages", () => {
@@ -3011,6 +3014,18 @@ function writeCard(d, g, plane, card) {
   writeFileSync(join(d, rel), serializeDecisionCard(card));
   g("add", rel);
 }
+function writeReviewFile(d, g, card, { source = "draft", verdict = "accepted", sourceCard = card,
+  reviewedBy = "matthew", reviewedAt = "2026-07-15" } = {}) {
+  const review = { schema: REVIEW_SCHEMA, cardId: card.cardId, source, verdict,
+    sourceCardSha256: sha256(serializeDecisionCard(sourceCard)),
+    decisionCardSha256: verdict === "rejected" ? null : sha256(serializeDecisionCard(card)),
+    reviewedBy, reviewedAt };
+  const rel = `.logbook/reviews/${card.cardId}.json`;
+  mkdirSync(join(d, ".logbook", "reviews"), { recursive: true });
+  writeFileSync(join(d, rel), serializeReview(review));
+  g("add", rel);
+  return review;
+}
 function poolRepo(prefix) {
   const { d, g } = tmpGitRepo(prefix);
   g("init", "-q"); mkdirSync(join(d, "src"));
@@ -3021,7 +3036,8 @@ function poolRepo(prefix) {
 
 test("gitfiles stage2: a human-reviewed decision surfaces from the trusted base, labeled + authoritative", () => {
   const { d, g, sha } = poolRepo("logbook-dec-");
-  writeCard(d, g, "decisions", mkDecision({ sha, evidenceFile: "src/db.js", span: "createPool", scopes: ["src/db.js"] }));
+  const card = mkDecision({ sha, evidenceFile: "src/db.js", span: "createPool", scopes: ["src/db.js"] });
+  writeCard(d, g, "decisions", card); writeReviewFile(d, g, card);
   g("commit", "-qm", "accept"); const base = g("rev-parse", "HEAD").trim();
   writeFileSync(join(d, "src", "db.js"), "createPool({max:20})\n"); g("add", "-A"); g("commit", "-qm", "bump");
   const res = checkDecisions(d, { base, head: g("rev-parse", "HEAD").trim() });
@@ -3088,7 +3104,7 @@ test("gitfiles stage4a: legacy annotations migrate to INERT drafts (no authority
   assert.ok(existsSync(join(d, ".logbook", "drafts", card.cardId + ".json")));
   assert.ok(!existsSync(join(d, ".logbook", "decisions")));        // ZERO authority migrated
   assert.ok(!existsSync(join(d, ".logbook", "leads")));
-  assert.match(readFileSync(join(d, ".logbook", ".gitignore"), "utf8"), /drafts\//);
+  assert.match(readFileSync(join(d, ".git", "info", "exclude"), "utf8"), /\.logbook\/drafts\//);
   rmSync(d, { recursive: true, force: true });
 });
 
@@ -3587,8 +3603,11 @@ test("closure3: runCheckDiff treats an UNREADABLE committed journal blob as unme
 test("batched-read: a multi-card plane reads every card and surfaces exactly the diff-matching one", () => {
   const { d, g, sha } = poolRepo("bmulti-");
   const match = mkDecision({ sha, evidenceFile: "src/db.js", span: "createPool", scopes: ["src/db.js"], claim: "the matching decision" });
-  writeCard(d, g, "decisions", match);
-  for (let i = 0; i < 63; i++) writeCard(d, g, "decisions", mkDecision({ sha, evidenceFile: "other/f.js", span: "x", scopes: ["other/"], claim: "filler " + i }));
+  writeCard(d, g, "decisions", match); writeReviewFile(d, g, match);
+  for (let i = 0; i < 63; i++) {
+    const filler = mkDecision({ sha, evidenceFile: "other/f.js", span: "x", scopes: ["other/"], claim: "filler " + i });
+    writeCard(d, g, "decisions", filler); writeReviewFile(d, g, filler);
+  }
   g("commit", "-qm", "64 decisions"); const base = g("rev-parse", "HEAD").trim();
   writeFileSync(join(d, "src", "db.js"), "createPool({max:20})\n"); g("add", "-A"); g("commit", "-qm", "bump");
   const res = checkDecisions(d, { base, head: g("rev-parse", "HEAD").trim() });
@@ -3725,7 +3744,8 @@ test("closure4: a symlink-mode card is malformed, never surfaces (regular-file m
 
 test("closure4: checkDecisions resolves base/head refs once (branch names, not just SHAs)", () => {
   const { d, g, sha } = poolRepo("cref-");
-  writeCard(d, g, "decisions", mkDecision({ sha, evidenceFile: "src/db.js", span: "createPool", scopes: ["src/db.js"] }));
+  const card = mkDecision({ sha, evidenceFile: "src/db.js", span: "createPool", scopes: ["src/db.js"] });
+  writeCard(d, g, "decisions", card); writeReviewFile(d, g, card);
   g("commit", "-qm", "accept"); g("branch", "base-branch");
   writeFileSync(join(d, "src", "db.js"), "createPool({max:20})\n"); g("add", "-A"); g("commit", "-qm", "bump"); g("branch", "head-branch");
   const res = checkDecisions(d, { base: "base-branch", head: "head-branch" });   // symbolic refs resolve to immutable OIDs
@@ -3770,7 +3790,8 @@ test("closure5: a half-range (base without head, or head without base) is reject
 
 test("closure5: local mode diffs the worktree against the pinned HEAD OID (tracked + untracked), raw", () => {
   const { d, g, sha } = poolRepo("cloc-");
-  writeCard(d, g, "decisions", mkDecision({ sha, evidenceFile: "src/db.js", span: "createPool", scopes: ["src/db.js"] }));
+  const card = mkDecision({ sha, evidenceFile: "src/db.js", span: "createPool", scopes: ["src/db.js"] });
+  writeCard(d, g, "decisions", card); writeReviewFile(d, g, card);
   g("commit", "-qm", "accept at HEAD");
   writeFileSync(join(d, "src", "db.js"), "createPool({max:20})\n");   // UNCOMMITTED tracked change touching the decision's scope
   writeFileSync(join(d, "untracked.txt"), "new\n");                   // untracked file
@@ -3787,13 +3808,13 @@ test("funnel: computePrecision classifies every machine lead by its fate + repor
   const A = mk("accept me as-is"), E = mk("edit me"), R = mk("reject me"), P = mk("pending one");
   for (const c of [A, E, R, P]) writeCard(d, g, "leads", c);
   g("commit", "-qm", "publish 4 machine leads");
-  assert.equal(acceptLead(d, A.cardId).disposition, "accepted-as-is");
-  assert.equal(acceptLead(d, E.cardId, { editClaim: "the corrected human claim" }).disposition, "edited");
-  assert.equal(rejectLead(d, R.cardId).disposition, "rejected");
+  assert.equal(acceptLead(d, A.cardId, { by: "matthew" }).disposition, "accepted-as-is");
+  assert.equal(acceptLead(d, E.cardId, { editClaim: "the corrected human claim", by: "matthew" }).disposition, "edited");
+  assert.equal(rejectLead(d, R.cardId, { by: "matthew" }).disposition, "rejected");
   g("commit", "-qm", "human review dispositions");
   const p = computeReviewOutcomes(d);
   assert.equal(p.published, 4);
-  assert.equal(p.acceptedAsIs, 1); assert.equal(p.edited, 1); assert.equal(p.vanished, 1); assert.equal(p.pending, 1);
+  assert.equal(p.acceptedAsIs, 1); assert.equal(p.edited, 1); assert.equal(p.rejected, 1); assert.equal(p.pending, 1);
   assert.equal(p.kept, 2); assert.equal(p.reviewed, 3);
   assert.equal(p.keptRate, 2 / 3);              // kept (accepted or edited) / reviewed
   assert.equal(p.unchangedAcceptRate, 1 / 2);   // accepted-as-is / kept — NOT called "precision"
@@ -3808,13 +3829,13 @@ test("funnel: computePrecision classifies every machine lead by its fate + repor
 
 test("funnel: accept/reject refuse unknown, non-committed, dirty, or non-machine leads; rates null with no reviews", () => {
   const { d, g, sha } = poolRepo("cfun2-");
-  assert.match(acceptLead(d, "a".repeat(64)).error, /no committed lead/);
-  assert.match(rejectLead(d, "z".repeat(64)).error, /invalid cardId/);   // not hex64
+  assert.match(acceptLead(d, "a".repeat(64), { by: "matthew" }).error, /no committed lead/);
+  assert.match(rejectLead(d, "z".repeat(64), { by: "matthew" }).error, /invalid cardId/);   // not hex64
   const lead = mkDecision({ sha, evidenceFile: "src/db.js", span: "createPool", scopes: ["src/db.js"], by: "auto", claim: "pending forever" });
   writeCard(d, g, "leads", lead); g("commit", "-qm", "one lead, never reviewed");
   // a dirty worktree lead is refused, never silently discarded
   writeFileSync(join(d, ".logbook", "leads", lead.cardId + ".json"), serializeDecisionCard(lead).replace("pending forever", "tampered"));
-  assert.match(acceptLead(d, lead.cardId).error, /local edits/);
+  assert.match(acceptLead(d, lead.cardId, { by: "matthew" }).error, /local edits/);
   g("checkout", "--", ".logbook");                                       // restore clean worktree
   const p = computeReviewOutcomes(d);
   assert.equal(p.published, 1); assert.equal(p.pending, 1); assert.equal(p.reviewed, 0);
@@ -3828,9 +3849,10 @@ test("funnel: a non-machine lead is refused; a directly human-authored decision 
   // a human_attestation card placed in leads/ cannot be dispositioned as a machine lead
   const humanLead = mkDecision({ sha, sourceType: "human_attestation", span: null, side: null, evidenceFile: null, scopes: ["src/db.js"], claim: "not a machine lead" });
   writeCard(d, g, "leads", humanLead); g("commit", "-qm", "human card in leads");
-  assert.match(acceptLead(d, humanLead.cardId).error, /not a machine lead/);
+  assert.match(acceptLead(d, humanLead.cardId, { by: "matthew" }).error, /not a machine lead/);
   // a directly-authored human decision (never a lead) is excluded from machine outcomes
-  writeCard(d, g, "decisions", mkDecision({ sha, evidenceFile: "src/db.js", span: "createPool", scopes: ["src/db.js"], claim: "human wrote this directly" }));
+  const direct = mkDecision({ sha, evidenceFile: "src/db.js", span: "createPool", scopes: ["src/db.js"], claim: "human wrote this directly" });
+  writeCard(d, g, "decisions", direct); writeReviewFile(d, g, direct, { source: "draft" });
   g("commit", "-qm", "human decision, no lead");
   const p = computeReviewOutcomes(d);
   assert.equal(p.published, 0); assert.equal(p.reviewed, 0);
@@ -3871,7 +3893,7 @@ test("stage4b: annotate-draft writes an inert draft; accept-draft promotes it wi
   assert.ok(a.cardId && !a.error);
   assert.ok(existsSync(join(d, ".logbook", "drafts", a.cardId + ".json")));   // draft exists
   assert.ok(!existsSync(join(d, ".logbook", "decisions", a.cardId + ".json"))); // NOT yet a decision (inert)
-  assert.match(readFileSync(join(d, ".logbook", ".gitignore"), "utf8"), /drafts\//); // drafts stay local
+  assert.match(readFileSync(join(d, ".git", "info", "exclude"), "utf8"), /\.logbook\/drafts\//); // drafts stay local without a tracked ignore file
   // promote with a human reviewer distinct from the agent proposer
   const p = acceptDraft(d, a.cardId, { by: "matthew" });
   assert.equal(p.disposition, "accepted");
@@ -3901,7 +3923,7 @@ test("stage4b: a promoted human decision surfaces in check as human-reviewed + a
 
 test("stage4b: accept-draft refuses an unknown draft; lead disposition records reviewer provenance too", () => {
   const { d, g, sha } = policyRepo("s4brev-", GOOD_TOML);
-  assert.match(acceptDraft(d, "a".repeat(64), {}).error, /no local draft/);
+  assert.match(acceptDraft(d, "a".repeat(64), { by: "matthew" }).error, /no local draft/);
   // acceptLead now also writes a review record separating reviewer from machine proposer
   const lead = mkDecision({ sha, evidenceFile: "src/db.js", span: "createPool", scopes: ["src/db.js"], by: "auto-policy" });
   writeCard(d, g, "leads", lead); g("commit", "-qm", "publish lead");
@@ -3909,6 +3931,170 @@ test("stage4b: accept-draft refuses an unknown draft; lead disposition records r
   assert.equal(r.disposition, "accepted-as-is"); assert.equal(r.reviewedBy, "matthew");
   const rev = parseReview(readFileSync(join(d, ".logbook", "reviews", lead.cardId + ".json"), "utf8"));
   assert.equal(rev.reviewedBy, "matthew"); assert.equal(rev.source, "lead"); assert.equal(rev.verdict, "accepted");
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("trust closure: a decision file without an exact review is visibly unreviewed and non-authoritative", () => {
+  const { d, g, sha } = poolRepo("s4bnorev-");
+  const card = mkDecision({ sha, evidenceFile: "src/db.js", span: "createPool", scopes: ["src/db.js"] });
+  writeCard(d, g, "decisions", card); g("commit", "-qm", "plant decision without review");
+  const base = g("rev-parse", "HEAD").trim();
+  writeFileSync(join(d, "src", "db.js"), "createPool({max:20})\n"); g("add", "-A"); g("commit", "-qm", "touch");
+  const res = checkDecisions(d, { base, head: g("rev-parse", "HEAD").trim() });
+  assert.equal(res.exitCode, 1); assert.equal(res.leads[0].authoritative, false);
+  assert.match(renderDecisionLeads(res), /decision file — human review unverified/);
+  assert.doesNotMatch(renderDecisionLeads(res), /\[human-reviewed\]/);
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("trust closure: review binds exact source/result bytes and renderer separates proposer from reviewer", () => {
+  const { d, g, sha } = poolRepo("s4bbind-");
+  const card = mkDecision({ sha, evidenceFile: "src/db.js", span: "createPool", scopes: ["src/db.js"], by: "codex" });
+  writeCard(d, g, "decisions", card); writeReviewFile(d, g, card, { reviewedBy: "matthew" });
+  g("commit", "-qm", "review exact bytes");
+  // Keep the stable filename handle but change bytes the review never saw.
+  writeFileSync(join(d, ".logbook", "decisions", card.cardId + ".json"), serializeDecisionCard({ ...card, claim: "tampered after review" }));
+  g("add", "-A"); g("commit", "-qm", "tamper decision"); const base = g("rev-parse", "HEAD").trim();
+  writeFileSync(join(d, "src", "db.js"), "createPool({max:20})\n"); g("add", "-A"); g("commit", "-qm", "touch");
+  const bad = checkDecisions(d, { base, head: g("rev-parse", "HEAD").trim() });
+  assert.equal(bad.leads[0].authoritative, false); assert.match(bad.leads[0].reasons.join(" "), /does not bind/);
+  // Restore the reviewed bytes and prove attribution comes from different records.
+  g("checkout", "HEAD~2", "--", `.logbook/decisions/${card.cardId}.json`); g("add", "-A"); g("commit", "-qm", "restore reviewed bytes");
+  const goodBase = g("rev-parse", "HEAD").trim();
+  writeFileSync(join(d, "src", "db.js"), "createPool({max:30})\n"); g("add", "-A"); g("commit", "-qm", "touch again");
+  const good = checkDecisions(d, { base: goodBase, head: g("rev-parse", "HEAD").trim() });
+  const rendered = renderDecisionLeads(good);
+  assert.equal(good.leads[0].authoritative, true);
+  assert.match(rendered, /proposed by codex/); assert.match(rendered, /reviewed by matthew/);
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("trust closure: malformed/type-confused reviews fail closed", () => {
+  const { d, g, sha } = poolRepo("s4bbadrev-");
+  const card = mkDecision({ sha, evidenceFile: "src/db.js", span: "createPool", scopes: ["src/db.js"] });
+  writeCard(d, g, "decisions", card);
+  mkdirSync(join(d, ".logbook", "reviews"), { recursive: true });
+  writeFileSync(join(d, ".logbook", "reviews", card.cardId + ".json"), "{\"schema\":2}\n");
+  g("add", "-A"); g("commit", "-qm", "malformed review"); const base = g("rev-parse", "HEAD").trim();
+  writeFileSync(join(d, "src", "db.js"), "createPool({max:20})\n"); g("add", "-A"); g("commit", "-qm", "touch");
+  const res = checkDecisions(d, { base, head: g("rev-parse", "HEAD").trim() });
+  assert.equal(res.exitCode, 1); assert.ok(res.malformedCount >= 1);
+  const confused = { schema: REVIEW_SCHEMA, cardId: ["a".repeat(64)], source: "lead", verdict: "rejected",
+    sourceCardSha256: "b".repeat(64), decisionCardSha256: null, reviewedBy: "matthew", reviewedAt: "2026-07-15" };
+  assert.equal(parseReview(JSON.stringify(confused)), null);
+  assert.match(acceptDraft(d, ["a".repeat(64)], { by: "matthew" }).error, /invalid cardId/);
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("trust closure: draft evidence uses raw objects and promotion requires an explicit reviewer", () => {
+  const { d, g, sha } = poolRepo("s4brawdraft-");
+  assert.match(annotateDraft(d, { sha, why: "grounded draft", span: "createPool", by: "codex" }).error, /requires --side/);
+  const draft = annotateDraft(d, { sha, why: "grounded draft", span: "createPool", side: "diff", evidenceFile: "src/db.js", by: "codex" });
+  assert.ok(draft.cardId);
+  assert.match(acceptDraft(d, draft.cardId, {}).error, /explicit --by/);
+  assert.match(acceptDraft(d, draft.cardId, { by: "\n" }).error, /explicit --by/);
+  const ok = acceptDraft(d, draft.cardId, { by: "matthew" }); assert.equal(ok.disposition, "accepted");
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("trust closure: a replace ref cannot fabricate evidence for annotate-draft", () => {
+  const { d, g, sha } = poolRepo("s4bdraftreplace-");
+  writeFileSync(join(d, "src", "db.js"), "createPool()\nFABRICATED_REASON\n"); g("add", "-A"); g("commit", "-qm", "replacement content");
+  const replacement = g("rev-parse", "HEAD").trim(); g("replace", sha, replacement);
+  const r = annotateDraft(d, { sha, why: "fabricated rationale", span: "FABRICATED_REASON",
+    side: "diff", evidenceFile: "src/db.js", by: "codex" });
+  assert.match(r.error, /not evidence/);                                  // raw objects ignore refs/replace
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("trust closure: symlink/hardlink drafts are refused and an index failure keeps the recovery source", () => {
+  const { d, sha } = poolRepo("s4bsafedraft-");
+  const a = annotateDraft(d, { sha, why: "safe source", by: "codex" });
+  const draftPath = join(d, ".logbook", "drafts", a.cardId + ".json"), bytes = readFileSync(draftPath, "utf8");
+  const outside = join(d, "outside-card.json"); writeFileSync(outside, bytes);
+  rmSync(draftPath); symlinkSync(outside, draftPath);
+  assert.match(acceptDraft(d, a.cardId, { by: "matthew" }).error, /unsafe local draft/);
+  rmSync(draftPath); linkSync(outside, draftPath);
+  assert.match(acceptDraft(d, a.cardId, { by: "matthew" }).error, /unsafe local draft/);
+  rmSync(draftPath); writeFileSync(draftPath, bytes);
+  writeFileSync(join(d, ".git", "index.lock"), "held");
+  assert.match(acceptDraft(d, a.cardId, { by: "matthew" }).error, /git add failed/);
+  assert.ok(existsSync(draftPath), "failed staging must retain the exact local draft for retry");
+  rmSync(join(d, ".git", "index.lock"));
+  assert.equal(acceptDraft(d, a.cardId, { by: "matthew" }).disposition, "accepted");
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("trust closure: accepted and rejected machine leads cannot be republished", () => {
+  for (const verdict of ["accepted", "rejected"]) {
+    const { d, g, sha } = policyRepo(`s4bnorepub-${verdict}-`, GOOD_TOML);
+    const cand = goodCand(sha); assert.equal(publishPolicyLeads(d, [cand]).published, 1);
+    g("add", "-A"); g("commit", "-qm", "publish lead");
+    const lead = readPlane(d, "HEAD", "leads").cards[0].card;
+    const disp = verdict === "accepted" ? acceptLead(d, lead.cardId, { by: "matthew" }) : rejectLead(d, lead.cardId, { by: "matthew" });
+    assert.ok(!disp.error); g("commit", "-qm", `human ${verdict}`);
+    const again = publishPolicyLeads(d, [cand]);
+    assert.equal(again.published, 0); assert.ok(again.skipped.some((s) => s.reason === "already-dispositioned"));
+    rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("trust closure: one cross-plane invariant blocks orphan authority in check, publish, and outcomes", () => {
+  const { d, g, sha } = policyRepo("s4borphan-", GOOD_TOML);
+  const orphan = mkDecision({ sha, claim: "orphan accepted review" });
+  writeReviewFile(d, g, orphan, { source: "lead", verdict: "accepted" }); // review claims a decision that does not exist
+  g("commit", "-qm", "orphan review"); const base = g("rev-parse", "HEAD").trim();
+  writeFileSync(join(d, "src", "db.js"), "createPool({max:30})\n"); g("add", "-A"); g("commit", "-qm", "touch");
+  const checked = checkDecisions(d, { base, head: g("rev-parse", "HEAD").trim() });
+  assert.equal(checked.exitCode, 1); assert.ok(checked.malformedCount >= 1);
+  const published = publishPolicyLeads(d, [{ ...goodCand(sha), claim: "unrelated candidate" }]);
+  assert.equal(published.published, 0); assert.equal(published.incomplete, true); assert.equal(published.exitCode, 1);
+  assert.match(published.error, /inconsistent trusted disposition/);
+  const outcomes = computeReviewOutcomes(d);
+  assert.equal(outcomes.exitCode, 1); assert.match(outcomes.error, /disposition state/);
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("trust closure: lead disposition shares the publication lock", async () => {
+  const { d, g, sha } = policyRepo("s4blockshare-", GOOD_TOML);
+  const cand = goodCand(sha); assert.equal(publishPolicyLeads(d, [cand]).published, 1);
+  g("add", "-A"); g("commit", "-qm", "publish lead");
+  const id = readPlane(d, "HEAD", "leads").cards[0].card.cardId;
+  const lockDir = join(d, ".git", "logbook-publish.lock"); mkdirSync(lockDir);
+  const child = spawn(process.execPath, [CLI, "accept-lead", id, "--by", "matthew", d], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.ok(existsSync(join(d, ".logbook", "leads", id + ".json")));
+  assert.ok(!existsSync(join(d, ".logbook", "decisions", id + ".json")), "transition must not write while publish lock is held");
+  rmSync(lockDir, { recursive: true, force: true });
+  const closed = await new Promise((resolve, reject) => {
+    let out = "", err = ""; child.stdout.on("data", (b) => { out += b; }); child.stderr.on("data", (b) => { err += b; });
+    child.once("error", reject); child.once("close", (code) => resolve({ code, out, err }));
+  });
+  assert.equal(closed.code, 0, closed.out + closed.err);
+  assert.ok(existsSync(join(d, ".logbook", "decisions", id + ".json")));
+  assert.ok(existsSync(join(d, ".logbook", "reviews", id + ".json")));
+  assert.ok(!existsSync(join(d, ".logbook", "leads", id + ".json")));
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("trust closure: historical filename/cardId mismatch makes outcomes unmeasurable", () => {
+  const { d, g, sha } = poolRepo("s4bhistid-");
+  const card = mkDecision({ sha, claim: "historical mismatched identity" });
+  const wrong = "f".repeat(64); mkdirSync(join(d, ".logbook", "leads"), { recursive: true });
+  writeFileSync(join(d, ".logbook", "leads", wrong + ".json"), serializeDecisionCard(card));
+  g("add", "-A"); g("commit", "-qm", "bad historical lead");
+  rmSync(join(d, ".logbook", "leads", wrong + ".json")); g("add", "-A"); g("commit", "-qm", "remove bad lead");
+  const out = computeReviewOutcomes(d);
+  assert.equal(out.historyIncomplete, true); assert.equal(out.exitCode, 1); assert.equal(out.published, 0);
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("trust closure: sparse checkout fails closed for plane mutations but not raw reads", () => {
+  const { d, g, sha } = policyRepo("s4bsparse-", GOOD_TOML);
+  g("config", "core.sparseCheckout", "true");
+  const out = publishPolicyLeads(d, [goodCand(sha)]);
+  assert.equal(out.published, 0); assert.equal(out.exitCode, 1); assert.match(out.error, /full worktree/);
+  assert.equal(checkDecisions(d).exitCode, 0); // immutable raw-object reads do not need a materialized plane
   rmSync(d, { recursive: true, force: true });
 });
 
