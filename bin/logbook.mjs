@@ -2369,6 +2369,17 @@ export function renderReviewOutcomes(res) {
   if (res.reviewed < 20) lines.push("", `  note: only ${res.reviewed} reviewed — too few to promote automation to authoritative; keep machine cards lower-authority until this grows.`);
   return lines.join("\n");
 }
+// Deterministic render of a publishPolicyLeads result for the `publish` CLI.
+export function renderPublish(r) {
+  if (r.error) return `logbook publish: ${r.error} (exit nonzero, not "clean")`;
+  const parts = [`logbook publish: ${r.published} lead(s) published`];
+  if (r.idempotent) parts.push(`, ${r.idempotent} unchanged`);
+  if (r.conflicts) parts.push(`, ${r.conflicts} conflict(s)`);
+  if (r.unmeasurable) parts.push(`, ${r.unmeasurable} unmeasurable`);
+  if (r.skipped && r.skipped.length) parts.push(`, ${r.skipped.length} skipped`);
+  if (r.incomplete) parts.push(" — INCOMPLETE (exit nonzero)");
+  return parts.join("") + (r.published ? "\n  commit .logbook/leads/ to record them; they surface as machine LEADS (lower authority), reviewed via accept-lead." : "");
+}
 
 // ---- Stage 3: automatic mode (opt-in policy-published LEADS) -----------------
 // AUTONOMOUS mode publishes machine LEADS only (never human-reviewed decisions).
@@ -3540,6 +3551,10 @@ function usage() {
                                   read-only diff-time preflight: accepted decisions
                                   whose path scope the change touches (non-blocking;
                                   exits nonzero only when unmeasurable, never "clean")
+    logbook publish [--candidates FILE] [path]
+                                  publish caller-proposed machine LEADS (JSON on stdin or
+                                  --candidates FILE) under the committed .logbook/policy.toml
+                                  (grounding + ancestry + quota + kill switch enforced)
     logbook accept-lead CARDID [--claim "corrected text"] [path]
                                   promote a policy-published machine LEAD to a
                                   human-reviewed decision (unchanged = accepted-as-is,
@@ -3587,9 +3602,11 @@ export function parseArgs(argv) {
     else if (a === "pending") o.cmd = "pending";
     else if (a === "refine") o.cmd = "refine";
     else if (a === "outcomes") o.cmd = "outcomes";
+    else if (a === "publish") o.cmd = "publish";
     else if (a === "accept-lead") o.cmd = "accept-lead";
     else if (a === "reject-lead") o.cmd = "reject-lead";
     else if (a === "--claim") { if (i + 1 >= argv.length) o._missing = "--claim"; else o.claim = argv[++i]; }
+    else if (a === "--candidates") { if (i + 1 >= argv.length) o._missing = "--candidates"; else o.candidates = argv[++i]; }
     else if (a === "--diff") o.diff = true;
     else if (a === "--span") { if (i + 1 >= argv.length) o._missing = "--span"; else o.span = argv[++i]; }
     else if (a === "--amend") { if (i + 1 >= argv.length) o._missing = "--amend"; else o.amend = argv[++i]; }
@@ -3775,6 +3792,18 @@ async function main() {
   if (o.cmd === "outcomes") {
     const r = computeReviewOutcomes(repo);
     console.log(renderReviewOutcomes(r));
+    process.exitCode = r.exitCode || (r.error ? 1 : 0);
+    return;
+  }
+  if (o.cmd === "publish") {
+    // candidates are caller-proposed (agent's job); publishPolicyLeads does ALL the
+    // authorization (committed policy, grounding, ancestry, quota, kill switch).
+    let text;
+    try { text = o.candidates ? readFileSync(resolve(o.candidates), "utf8") : readFileSync(0, "utf8"); }
+    catch (e) { console.error(`  publish: cannot read candidates (${o.candidates ? "--candidates file" : "stdin"}): ${e.message}`); process.exit(1); }
+    let cands; try { cands = JSON.parse(text); } catch { console.error("  publish: candidates must be a JSON array of {sha, claim, span, side, evidenceFile, scopes}"); process.exit(1); }
+    const r = publishPolicyLeads(repo, cands, { trustRef: "HEAD" });
+    console.log(renderPublish(r));
     process.exitCode = r.exitCode || (r.error ? 1 : 0);
     return;
   }

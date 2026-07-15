@@ -27,7 +27,7 @@ import {
   parseCards, spanGroundedStrict, groundStatus, loadCards, validCardRecord,
   decisionCardId, validDecisionCard, serializeDecisionCard, parseDecisionCard, DECISION_SCHEMA,
   checkDecisions, renderDecisionLeads, parsePolicy, publishPolicyLeads, withPublishLock, migrateLegacyToDrafts, readPlane,
-  acceptLead, rejectLead, computeReviewOutcomes, renderReviewOutcomes,
+  acceptLead, rejectLead, computeReviewOutcomes, renderReviewOutcomes, renderPublish,
   projectLegacyAnnotation, projectLegacy, CARD_SCHEMA, canonicalCardLine,
 } from "../bin/logbook.mjs";
 
@@ -3846,5 +3846,19 @@ test("closure-funnel: checkDecisions demotes a non-machine card in leads/ (polic
   assert.ok(lead, "card should surface (scope matches the diff)");
   assert.equal(lead.authoritative, false);
   assert.ok(lead.reasons.some((r) => /machine-source/.test(r)));   // the non-machine leads card is not auto-grounded/authoritative
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("stage4b: `publish` wires publishPolicyLeads to the CLI (agent proposes, tool authorizes) end-to-end", () => {
+  const { d, g, sha } = policyRepo("s4bpub-", GOOD_TOML);
+  const r = publishPolicyLeads(d, [goodCand(sha)], { trustRef: "HEAD" });
+  assert.equal(r.published, 1);
+  assert.match(renderPublish(r), /1 lead\(s\) published/);
+  assert.match(renderPublish({ error: "automation disabled (kill switch)" }), /kill switch.*exit nonzero/);
+  assert.match(renderPublish({ published: 0, incomplete: true, skipped: [] }), /INCOMPLETE/);
+  // the published lead is a real machine lead the funnel can then measure
+  g("add", "-A"); g("commit", "-qm", "publish");
+  const o = computeReviewOutcomes(d);
+  assert.equal(o.published, 1); assert.equal(o.pending, 1);
   rmSync(d, { recursive: true, force: true });
 });
