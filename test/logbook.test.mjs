@@ -2902,9 +2902,51 @@ test("harden: projectLegacy reports skipped/lossy rows instead of silently coerc
   const acc = [{ sha: "nothex", amendment: "note on a bad sha" }, { sha, amendment: "x".repeat(600) }];
   const { cards, cardReviews, skipped } = projectLegacy(anns, acc);
   assert.equal(cardReviews.length, 0);
-  assert.ok(skipped.some((s) => s.reason === "annotation-unmigratable"));  // the "zzz" sha annotation
+  assert.ok(skipped.some((s) => s.reason === "annotation-bad-sha"));       // the "zzz" sha annotation
   assert.ok(skipped.some((s) => s.reason === "amendment-bad-sha"));        // the "nothex" amendment
-  assert.ok(skipped.some((s) => s.reason === "amendment-truncated"));      // the 600-char amendment
+  assert.ok(skipped.some((s) => s.reason === "amendment-text-truncated")); // the 600-char amendment
   assert.ok(cards.some((c) => c.claim === "ok"));
+  rmSync(r, { recursive: true, force: true });
+});
+
+// ---------- Hardening pass 2: surrogate / malformed-commit / loss reporting ---
+test("harden2: a lone UTF-16 surrogate span/path is rejected (cannot alias U+FFFD bytes)", () => {
+  const { r, sha } = mkAcceptRepo();
+  const lone = "A" + String.fromCharCode(0xD800) + "B";       // ill-formed: encodes to U+FFFD bytes
+  assert.equal(spanGroundedStrict(r, sha, lone, "message", null), false); // groundStatus abstains
+  assert.equal(groundStatus(r, sha, lone, "message", null), "absent");
+  assert.ok(saveMachineCard(r, r, { sha, claim: "c", span: lone, side: "message", by: "x" }).error);       // span rejected
+  assert.ok(saveMachineCard(r, r, { sha, claim: "c", span: "remove sync.Pool", side: "diff", path: "src/" + String.fromCharCode(0xDC00), by: "x" }).error); // path rejected
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("harden2: a malformed commit (missing author/committer) does NOT ground", () => {
+  const { d, g } = tmpGitRepo("logbook-malformed-");
+  g("init", "-q"); writeFileSync(join(d, "f.js"), "L1\n"); g("add", "-A"); g("commit", "-qm", "base");
+  const base = g("rev-parse", "HEAD").trim();
+  const tree = g("write-tree").trim();
+  // hand-build a commit object with NO author and NO committer lines
+  const raw = `tree ${tree}\nparent ${base}\n\nMALFORMED_NO_IDENT\n`;
+  const bad = execFileSync("git", ["-C", d, "hash-object", "-t", "commit", "-w", "--literally", "--stdin"], { input: raw, encoding: "utf8" }).trim();
+  // message-side reads the raw commit object; a missing-ident commit is malformed => refused
+  assert.equal(groundStatus(d, bad, "MALFORMED_NO_IDENT", "message", null), "unmeasurable");
+  assert.ok(saveMachineCard(d, d, { sha: bad, claim: "c", span: "MALFORMED_NO_IDENT", side: "message", by: "x" }).error);
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("harden2: projectLegacy REPORTS every transformation (control-clean, coerce, date-default) + collisions", () => {
+  const { r, sha } = mkAcceptRepo();
+  const anns = [
+    { sha, why: "fix\r\nmore", by: "gpt", date: "2024-01-01" },  // control-cleaned
+    { sha, why: "numeric author", by: 12345, date: "not-a-date" }, // by coerced + date defaulted
+  ];
+  const { cards, skipped } = projectLegacy(anns, []);
+  assert.ok(skipped.some((s) => s.reason === "annotation-text-control-cleaned"));
+  assert.ok(skipped.some((s) => s.reason === "annotation-by-coerced"));
+  assert.ok(skipped.some((s) => s.reason === "annotation-date-defaulted"));
+  assert.ok(cards.length >= 1);
+  // a normalized collision (two rows collapsing to one card) is reported
+  const dup = [{ sha, why: "same", by: "x", date: "2024-01-01" }, { sha, why: "same", by: "x", date: "2024-01-01" }];
+  assert.ok(projectLegacy(dup, []).skipped.some((s) => s.reason === "normalized-collision"));
   rmSync(r, { recursive: true, force: true });
 });

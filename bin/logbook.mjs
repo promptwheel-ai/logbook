@@ -1697,17 +1697,31 @@ const MAX_CLAIM = 400, MAX_SPAN = 600, MAX_BY = 128, MAX_EVPATH = 400;
 const CTRL_SRC = "\\u0000-\\u0008\\u000a-\\u001f\\u007f-\\u009f\\u00ad\\u061c\\u200b-\\u200f\\u2028-\\u202e\\u2060-\\u2069\\ufeff";
 const CTRL = new RegExp("[" + CTRL_SRC + "]");
 
+// Reject ill-formed UTF-16 (lone/unpaired surrogate): Buffer.from(s,"utf8")
+// silently maps a lone surrogate to U+FFFD, which would let it byte-alias real
+// U+FFFD content. Must be checked BEFORE any UTF-8 conversion.
+function wellFormed(s) {
+  if (typeof s !== "string") return false;
+  if (typeof s.isWellFormed === "function") return s.isWellFormed();
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c >= 0xD800 && c <= 0xDBFF) { const n = s.charCodeAt(i + 1); if (!(n >= 0xDC00 && n <= 0xDFFF)) return false; i++; }
+    else if (c >= 0xDC00 && c <= 0xDFFF) return false;
+  }
+  return true;
+}
 function okText(v, max) {
-  return typeof v === "string" && !CTRL.test(v) && v.trim().length > 0 && v.length <= max;
+  return typeof v === "string" && wellFormed(v) && !CTRL.test(v) && v.trim().length > 0 && v.length <= max;
 }
 function okEvPath(v) {
-  return typeof v === "string" && !CTRL.test(v) && v.length > 0 && v.length <= MAX_EVPATH &&
+  return typeof v === "string" && wellFormed(v) && !CTRL.test(v) && v.length > 0 && v.length <= MAX_EVPATH &&
     !/[*?\[\]]/.test(v) && normalizeScope(v) === v; // literal, normalized, no glob
 }
-// Reject oversize/blank/control rather than truncate (truncation would desync
-// the stored value from the hashed identity). Returns {value} or {error}.
+// Reject oversize/blank/control/ill-formed rather than truncate (truncation would
+// desync the stored value from the hashed identity). Returns {value} or {error}.
 function normText(v, max) {
   if (typeof v !== "string") return { error: "is required" };
+  if (!wellFormed(v)) return { error: "contains an unpaired surrogate (ill-formed Unicode)" };
   if (CTRL.test(v)) return { error: "may not contain control characters or newlines" };
   if (!v.trim()) return { error: "may not be blank" };
   if (v.length > max) return { error: `exceeds ${max} chars (rejected, not truncated)` };
@@ -1715,6 +1729,7 @@ function normText(v, max) {
 }
 function normEvPath(v) {
   if (typeof v !== "string" || !v.length) return { error: "is required (the exact changed file)" };
+  if (!wellFormed(v)) return { error: "contains an unpaired surrogate (ill-formed Unicode)" };
   if (CTRL.test(v)) return { error: "may not contain control characters" };
   if (v.length > MAX_EVPATH) return { error: `exceeds ${MAX_EVPATH} chars` };
   if (/[*?\[\]]/.test(v)) return { error: "must be a literal path, not a glob/pathspec" };
@@ -1765,6 +1780,7 @@ export function revHashFor(rec) {
 const ZERO_OID = /^0+$/;
 const MAX_GROUND_BYTES = 8 << 20;   // per-blob cap; a bigger blob is UNMEASURABLE, not silently grounded
 const MAX_DIFF_ENTRIES = 5000;      // a huge diff is UNMEASURABLE (can't afford the carry scan)
+const CARRY_BUDGET_BYTES = 64 << 20; // aggregate cap for the carry scan; exceeding it is UNMEASURABLE
 // All git object reads: --no-replace-objects (no replace refs) and
 // GIT_NO_LAZY_FETCH=1 (a partial/blob:none clone must NOT silently fetch a
 // missing blob over the network — it must fail, i.e. be treated as unmeasurable).
@@ -1773,21 +1789,50 @@ function gitBuf(repo, args, opts = {}) {
     { maxBuffer: MAX_GROUND_BYTES + (1 << 20), env: { ...process.env, GIT_NO_LAZY_FETCH: "1" }, ...opts }); // Buffer stdout (no encoding)
 }
 function gitObj(repo, args, opts = {}) { return gitBuf(repo, args, { encoding: "utf8", ...opts }); }
-// Raw commit object as bytes. Requires structural validity: exactly ONE tree and
-// well-formed parent OIDs. message is kept as bytes (may be non-UTF-8).
+// Raw commit object as bytes. Enforces the commit-header GRAMMAR (what git fsck
+// --strict requires): line 1 is the single tree, then zero-or-more parents, then
+// exactly one author and one committer — else it is malformed and refused.
 function catCommit(repo, sha) {
   const r = gitBuf(repo, ["cat-file", "commit", sha]);
   if (r.status !== 0 || !r.stdout) return null;
   const buf = r.stdout;
   const sep = buf.indexOf("\n\n");
   const header = (sep >= 0 ? buf.slice(0, sep) : buf).toString("latin1"); // header is ASCII
-  let trees = 0, tree = null; const parents = [];
-  for (const line of header.split("\n")) {
-    if (line.startsWith("tree ")) { trees++; tree = line.slice(5).trim(); }
+  const lines = header.split("\n");
+  let trees = 0, authors = 0, committers = 0, tree = null; const parents = [];
+  for (let li = 0; li < lines.length; li++) {
+    const line = lines[li];
+    if (line.startsWith("tree ")) { trees++; tree = line.slice(5).trim(); if (li !== 0) return null; } // tree must be first
     else if (line.startsWith("parent ")) parents.push(line.slice(7).trim());
+    else if (line.startsWith("author ")) authors++;
+    else if (line.startsWith("committer ")) committers++;
   }
-  if (trees !== 1 || !OID.test(tree || "") || !parents.every((p) => OID.test(p))) return null;
+  if (trees !== 1 || authors !== 1 || committers !== 1 || !OID.test(tree || "") || !parents.every((p) => OID.test(p))) return null;
   return { tree, parents, message: sep >= 0 ? buf.slice(sep + 2) : Buffer.alloc(0) };
+}
+// Does `needle` appear in ANY of `oids`' blobs? Deduplicated + read in ONE
+// `cat-file --batch` process with an aggregate byte budget — never thousands of
+// processes or tens of GiB. "found" | "notfound" | "unmeasurable".
+function batchContains(repo, oids, needle) {
+  const uniq = [...new Set(oids.filter((o) => o && !ZERO_OID.test(o)))];
+  if (!uniq.length) return "notfound";
+  const r = gitBuf(repo, ["cat-file", "--batch"],
+    { input: uniq.join("\n") + "\n", maxBuffer: CARRY_BUDGET_BYTES + (1 << 20) });
+  if (r.status !== 0 || r.error) return "unmeasurable";      // e.g. output exceeded the budget
+  const buf = r.stdout; let pos = 0, total = 0;
+  while (pos < buf.length) {
+    const nl = buf.indexOf(0x0a, pos);
+    if (nl < 0) break;
+    const parts = buf.slice(pos, nl).toString("latin1").split(" "); // "<oid> <type> <size>" or "<oid> missing"
+    pos = nl + 1;
+    if (parts[1] === "missing") return "unmeasurable";        // a listed changed blob is unavailable
+    const size = parseInt(parts[2], 10);
+    if (!Number.isFinite(size)) return "unmeasurable";
+    total += size; if (total > CARRY_BUDGET_BYTES) return "unmeasurable";
+    if (buf.slice(pos, pos + size).includes(needle)) return "found";
+    pos += size + 1;                                          // content + trailing LF
+  }
+  return "notfound";
 }
 // Blob bytes, or "" for an absent side; null == UNMEASURABLE (unreadable / oversized).
 function catBlob(repo, oid) {
@@ -1825,7 +1870,8 @@ function rawTreeDiff(repo, treeOld, treeNew) {
 // Byte comparison end-to-end: a validated single-line span (no CR/LF) is a byte
 // substring regardless of line endings, so no lossy UTF-8 decode is involved.
 export function groundStatus(repo, sha, span, side, evidenceFile) {
-  if (typeof span !== "string" || !span.trim()) return "absent";
+  if (typeof span !== "string" || !span.trim() || !wellFormed(span)) return "absent"; // ill-formed => can't UTF-8-encode faithfully
+  if (side === "diff" && (typeof evidenceFile !== "string" || !wellFormed(evidenceFile))) return "absent";
   const needle = Buffer.from(span, "utf8");
   const commit = catCommit(repo, sha);
   if (!commit) return "unmeasurable";
@@ -1848,14 +1894,11 @@ export function groundStatus(repo, sha, span, side, evidenceFile) {
   if (!dir) return "absent";                              // present in both, or neither
   // Guard against an UNPAIRED low-similarity rename: if the span is carried by
   // the opposite side of ANY other changed file, it isn't uniquely this file's
-  // introduced/removed evidence — abstain (conservative).
-  for (const e of diff) {
-    if (e === entry) continue;
-    const opp = catBlob(repo, dir === "new" ? e.oldSha : e.newSha);
-    if (opp == null) return "unmeasurable";
-    if (opp.includes(needle)) return "absent";
-  }
-  return "grounded";
+  // introduced/removed evidence — abstain. Deduped + batched + budgeted.
+  const oppOids = diff.filter((e) => e !== entry).map((e) => dir === "new" ? e.oldSha : e.newSha);
+  const carried = batchContains(repo, oppOids, needle);
+  if (carried === "unmeasurable") return "unmeasurable";
+  return carried === "found" ? "absent" : "grounded";
 }
 export function spanGroundedStrict(repo, sha, span, side, evidenceFile) {
   return groundStatus(repo, sha, span, side, evidenceFile) === "grounded";
@@ -2086,56 +2129,59 @@ export function editCard(repo, dir, { cardId, claim, span, side, path, evidenceF
 // legacy text are collapsed to spaces (the only non-byte-exact step, so the row
 // can be a valid single-line card); the rationale, author, date, and any
 // accepted scope round-trip.
-export function projectLegacyAnnotation(ann) {
-  if (!ann || typeof ann.sha !== "string" || !OID.test(ann.sha)) return null;
-  // GLOBAL collapse — a non-global regex would leave a 2nd control char behind,
-  // so an annotation with CRLF or multiple controls would silently drop out of
-  // the migration instead of round-tripping.
-  const clean = (v, max) => String(v ?? "").replace(new RegExp("[" + CTRL_SRC + "]", "g"), " ").slice(0, max).trim();
-  const claim = clean(ann.why, MAX_CLAIM);
-  if (!claim) return null;
-  const spanRaw = clean(ann.span, MAX_SPAN);
-  const rec = { schema: CARD_SCHEMA, cardId: "", rev: 1, revHash: "", sha: ann.sha,
-    sourceType: "legacy_unverified", claim, side: null, evidenceFile: null,
-    span: spanRaw || null, by: clean(ann.by, MAX_BY) || "unknown",
-    at: /^\d{4}-\d{2}-\d{2}$/.test(String(ann.date || "")) ? ann.date : "1970-01-01", supersedes: null };
+// ONE projector for any legacy row (annotation or amendment) -> a legacy_unverified
+// draft. It REPORTS every transformation it makes (String-coercion, control-char
+// cleaning, truncation, date-defaulting) in `notes`, so nothing is changed
+// silently; `rec` is null (with a note) when the row can't be migrated.
+function projectLegacyRow({ sha, text, by, date, span, label }) {
+  const notes = [];
+  if (typeof sha !== "string" || !OID.test(sha)) return { rec: null, notes: [{ reason: `${label}-bad-sha` }] };
+  const clean = (v, max, field) => {
+    if (v != null && typeof v !== "string") notes.push({ reason: `${label}-${field}-coerced`, sha });
+    const raw = String(v ?? "");
+    const stripped = raw.replace(new RegExp("[" + CTRL_SRC + "]", "g"), " ");
+    if (stripped !== raw) notes.push({ reason: `${label}-${field}-control-cleaned`, sha });
+    const t = stripped.trim();
+    if (t.length > max) notes.push({ reason: `${label}-${field}-truncated`, sha });
+    return t.slice(0, max);
+  };
+  const claim = clean(text, MAX_CLAIM, "text");
+  if (!claim) return { rec: null, notes: [...notes, { reason: `${label}-empty-after-clean`, sha }] };
+  const spanV = span != null ? (clean(span, MAX_SPAN, "span") || null) : null;
+  const byV = clean(by, MAX_BY, "by") || "unknown";
+  let at = date;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || ""))) { at = "1970-01-01"; notes.push({ reason: `${label}-date-defaulted`, sha }); }
+  const rec = { schema: CARD_SCHEMA, cardId: "", rev: 1, revHash: "", sha,
+    sourceType: "legacy_unverified", claim, side: null, evidenceFile: null, span: spanV, by: byV, at, supersedes: null };
   rec.cardId = cardIdFor(rec); rec.revHash = revHashFor(rec);
-  return validCardRecord(rec) ? rec : null;
+  return validCardRecord(rec) ? { rec, notes } : { rec: null, notes: [...notes, { reason: `${label}-invalid`, sha }] };
 }
-// Migrate legacy annotations to INERT DRAFTS. This transfers NO AUTHORITY: old
-// acceptances, scopes, and applicability grant nothing — a human must RE-ACCEPT
-// in the new model. (Preserving a prior attestation's exact binding across a
-// model change is the single most fragile thing we could do, and it broke every
-// round; re-acceptance is also exactly the behavior the alpha measures.) A human
-// amendment (off-git context on an old acceptance) becomes a PENDING
-// human_attestation draft — also unaccepted. `cardReviews` is always empty.
+// Back-compat thin wrapper: the card, or null.
+export function projectLegacyAnnotation(ann) {
+  return ann ? projectLegacyRow({ sha: ann.sha, text: ann.why, by: ann.by, date: ann.date, span: ann.span, label: "annotation" }).rec : null;
+}
+// Migrate legacy annotations + amendments to INERT legacy_unverified DRAFTS.
+// Transfers NO AUTHORITY (old acceptances/scopes/applicability grant nothing — a
+// human must RE-ACCEPT). Amendments are drafts too, never human_attestation
+// (which must not be mintable from unbound legacy input). `skipped` reports EVERY
+// transformation, drop, and normalized collision — nothing is coerced silently.
 export function projectLegacy(annotations, legacyAcceptances) {
   const cards = [], seen = new Set(), skipped = [];
-  const emit = (rec) => { if (!seen.has(rec.cardId)) { cards.push(rec); seen.add(rec.cardId); } };
-  const clean = (v, max) => { const s = String(v ?? "").replace(new RegExp("[" + CTRL_SRC + "]", "g"), " ").trim(); return { value: s.slice(0, max), lossy: s.length > max }; };
+  const take = ({ rec, notes }) => {
+    for (const n of notes) skipped.push(n);
+    if (!rec) return;
+    if (seen.has(rec.cardId)) skipped.push({ reason: "normalized-collision", sha: rec.sha });
+    else { cards.push(rec); seen.add(rec.cardId); }
+  };
   for (const ann of annotations || []) {
-    const rec = projectLegacyAnnotation(ann);
-    if (rec) emit(rec); else skipped.push({ reason: "annotation-unmigratable", sha: ann && ann.sha });
+    if (!ann) { skipped.push({ reason: "annotation-null" }); continue; }
+    take(projectLegacyRow({ sha: ann.sha, text: ann.why, by: ann.by, date: ann.date, span: ann.span, label: "annotation" }));
   }
-  // A human amendment (off-git note on an old acceptance) is preserved as an INERT
-  // legacy_unverified draft — NOT human_attestation: that source type must not be
-  // mintable from arbitrary/unbound legacy input. It carries no authority; a human
-  // re-accepts. Lossy/dropped rows are REPORTED, never silently coerced.
   for (const acc of legacyAcceptances || []) {
-    if (!acc || typeof acc.amendment !== "string") continue;         // no amendment => nothing to preserve
-    if (typeof acc.sha !== "string" || !OID.test(acc.sha)) { skipped.push({ reason: "amendment-bad-sha" }); continue; }
-    const c = clean(acc.amendment, MAX_CLAIM);
-    if (!c.value) { skipped.push({ reason: "amendment-empty-after-clean", sha: acc.sha }); continue; }
-    if (c.lossy) skipped.push({ reason: "amendment-truncated", sha: acc.sha });
-    const by = clean(acc.acceptedBy, MAX_BY);
-    const rec = { schema: CARD_SCHEMA, cardId: "", rev: 1, revHash: "", sha: acc.sha,
-      sourceType: "legacy_unverified", claim: c.value, side: null, evidenceFile: null, span: null,
-      by: by.value || "unknown",
-      at: /^\d{4}-\d{2}-\d{2}$/.test(String(acc.acceptedAt || "")) ? acc.acceptedAt : "1970-01-01", supersedes: null };
-    rec.cardId = cardIdFor(rec); rec.revHash = revHashFor(rec);
-    if (validCardRecord(rec)) emit(rec); else skipped.push({ reason: "amendment-invalid", sha: acc.sha });
+    if (!acc || typeof acc.amendment !== "string") continue;   // no amendment => nothing to preserve
+    take(projectLegacyRow({ sha: acc.sha, text: acc.amendment, by: acc.acceptedBy, date: acc.acceptedAt, span: null, label: "amendment" }));
   }
-  return { cards, cardReviews: [], skipped };   // ZERO authority migrated; skipped/lossy rows reported
+  return { cards, cardReviews: [], skipped };   // ZERO authority migrated; every change reported
 }
 
 // Drafts awaiting a human: annotations with no CURRENT active acceptance of
