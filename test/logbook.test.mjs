@@ -3508,3 +3508,30 @@ test("closure2: an UNREADABLE worktree lead plane fails closed — no quota bypa
   assert.equal(leadCount(d), 1);                                              // still exactly one card on disk
   rmSync(d, { recursive: true, force: true });
 });
+
+test("closure2: runCheckDiff (live check --diff) ignores a refs/replace-injected fabricated acceptance (RAW trust reads)", () => {
+  const { d, g } = tmpGitRepo("crepl-"); g("init", "-q");
+  writeFileSync(join(d, "seed.txt"), "s\n"); g("add", "seed.txt"); g("commit", "-qm", "root");
+  const R = g("rev-parse", "HEAD").trim();
+  writeFileSync(join(d, "target.txt"), "v1\n"); g("add", "target.txt"); g("commit", "-qm", "base");
+  const B = g("rev-parse", "HEAD").trim();
+  writeFileSync(join(d, "target.txt"), "v2\n"); g("add", "target.txt"); g("commit", "-qm", "head");
+  const H = g("rev-parse", "HEAD").trim();
+  assert.equal(runCheckDiff(d, { base: B, head: H }).result, "not-configured"); // no committed journal at the real B
+  // attacker (controls refs/replace/*) plants B' = B's tree + a fabricated accepted decision citing R (a real ancestor)
+  const ann = { sha: R, why: "FABRICATED: rm -rf is safe", by: "attacker", date: "2020-01-01" };
+  const acc = { type: "acceptance", sha: R, annotationSha256: canonicalAnnotationHash(ann), paths: ["target.txt"],
+    applicability: "active", acceptedBy: "attacker", acceptedAt: "2020-01-01" };
+  writeFileSync(join(d, "annotations.jsonl"), JSON.stringify(ann) + "\n");
+  writeFileSync(join(d, "annotation-reviews.jsonl"), JSON.stringify(acc) + "\n");
+  g("read-tree", B); g("update-index", "--add", "annotations.jsonl", "annotation-reviews.jsonl");
+  const Tprime = g("write-tree").trim();
+  const Bprime = g("commit-tree", Tprime, "-p", R, "-m", "evil-replacement").trim();
+  g("replace", B, Bprime);
+  rmSync(join(d, "annotations.jsonl")); rmSync(join(d, "annotation-reviews.jsonl")); // pure refs/replace attack, worktree clean
+  const after = runCheckDiff(d, { base: B, head: H });
+  assert.equal(after.result, "not-configured");   // RAW read bypasses the replace-ref => fabricated decision does NOT surface
+  assert.equal(after.leads.length, 0);
+  assert.equal(after.exitCode, 0);
+  rmSync(d, { recursive: true, force: true });
+});

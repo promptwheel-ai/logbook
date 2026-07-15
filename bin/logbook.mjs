@@ -2712,7 +2712,7 @@ export function pendingDrafts(dir) {
 // Returns null when absent at the ref (means "no accepted decisions", not an
 // error); throws only on a real git failure the caller reports as unmeasurable.
 export function readRefFile(repo, ref, filename) {
-  const r = spawnSync("git", ["-C", repo, "show", `${ref}:${filename}`], { encoding: "utf8", maxBuffer: 1 << 30 });
+  const r = rawGitStatus(repo, ["show", `${ref}:${filename}`]); // RAW: a replace-ref/graft must not rewrite the committed journal that IS the decision
   if (r.status === 0) return r.stdout;
   return null; // absent at ref
 }
@@ -2844,7 +2844,7 @@ export function runCheckDiff(repo, { base, head } = {}) {
 
   // resolve the trust ref to an immutable commit; source commits must be
   // ancestral to THIS, so a side-branch or symbolic ref cannot surface.
-  const tc = spawnSync("git", ["-C", repo, "rev-parse", "--verify", "--quiet", `${trustRef}^{commit}`], { encoding: "utf8" });
+  const tc = rawGitStatus(repo, ["rev-parse", "--verify", "--quiet", `${trustRef}^{commit}`]); // RAW: replace-refs must not redirect the trust commit
   const trustCommit = (tc.stdout || "").trim();
   if (tc.status !== 0 || !FULL_SHA.test(trustCommit)) return unmeasurable(`trust ref ${trustRef} does not resolve to a commit`);
 
@@ -2876,7 +2876,7 @@ export function runCheckDiff(repo, { base, head } = {}) {
     if (!ann || canonicalAnnotationHash(ann) !== acc.annotationSha256) { m.ignoredDraftCount++; continue; } // drift/re-annotate: silently not a lead
     // the cited commit must be a real, immutable, ANCESTRAL commit of the trust
     // commit — not merely present in the object DB on some unmerged branch.
-    const anc = spawnSync("git", ["-C", repo, "merge-base", "--is-ancestor", acc.sha, trustCommit], { encoding: "utf8" });
+    const anc = rawGitStatus(repo, ["merge-base", "--is-ancestor", acc.sha, trustCommit]); // RAW: a graft/replace must not fake ancestry
     if (anc.status !== 0) { m.unmeasurableCount++; continue; } // missing or non-ancestral => cannot trust
     const hitPaths = acc.paths.filter((scope) => changedList.some((p) => scopeMatches(scope, p)));
     if (!hitPaths.length) continue;
