@@ -27,6 +27,7 @@ import {
   parseCards, spanGroundedStrict, groundStatus, loadCards, validCardRecord,
   decisionCardId, validDecisionCard, serializeDecisionCard, parseDecisionCard, DECISION_SCHEMA,
   checkDecisions, renderDecisionLeads, parsePolicy, publishPolicyLeads, withPublishLock, migrateLegacyToDrafts, readPlane,
+  acceptLead, rejectLead, computePrecision, renderPrecision,
   projectLegacyAnnotation, projectLegacy, CARD_SCHEMA, canonicalCardLine,
 } from "../bin/logbook.mjs";
 
@@ -3775,5 +3776,54 @@ test("closure5: local mode diffs the worktree against the pinned HEAD OID (track
   const res = checkDecisions(d, {});                                  // local mode
   assert.equal(res.result, "leads"); assert.equal(res.leads.length, 1); // the decision surfaces against the working-tree change
   assert.ok(res.changedCount >= 2);                                   // both the tracked change and the untracked file are counted
+  rmSync(d, { recursive: true, force: true });
+});
+
+// ---------- claim-precision funnel (accept/edit/reject of machine leads) --------
+test("funnel: computePrecision classifies every machine lead by its fate + reports precision", () => {
+  const { d, g, sha } = poolRepo("cfun-");
+  const mk = (claim) => mkDecision({ sha, evidenceFile: "src/db.js", span: "createPool", scopes: ["src/db.js"], by: "auto", claim });
+  const A = mk("accept me as-is"), E = mk("edit me"), R = mk("reject me"), P = mk("pending one");
+  for (const c of [A, E, R, P]) writeCard(d, g, "leads", c);
+  g("commit", "-qm", "publish 4 machine leads");
+  assert.equal(acceptLead(d, A.cardId).disposition, "accepted-as-is");
+  assert.equal(acceptLead(d, E.cardId, { editClaim: "the corrected human claim" }).disposition, "edited");
+  assert.equal(rejectLead(d, R.cardId).disposition, "rejected");
+  g("commit", "-qm", "human review dispositions");
+  const p = computePrecision(d);
+  assert.equal(p.everPublished, 4);
+  assert.equal(p.acceptedAsIs, 1); assert.equal(p.edited, 1); assert.equal(p.rejected, 1); assert.equal(p.pending, 1);
+  assert.equal(p.reviewed, 3);
+  assert.equal(p.precision, 2 / 3);         // kept (accepted + edited) / reviewed
+  assert.equal(p.strictPrecision, 1 / 3);   // accepted unedited / reviewed
+  // the edited decision surfaced with the human's claim, same cardId handle
+  const dec = readPlane(d, "HEAD", "decisions").cards.find((c) => c.card.cardId === E.cardId);
+  assert.ok(dec); assert.equal(dec.card.claim, "the corrected human claim");
+  // the accepted-as-is decision is byte-identical to the original lead
+  const decA = readPlane(d, "HEAD", "decisions").cards.find((c) => c.card.cardId === A.cardId);
+  assert.equal(decA.card.claim, "accept me as-is");
+  assert.match(renderPrecision(p), /accepted as-is: 1/);
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("funnel: accept/reject refuse an unknown or non-committed lead; precision is null with no reviews", () => {
+  const { d, g, sha } = poolRepo("cfun2-");
+  assert.match(acceptLead(d, "a".repeat(64)).error, /no committed lead/);
+  assert.match(rejectLead(d, "z".repeat(64)).error, /invalid cardId/);   // not hex64
+  const lead = mkDecision({ sha, evidenceFile: "src/db.js", span: "createPool", scopes: ["src/db.js"], by: "auto", claim: "pending forever" });
+  writeCard(d, g, "leads", lead); g("commit", "-qm", "one lead, never reviewed");
+  const p = computePrecision(d);
+  assert.equal(p.everPublished, 1); assert.equal(p.pending, 1); assert.equal(p.reviewed, 0);
+  assert.equal(p.precision, null); assert.equal(p.strictPrecision, null);
+  assert.match(renderPrecision(p), /too few to promote automation/);
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("funnel: a directly human-authored decision (never a lead) is NOT counted in machine precision", () => {
+  const { d, g, sha } = poolRepo("cfun3-");
+  writeCard(d, g, "decisions", mkDecision({ sha, evidenceFile: "src/db.js", span: "createPool", scopes: ["src/db.js"], claim: "human wrote this directly" }));
+  g("commit", "-qm", "human decision, no lead");
+  const p = computePrecision(d);
+  assert.equal(p.everPublished, 0); assert.equal(p.reviewed, 0);  // precision is about the fate of MACHINE leads only
   rmSync(d, { recursive: true, force: true });
 });

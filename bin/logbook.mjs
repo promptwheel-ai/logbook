@@ -2241,6 +2241,114 @@ export function renderDecisionLeads(res) {
   return parts.join("");
 }
 
+// ---- Claim-precision funnel: review machine leads + measure precision --------
+// A human dispositions a policy-published LEAD: accept (promote leads/<id> ->
+// decisions/<id>, same cardId handle; unchanged bytes = accepted-as-is, edited claim =
+// edited) or reject (remove the lead). The change is staged for the human to COMMIT;
+// the git history of the two planes is what computePrecision reads — no side log.
+export function acceptLead(repo, cardId, { editClaim } = {}) {
+  if (!HASH64.test(cardId || "")) return { error: "invalid cardId" };
+  const leads = readPlane(repo, "HEAD", LEAD_PLANE);
+  if (leads.unreadable) return { error: "committed leads unreadable (unmeasurable)" };
+  const found = leads.cards.find((c) => c.card.cardId === cardId);
+  if (!found) return { error: `no committed lead ${cardId}` };
+  let card = found.card, disposition = "accepted-as-is";
+  if (editClaim !== undefined && editClaim !== card.claim) {
+    if (!okText(editClaim, MAX_CLAIM)) return { error: "edited claim is empty or too long" };
+    card = { ...card, claim: editClaim }; disposition = "edited";        // cardId (stable handle) preserved
+  }
+  if (!validDecisionCard(card)) return { error: "resulting decision card is invalid" };
+  const content = serializeDecisionCard(card);
+  if (Buffer.byteLength(content, "utf8") > MAX_CARD_BYTES) return { error: "card too large" };
+  const pin = pinPlaneDir(repo, DECISION_PLANE);
+  if (pin.error) return { error: pin.error };
+  const res = installCard(pin.dir, cardId, content);
+  if (res.conflict) return { error: `a different decision ${cardId} already exists` };
+  if (res.error) return { error: res.error };
+  const leadFile = join(realpathSync(repo), ".logbook", LEAD_PLANE, cardId + ".json");
+  try { unlinkSync(leadFile); } catch (e) { if (e.code !== "ENOENT") return { error: `cannot remove lead: ${e.code}` }; }
+  try { git(repo, ["add", "-A", "--", ".logbook"]); } catch (e) { return { error: `git add failed: ${e.message}` }; }
+  return { disposition, cardId, decisionPath: `.logbook/${DECISION_PLANE}/${cardId}.json` };
+}
+export function rejectLead(repo, cardId) {
+  if (!HASH64.test(cardId || "")) return { error: "invalid cardId" };
+  const leads = readPlane(repo, "HEAD", LEAD_PLANE);
+  if (leads.unreadable) return { error: "committed leads unreadable (unmeasurable)" };
+  if (!leads.cards.some((c) => c.card.cardId === cardId)) return { error: `no committed lead ${cardId}` };
+  const leadFile = join(realpathSync(repo), ".logbook", LEAD_PLANE, cardId + ".json");
+  try { unlinkSync(leadFile); } catch (e) { if (e.code !== "ENOENT") return { error: `cannot remove lead: ${e.code}` }; }
+  try { git(repo, ["add", "-A", "--", ".logbook"]); } catch (e) { return { error: `git add failed: ${e.message}` }; }
+  return { disposition: "rejected", cardId };
+}
+// THE INSTRUMENT: classify every machine lead by its fate across plane history so we can
+// MEASURE claim precision (kept vs edited vs tossed). Reads git history, never a side log.
+export function computePrecision(repo, { ref = "HEAD" } = {}) {
+  const curLeads = readPlane(repo, ref, LEAD_PLANE);
+  const curDecisions = readPlane(repo, ref, DECISION_PLANE);
+  if (curLeads.unreadable || curDecisions.unreadable) return { error: "trusted planes unreadable" };
+  const decById = new Map(curDecisions.cards.map((c) => [c.card.cardId, c.card]));
+  const stillLead = new Set(curLeads.cards.map((c) => c.card.cardId));
+  let log;
+  try { log = gitRaw(repo, ["log", ref, "--reverse", "--diff-filter=A", "--name-only", "--format=%H", "--", `.logbook/${LEAD_PLANE}/`]); }
+  catch { return { error: "cannot read plane history" }; }
+  const prefix = `.logbook/${LEAD_PLANE}/`;
+  const firstAdd = new Map(); let cur = null;                            // cardId -> first commit that published it as a lead
+  for (const raw of log.split("\n")) {
+    const t = raw.trim();
+    if (/^[0-9a-f]{40}$/.test(t)) { cur = t; continue; }
+    if (t.startsWith(prefix) && t.endsWith(".json")) {
+      const id = t.slice(prefix.length, -5);
+      if (HASH64.test(id) && cur && !firstAdd.has(id)) firstAdd.set(id, cur);
+    }
+  }
+  const ids = [...firstAdd.keys()], origById = new Map();
+  if (ids.length) {                                                       // batch-fetch each lead's original published content
+    const specs = ids.map((id) => `${firstAdd.get(id)}:${prefix}${id}.json`);
+    const r = gitBuf(repo, ["cat-file", "--batch"], { input: specs.join("\n") + "\n", maxBuffer: (1 << 20) + ids.length * (MAX_CARD_BYTES + 256) });
+    if (r.status === 0 && !r.error) {
+      const b = r.stdout; let pos = 0, idx = 0;
+      while (pos < b.length && idx < ids.length) {
+        const nl = b.indexOf(0x0a, pos); if (nl < 0) break;
+        const parts = b.slice(pos, nl).toString("latin1").split(" "); pos = nl + 1;
+        if (parts[1] !== "blob") { if (parts[1] === "missing") { idx++; continue; } break; }
+        const size = parseInt(parts[2], 10); if (!Number.isFinite(size)) break;
+        const text = decodeUtf8Strict(b.slice(pos, pos + size));
+        if (text !== null) origById.set(ids[idx], text);
+        pos += size + 1; idx++;
+      }
+    }
+  }
+  const funnel = { acceptedAsIs: [], edited: [], rejected: [], pending: [] };
+  for (const id of ids) {
+    if (stillLead.has(id)) { funnel.pending.push(id); continue; }
+    if (decById.has(id)) {
+      const orig = origById.get(id), decContent = serializeDecisionCard(decById.get(id));
+      const oc = orig != null && parseDecisionCard(orig) ? serializeDecisionCard(parseDecisionCard(orig)) : null;
+      (oc !== null && oc === decContent ? funnel.acceptedAsIs : funnel.edited).push(id);
+    } else funnel.rejected.push(id);
+  }
+  const a = funnel.acceptedAsIs.length, e = funnel.edited.length, rj = funnel.rejected.length, reviewed = a + e + rj;
+  return { everPublished: firstAdd.size, reviewed, pending: funnel.pending.length, acceptedAsIs: a, edited: e, rejected: rj,
+    precision: reviewed ? (a + e) / reviewed : null, strictPrecision: reviewed ? a / reviewed : null, ids: funnel };
+}
+export function renderPrecision(res) {
+  if (res.error) return `logbook precision: unmeasurable — ${res.error}`;
+  const pct = (v) => v == null ? "n/a" : `${(v * 100).toFixed(0)}%`;
+  const lines = [
+    "logbook precision — fate of policy-published (machine) leads",
+    `  published:      ${res.everPublished}`,
+    `  reviewed:       ${res.reviewed}   (pending: ${res.pending})`,
+    `  accepted as-is: ${res.acceptedAsIs}`,
+    `  edited:         ${res.edited}`,
+    `  rejected:       ${res.rejected}`,
+    "",
+    `  claim precision (kept):        ${pct(res.precision)}`,
+    `  strict (accepted unedited):    ${pct(res.strictPrecision)}`,
+  ];
+  if (res.reviewed < 20) lines.push("", `  note: only ${res.reviewed} reviewed — too few to promote automation to authoritative; keep machine cards lower-authority until this grows.`);
+  return lines.join("\n");
+}
+
 // ---- Stage 3: automatic mode (opt-in policy-published LEADS) -----------------
 // AUTONOMOUS mode publishes machine LEADS only (never human-reviewed decisions).
 // The ONLY authorization-capable, writing API is publishPolicyLeads — it does NOT
@@ -3411,6 +3519,15 @@ function usage() {
                                   read-only diff-time preflight: accepted decisions
                                   whose path scope the change touches (non-blocking;
                                   exits nonzero only when unmeasurable, never "clean")
+    logbook accept-lead CARDID [--claim "corrected text"] [path]
+                                  promote a policy-published machine LEAD to a
+                                  human-reviewed decision (unchanged = accepted-as-is,
+                                  --claim = edited); commit .logbook/ to record it
+    logbook reject-lead CARDID [path]
+                                  drop a machine lead (rejected); commit to record it
+    logbook precision [path]      measure the fate of machine leads across plane history
+                                  (accepted-as-is / edited / rejected / pending) — the
+                                  claim-precision that gates promoting automation authority
     logbook pending [path]        draft annotations no human has accepted yet
                                   (they stay inert until a maintainer runs accept)
     logbook refine [path] [--limit N]
@@ -3448,6 +3565,10 @@ export function parseArgs(argv) {
     else if (a === "check") o.cmd = "check";
     else if (a === "pending") o.cmd = "pending";
     else if (a === "refine") o.cmd = "refine";
+    else if (a === "precision") o.cmd = "precision";
+    else if (a === "accept-lead") o.cmd = "accept-lead";
+    else if (a === "reject-lead") o.cmd = "reject-lead";
+    else if (a === "--claim") { if (i + 1 >= argv.length) o._missing = "--claim"; else o.claim = argv[++i]; }
     else if (a === "--diff") o.diff = true;
     else if (a === "--span") { if (i + 1 >= argv.length) o._missing = "--span"; else o.span = argv[++i]; }
     else if (a === "--amend") { if (i + 1 >= argv.length) o._missing = "--amend"; else o.amend = argv[++i]; }
@@ -3492,6 +3613,10 @@ export function parseArgs(argv) {
   } else if (o.cmd === "accept" || o.cmd === "reject" || o.cmd === "verify") {
     // <sha> [repo] — sha positional; scope via --file/--dir (accept only)
     o.sha = rest[0];
+    if (rest[1]) o.repo = rest[1];
+  } else if (o.cmd === "accept-lead" || o.cmd === "reject-lead") {
+    // <cardId> [repo] — cardId positional; --claim edits the claim on accept
+    o.cardId = rest[0];
     if (rest[1]) o.repo = rest[1];
   } else if (rest.length) o.repo = rest[0];
   return o;
@@ -3626,6 +3751,19 @@ async function main() {
     return;
   }
 
+  if (o.cmd === "precision") {
+    console.log(renderPrecision(computePrecision(repo)));
+    return;
+  }
+  if (o.cmd === "accept-lead" || o.cmd === "reject-lead") {
+    if (!o.cardId) { console.error(`  usage: logbook ${o.cmd} <cardId> [--claim "..."] [repo]`); process.exit(1); }
+    const r = o.cmd === "accept-lead"
+      ? acceptLead(repo, o.cardId, o.claim !== undefined ? { editClaim: o.claim } : {})
+      : rejectLead(repo, o.cardId);
+    if (r.error) { console.error(`  ${o.cmd}: ${r.error}`); process.exit(1); }
+    console.log(`  ${o.cmd}: ${o.cardId.slice(0, 12)}… → ${r.disposition}; commit .logbook/ to record it`);
+    return;
+  }
   if (o.cmd === "check") {
     if (!o.diff) {
       console.error(`  usage: logbook check --diff [--base <sha> --head <sha>] [--metrics-out <path>] [repo]`);
