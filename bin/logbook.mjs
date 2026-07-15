@@ -2127,19 +2127,37 @@ export function parsePolicy(text) {
   }
   return { policy: p };
 }
-// Opt-in + kill switch. Refuses if the policy is absent, disabled, malformed, or
-// the kill-switch file is present. Reads via O_NOFOLLOW (no symlinked policy).
-export function loadPolicy(repo) {
+// Write a card file refusing a symlink (O_NOFOLLOW) — a planted symlink at the
+// path must not be followed to overwrite its target. Regular file only.
+function writeCardFileSafe(path, content) {
+  const fd = openSync(path, FS.O_WRONLY | FS.O_CREAT | FS.O_TRUNC | FS.O_NOFOLLOW | FS.O_NONBLOCK, 0o644);
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) throw new Error(`not a regular file: ${path}`);
+    const buf = Buffer.from(content, "utf8");
+    for (let off = 0; off < buf.length;) { const n = writeSync(fd, buf, off, buf.length - off); if (!(n > 0)) throw new Error("short write"); off += n; }
+  } finally { closeSync(fd); }
+}
+// Two scopes OVERLAP if either governs the other (a broad `src/` card covers a
+// protected `src/auth/` subtree, and vice-versa) — used for the protected check.
+function scopesOverlap(a, b) { return scopeMatches(a, b) || scopeMatches(b, a); }
+
+// Opt-in + kill switch. The POLICY is read from the COMMITTED, reviewed version
+// at `ref` — an uncommitted working-tree edit cannot loosen it (loosening needs a
+// reviewed commit). The KILL SWITCH is working-tree (immediate; stops without a
+// commit). Requires positive caps — no unbounded publishing.
+export function loadPolicy(repo, ref = "HEAD") {
   if (existsSync(join(repo, ".logbook", "AUTOMATION_DISABLED")))
     return { error: "kill switch engaged: .logbook/AUTOMATION_DISABLED present" };
-  const path = join(realpathSync(repo), ".logbook", "policy.toml");
-  const text = readPrivateText(path);
-  if (text == null) return { error: "automation not configured (.logbook/policy.toml absent) — autonomous mode is opt-in" };
+  let text; try { text = git(repo, ["show", `${ref}:.logbook/policy.toml`]); }
+  catch { return { error: `automation not configured (committed .logbook/policy.toml absent at ${ref}) — autonomous mode is opt-in` }; }
   const parsed = parsePolicy(text);
   if (parsed.error) return { error: `policy.toml: ${parsed.error}` };
-  if (!parsed.policy.enabled) return { error: "automation disabled in policy.toml (enabled = false)" };
-  if (!parsed.policy.allowedScopes.length) return { error: "policy.toml has no allowed_scopes — nothing may be auto-published" };
-  return { policy: parsed.policy };
+  const p = parsed.policy;
+  if (!p.enabled) return { error: "automation disabled in policy.toml (enabled = false)" };
+  if (!p.allowedScopes.length) return { error: "policy.toml has no allowed_scopes — nothing may be auto-published" };
+  if (!(p.maxPerRun > 0) || !(p.maxTotal > 0)) return { error: "policy.toml must set POSITIVE max_cards_per_run and max_total_cards (no unbounded publishing)" };
+  return { policy: p };
 }
 // Publish grounded candidate cards to .logbook/leads/ (policy-published tier).
 // NEVER writes to .logbook/decisions/. Returns {published, skipped[{reason}]}.
@@ -2153,15 +2171,18 @@ export function autopublish(repo, candidates, policy) {
       scopes: (cand.scopes && cand.scopes.length ? cand.scopes : (cand.evidenceFile ? [cand.evidenceFile] : [])),
       by: cand.by || "auto-policy", at: today() };
     if (!card.scopes.length) { skipped.push({ reason: "no-scope", claim: cand.claim }); continue; }
-    if (groundStatus(repo, card.sha, card.span, card.side, card.evidenceFile) !== "grounded") { skipped.push({ reason: "not-grounded", claim: cand.claim }); continue; }
+    const gs = groundStatus(repo, card.sha, card.span, card.side, card.evidenceFile);
+    if (gs === "unmeasurable") { skipped.push({ reason: "unmeasurable", claim: cand.claim }); continue; } // couldn't verify (merge / missing object) — distinct from absent
+    if (gs !== "grounded") { skipped.push({ reason: "not-grounded", claim: cand.claim }); continue; }
     if (!card.scopes.every((s) => policy.allowedScopes.some((a) => scopeMatches(a, s)))) { skipped.push({ reason: "scope-not-allowed", scopes: card.scopes }); continue; }
-    if (card.scopes.some((s) => policy.protectedPaths.some((pp) => scopeMatches(pp, s)))) { skipped.push({ reason: "protected-path", scopes: card.scopes }); continue; }
+    if (card.scopes.some((s) => policy.protectedPaths.some((pp) => scopesOverlap(s, pp)))) { skipped.push({ reason: "protected-path", scopes: card.scopes }); continue; } // OVERLAP, not just under
     card.cardId = decisionCardId(card);
     if (!validDecisionCard(card)) { skipped.push({ reason: "invalid", claim: cand.claim }); continue; }
-    if (policy.maxPerRun && published.length >= policy.maxPerRun) { skipped.push({ reason: "run-cap" }); continue; }
-    if (policy.maxTotal && existing + published.length >= policy.maxTotal) { skipped.push({ reason: "total-cap" }); continue; }
+    if (published.length >= policy.maxPerRun) { skipped.push({ reason: "run-cap" }); continue; }         // caps are REQUIRED positives (loadPolicy)
+    if (existing + published.length >= policy.maxTotal) { skipped.push({ reason: "total-cap" }); continue; }
     mkdirSync(leadsDir, { recursive: true });
-    writeFileSync(join(leadsDir, card.cardId + ".json"), serializeDecisionCard(card));
+    try { writeCardFileSafe(join(leadsDir, card.cardId + ".json"), serializeDecisionCard(card)); }
+    catch { skipped.push({ reason: "unsafe-target", cardId: card.cardId }); continue; }                  // e.g. a planted symlink
     published.push(card);
   }
   return { published, skipped, existingBefore: existing };
@@ -2199,7 +2220,8 @@ export function migrateLegacyToDrafts(repo, dir = repo) {
     if (seen.has(card.cardId)) { skipped.push({ reason: "duplicate", sha: ann.sha }); continue; }
     seen.add(card.cardId);
     mkdirSync(draftsDir, { recursive: true });
-    writeFileSync(join(draftsDir, card.cardId + ".json"), serializeDecisionCard(card));
+    try { writeCardFileSafe(join(draftsDir, card.cardId + ".json"), serializeDecisionCard(card)); }
+    catch { skipped.push({ reason: "unsafe-target", sha: ann.sha }); continue; }
     drafted.push(card);
   }
   // drafts are LOCAL + inert — keep them out of git.

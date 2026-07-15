@@ -3084,16 +3084,22 @@ test("gitfiles stage3: parsePolicy is strict (unknown key / glob scope / bad ena
   assert.deepEqual(p.allowedScopes, ["src/", "lib/"]); assert.equal(p.maxTotal, 200);
 });
 
-test("gitfiles stage3: loadPolicy is opt-in and honours the kill switch", () => {
-  const { d } = tmpGitRepo("logbook-pol-");
-  assert.match(loadPolicy(d).error, /opt-in/);                            // absent
+test("gitfiles stage3: loadPolicy reads the COMMITTED policy (opt-in, caps required, immediate kill switch)", () => {
+  const { d, g } = tmpGitRepo("logbook-pol-");
+  g("init", "-q"); writeFileSync(join(d, "x"), "1"); g("add", "-A"); g("commit", "-qm", "init");
+  assert.match(loadPolicy(d).error, /opt-in/);                            // no committed policy
   mkdirSync(join(d, ".logbook"), { recursive: true });
-  writeFileSync(join(d, ".logbook", "policy.toml"), "enabled = false\n");
-  assert.match(loadPolicy(d).error, /disabled/);
-  writeFileSync(join(d, ".logbook", "policy.toml"), 'enabled = true\nallowed_scopes = ["src/"]\n');
+  const goodToml = 'enabled = true\nallowed_scopes = ["src/"]\nmax_cards_per_run = 5\nmax_total_cards = 50\n';
+  // caps required: a committed policy WITHOUT caps is refused
+  writeFileSync(join(d, ".logbook", "policy.toml"), 'enabled = true\nallowed_scopes = ["src/"]\n'); g("add", "-A"); g("commit", "-qm", "no caps");
+  assert.match(loadPolicy(d).error, /POSITIVE max_cards_per_run/);
+  writeFileSync(join(d, ".logbook", "policy.toml"), goodToml); g("add", "-A"); g("commit", "-qm", "policy");
   assert.ok(loadPolicy(d).policy);
+  // an UNCOMMITTED working-tree edit that adds a scope does NOT loosen the committed policy
+  writeFileSync(join(d, ".logbook", "policy.toml"), goodToml + 'protected_paths = []\n'); // uncommitted, extra scope would-be
+  assert.deepEqual(loadPolicy(d).policy.allowedScopes, ["src/"]);         // still the committed narrow set
   writeFileSync(join(d, ".logbook", "AUTOMATION_DISABLED"), "");
-  assert.match(loadPolicy(d).error, /kill switch/);                       // immediate kill switch
+  assert.match(loadPolicy(d).error, /kill switch/);                       // working-tree, immediate
   rmSync(d, { recursive: true, force: true });
 });
 
@@ -3154,5 +3160,48 @@ test("gitfiles stage4a: migration reports skipped rows (bad sha / empty why), ne
   assert.equal(res.drafted.length, 1);                             // "good one"
   assert.ok(res.skipped.some((s) => s.reason === "bad-sha"));
   assert.ok(res.skipped.some((s) => s.reason === "empty-why"));
+  rmSync(d, { recursive: true, force: true });
+});
+
+// ---------- git-files stage 3 SECURITY fixes (Codex focused repros) ----------
+test("gitfiles stage3 fix: a broad scope covering a protected subtree is refused (overlap, not just under)", () => {
+  const { d, sha } = poolRepo("logbook-broad-");
+  const policy = { enabled: true, allowedScopes: ["src/"], protectedPaths: ["src/auth/"], maxPerRun: 10, maxTotal: 100 };
+  const r = autopublish(d, [{ sha, claim: "broad", span: "createPool", side: "diff", evidenceFile: "src/db.js", scopes: ["src/"] }], policy);
+  assert.equal(r.published.length, 0);                          // "src/" governs the protected src/auth/ subtree
+  assert.ok(r.skipped.some((s) => s.reason === "protected-path"));
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("gitfiles stage3 fix: an UNMEASURABLE grounding (merge commit) is skipped distinctly, not as 'not-grounded'", () => {
+  const { d, g, gq } = tmpGitRepo("logbook-unmeas-");
+  g("init", "-q"); mkdirSync(join(d, "src"));
+  writeFileSync(join(d, "src", "x.js"), "base\n"); writeFileSync(join(d, "src", "y.js"), "base\n"); g("add", "-A"); g("commit", "-qm", "base");
+  const main = g("branch", "--show-current").trim();
+  g("checkout", "-q", "-b", "feat"); writeFileSync(join(d, "src", "x.js"), "feat\n"); writeFileSync(join(d, "src", "y.js"), "feat\n"); g("add", "-A"); g("commit", "-qm", "f");
+  g("checkout", "-q", main); writeFileSync(join(d, "src", "x.js"), "mainx\n"); writeFileSync(join(d, "src", "y.js"), "mainy\n"); g("add", "-A"); g("commit", "-qm", "m");
+  gq("merge", "feat"); writeFileSync(join(d, "src", "x.js"), "RESOLVED_X\n"); writeFileSync(join(d, "src", "y.js"), "RESOLVED_Y\n"); g("add", "-A"); g("commit", "--no-edit", "-q");
+  const merge = g("rev-parse", "HEAD").trim();
+  const policy = { enabled: true, allowedScopes: ["src/"], protectedPaths: [], maxPerRun: 10, maxTotal: 100 };
+  const r = autopublish(d, [{ sha: merge, claim: "m", span: "RESOLVED_X", side: "diff", evidenceFile: "src/x.js", scopes: ["src/x.js"] }], policy);
+  assert.equal(r.published.length, 0);
+  assert.ok(r.skipped.some((s) => s.reason === "unmeasurable"));  // merge => could-not-verify, not absent
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("gitfiles stage3 fix: a planted symlink at a lead path is refused (O_NOFOLLOW); target untouched", () => {
+  const { d, sha } = poolRepo("logbook-symw-");
+  const policy = { enabled: true, allowedScopes: ["src/"], protectedPaths: [], maxPerRun: 10, maxTotal: 100 };
+  const cand = { sha, claim: "pool", span: "createPool", side: "diff", evidenceFile: "src/db.js", scopes: ["src/db.js"] };
+  const probe = { schema: DECISION_SCHEMA, cardId: "", sha, sourceType: "machine_source", claim: cand.claim,
+    side: "diff", evidenceFile: "src/db.js", span: "createPool", scopes: ["src/db.js"], by: "auto-policy", at: "x" };
+  const id = decisionCardId(probe);                              // cardId excludes at/scopes/by-default => stable
+  const outside = join(d, "SECRET.txt"); writeFileSync(outside, "SECRET");
+  mkdirSync(join(d, ".logbook", "leads"), { recursive: true });
+  symlinkSync(outside, join(d, ".logbook", "leads", id + ".json"));
+  const r = autopublish(d, [cand], policy);
+  assert.equal(r.published.length, 0);
+  assert.ok(r.skipped.some((s) => s.reason === "unsafe-target"));
+  assert.equal(readFileSync(outside, "utf8"), "SECRET");         // symlink target NOT overwritten
   rmSync(d, { recursive: true, force: true });
 });
