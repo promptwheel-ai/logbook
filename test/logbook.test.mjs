@@ -2296,7 +2296,7 @@ test("multiple cards may reference one commit (distinct claims => distinct cardI
 test("human edit creates revision N+1 (human_attestation, no span) superseding the machine rev", () => {
   const { r, sha } = mkAcceptRepo();
   const m = saveMachineCard(r, r, { sha, claim: "machine draft", span: "v2", side: "diff", path: "src/cache.ts", by: "codex" });
-  const e = editCard(r, r, { cardId: m.card.cardId, claim: "human: this also broke customer-X", by: "alice" });
+  const e = editCard(r, r, { cardId: m.card.cardId, expectedRevHash: m.card.revHash, claim: "human: this also broke customer-X", by: "alice" });
   assert.ok(e.card, e.error);
   assert.equal(e.card.rev, 2);
   assert.equal(e.card.sourceType, "human_attestation");
@@ -2342,7 +2342,7 @@ test("adversarial: mutating sha/by/at without rehashing => malformed (revHash bi
 test("adversarial: mutating a rev-2 supersedes link without rehashing => malformed", () => {
   const { r, sha } = mkAcceptRepo();
   const m = saveMachineCard(r, r, { sha, claim: "c", span: "v2", side: "diff", path: "src/cache.ts", by: "codex" });
-  editCard(r, r, { cardId: m.card.cardId, claim: "human note", by: "alice" });
+  editCard(r, r, { cardId: m.card.cardId, expectedRevHash: m.card.revHash, claim: "human note", by: "alice" });
   const p = join(r, "decision-cards.jsonl");
   const lines = readFileSync(p, "utf8").trim().split("\n");
   const rec2 = JSON.parse(lines[1]); rec2.supersedes = "0".repeat(64);
@@ -2354,7 +2354,7 @@ test("adversarial: mutating a rev-2 supersedes link without rehashing => malform
 test("adversarial: a divergent fork (two self-consistent rev-2s) => foldCards malformed, card excluded", () => {
   const { r, sha } = mkAcceptRepo();
   const m = saveMachineCard(r, r, { sha, claim: "c", span: "v2", side: "diff", path: "src/cache.ts", by: "codex" });
-  const e = editCard(r, r, { cardId: m.card.cardId, claim: "branch A", by: "alice" });
+  const e = editCard(r, r, { cardId: m.card.cardId, expectedRevHash: m.card.revHash, claim: "branch A", by: "alice" });
   const forked = { ...e.card, claim: "branch B" }; forked.revHash = revHashFor(forked);
   writeCardLine(r, forked);
   const st = loadCards(r);
@@ -2415,7 +2415,7 @@ test("adversarial: writers refuse to append to a malformed journal (fail-closed)
   const { r, sha } = mkAcceptRepo();
   writeFileSync(join(r, "decision-cards.jsonl"), "{ broken json\n");
   assert.match(saveMachineCard(r, r, { sha, claim: "c", span: "v2", side: "diff", path: "src/cache.ts", by: "codex" }).error, /malformed/);
-  assert.match(editCard(r, r, { cardId: "a".repeat(64), claim: "x", by: "z" }).error, /malformed/);
+  assert.match(editCard(r, r, { cardId: "a".repeat(64), expectedRevHash: "b".repeat(64), claim: "x", by: "z" }).error, /malformed/);
   rmSync(r, { recursive: true, force: true });
 });
 
@@ -2455,7 +2455,7 @@ test("canonical identity: same claim + different evidence => distinct cards (no 
   rmSync(r, { recursive: true, force: true });
 });
 
-test("legacy migration: an accepted legacy annotation round-trips to an accepted legacy_unverified card", () => {
+test("legacy migration: an annotation migrates to an INERT draft that transfers no authority", () => {
   const { r, sha } = mkAcceptRepo();
   const anns = [{ sha, why: "reverted because webpack4 broke", by: "gpt", date: "2024-03-01", span: "webpack4" }];
   const legacyAcc = [{ type: "acceptance", sha, annotationSha256: canonicalAnnotationHash(anns[0]), paths: ["src/cache.ts"], applicability: "active", acceptedBy: "alice", acceptedAt: "2024-03-02" }];
@@ -2464,27 +2464,19 @@ test("legacy migration: an accepted legacy annotation round-trips to an accepted
   assert.equal(cards[0].sourceType, "legacy_unverified");
   assert.equal(cards[0].claim, "reverted because webpack4 broke");
   assert.ok(validCardRecord(cards[0]));
-  assert.equal(cardReviews.length, 1);
-  assert.equal(cardReviews[0].cardId, cards[0].cardId);
-  assert.equal(cardReviews[0].revHash, cards[0].revHash);
-  assert.deepEqual(cardReviews[0].scopes, ["src/cache.ts"]);
-  assert.equal(projectLegacy(anns, []).cards[0].cardId, cards[0].cardId);
+  assert.equal(cardReviews.length, 0);                                   // the old acceptance grants NOTHING — re-acceptance required
+  assert.equal(projectLegacy(anns, []).cards[0].cardId, cards[0].cardId); // deterministic
   rmSync(r, { recursive: true, force: true });
 });
 
 // ---------- Stage 1 hardening round 2: adversarial-audit fixes (10 findings) --
-test("audit: projectLegacy binds by canonicalAnnotationHash — a stale acceptance for edited prose is dropped, not rebound", () => {
+test("audit: legacy acceptances produce ZERO active card reviews until re-accepted", () => {
   const { r, sha } = mkAcceptRepo();
-  const origHash = canonicalAnnotationHash({ sha, why: "reason A original", by: "gpt", date: "2024-05-01" });
-  const annNow = [{ sha, why: "reason B EDITED after acceptance", by: "gpt", date: "2024-05-01" }];
-  const acc = [{ type: "acceptance", sha, annotationSha256: origHash, paths: ["src/x.ts"], acceptedBy: "alice", acceptedAt: "2024-05-02" }];
-  const { cards, cardReviews } = projectLegacy(annNow, acc);
-  assert.equal(cards.length, 1);
-  assert.equal(cards[0].claim, "reason B EDITED after acceptance");
-  assert.equal(cardReviews.length, 0); // Alice's attestation never drifts onto prose she did not see
-  // and the CORRECT hash does bind
-  const good = [{ type: "acceptance", sha, annotationSha256: canonicalAnnotationHash(annNow[0]), paths: ["src/x.ts"], acceptedBy: "alice", acceptedAt: "2024-05-02" }];
-  assert.equal(projectLegacy(annNow, good).cardReviews.length, 1);
+  const anns = [{ sha, why: "old decision", by: "gpt", date: "2024-05-01" }];
+  const acc = [{ type: "acceptance", sha, annotationSha256: canonicalAnnotationHash(anns[0]), paths: ["src/x.ts"], applicability: "active", acceptedBy: "alice", acceptedAt: "2024-05-02" }];
+  const { cards, cardReviews } = projectLegacy(anns, acc);
+  assert.equal(cardReviews.length, 0);                                   // no authority migrated, at all
+  assert.ok(cards.every((c) => c.sourceType === "legacy_unverified" || c.sourceType === "human_attestation"));
   rmSync(r, { recursive: true, force: true });
 });
 
@@ -2574,38 +2566,49 @@ test("audit: legacy clean() collapses ALL control chars (CRLF / multi-control wh
   assert.ok(rec, "annotation with 2+ control chars was silently dropped");
   assert.ok(validCardRecord(rec));
   assert.ok(!/[\u0000-\u0008\u000a-\u001f\u007f]/.test(rec.claim)); // fully cleaned
-  const acc = [{ type: "acceptance", sha, annotationSha256: canonicalAnnotationHash({ sha, why: "fix\r\nmore\rstuff", by: "gpt", date: "2024-03-01" }), paths: ["src/cache.ts"], acceptedBy: "a", acceptedAt: "2024-03-02" }];
-  assert.equal(projectLegacy([{ sha, why: "fix\r\nmore\rstuff", by: "gpt", date: "2024-03-01" }], acc).cardReviews.length, 1);
+  assert.equal(projectLegacy([{ sha, why: "fix\r\nmore\rstuff", by: "gpt", date: "2024-03-01" }], []).cards.length, 1); // still migrates as a draft, not dropped
   rmSync(r, { recursive: true, force: true });
 });
 
 // ---------- Stage 1 hardening round 3: concurrency + migration + grounding ----
-test("audit: concurrent edits serialize under a lock — journal never forks/bricks", async () => {
+// A CAS worker: read the tip, edit onto it, retry on lock-contention/CAS-miss
+// until it lands. Every writer must eventually succeed => final rev is exactly N+1.
+const CAS_WORKER = (cli) =>
+  `import { editCard, loadCards } from ${JSON.stringify(cli)};\n` +
+  `const [,, dir, cardId, i] = process.argv;\n` +
+  `for (let t = 0; t < 500; t++) {\n` +
+  `  const cur = loadCards(dir).current.get(cardId);\n` +
+  `  if (!cur) process.exit(3);\n` +
+  `  const res = editCard(dir, dir, { cardId, expectedRevHash: cur.revHash, claim: "e" + i, by: "p" + i });\n` +
+  `  if (res && res.card) process.exit(0);\n` +
+  `}\n` +
+  `process.exit(4);\n`; // never landed
+
+test("pivot: every concurrent writer succeeds; final revision is exactly N+1 (CAS, no fork)", async () => {
   const { r, sha } = mkAcceptRepo();
   const m = saveMachineCard(r, r, { sha, claim: "base", span: "v2", side: "diff", path: "src/cache.ts", by: "codex" });
-  const worker = join(r, "edit-worker.mjs");
-  writeFileSync(worker,
-    `import { editCard } from ${JSON.stringify(CLI)};\n` +
-    `const [,, dir, cardId, i] = process.argv;\n` +
-    `editCard(dir, dir, { cardId, claim: "edit-" + i, by: "p" + i });\n`);
-  const N = 24;
-  await Promise.all(Array.from({ length: N }, (_, i) => new Promise((res) => {
-    spawn(process.execPath, [worker, r, m.card.cardId, String(i)], { stdio: "ignore" }).on("exit", () => res());
+  const worker = join(r, "edit-worker.mjs"); writeFileSync(worker, CAS_WORKER(CLI));
+  const N = 16;
+  const codes = await Promise.all(Array.from({ length: N }, (_, i) => new Promise((res) => {
+    spawn(process.execPath, [worker, r, m.card.cardId, String(i)], { stdio: "ignore" }).on("exit", (c) => res(c));
   })));
+  assert.ok(codes.every((c) => c === 0), "a worker failed to land its edit: " + codes.join(","));
   const st = loadCards(r);
   assert.equal(st.malformed, false, "concurrent edits bricked the journal");
-  assert.ok(st.current.has(m.card.cardId), "card no longer resolvable after concurrent edits");
-  assert.ok(st.current.get(m.card.cardId).rev > 1, "edits did not actually land/chain (all lock-timed-out?)");
+  assert.equal(st.current.get(m.card.cardId).rev, N + 1, "final revision is not exactly N+1 (lost update or fork)");
   rmSync(r, { recursive: true, force: true });
 });
 
-test("audit: legacy migration refuses a cross-commit acceptance (acc.sha must equal the annotation's commit)", () => {
+test("audit: a legacy amendment migrates to a PENDING human_attestation draft (still unaccepted)", () => {
   const { r, sha } = mkAcceptRepo();
-  const annA = { sha, why: "decision on commit A", by: "gpt", date: "2024-01-01" };
-  const cross = [{ type: "acceptance", sha: "b".repeat(40), annotationSha256: canonicalAnnotationHash(annA), paths: ["x"], acceptedBy: "a", acceptedAt: "2024-01-02" }];
-  assert.equal(projectLegacy([annA], cross).cardReviews.length, 0);
-  const good = [{ type: "acceptance", sha, annotationSha256: canonicalAnnotationHash(annA), paths: ["x"], acceptedBy: "a", acceptedAt: "2024-01-02" }];
-  assert.equal(projectLegacy([annA], good).cardReviews.length, 1);
+  const anns = [{ sha, why: "the decision", by: "gpt", date: "2024-01-01" }];
+  const acc = [{ type: "acceptance", sha, annotationSha256: canonicalAnnotationHash(anns[0]), paths: ["src/x.ts"], acceptedBy: "alice", acceptedAt: "2024-01-02", amendment: "also caused the customer-X incident" }];
+  const { cards, cardReviews } = projectLegacy(anns, acc);
+  assert.equal(cardReviews.length, 0);
+  const note = cards.find((c) => c.sourceType === "human_attestation");
+  assert.ok(note, "amendment did not become a human_attestation draft");
+  assert.equal(note.claim, "also caused the customer-X incident");
+  assert.equal(note.span, null);
   rmSync(r, { recursive: true, force: true });
 });
 
@@ -2670,46 +2673,148 @@ test("audit: rename source path cannot ground the new file's lines, even with di
   rmSync(d, { recursive: true, force: true });
 });
 
-test("audit: a pre-aged (crashed-holder) lock is stolen safely — concurrent editors never fork the journal", async () => {
+test("pivot: a crashed lock is NEVER auto-stolen — acquisition returns a bounded error; manual removal restores it", () => {
   const { r, sha } = mkAcceptRepo();
   const m = saveMachineCard(r, r, { sha, claim: "base", span: "v2", side: "diff", path: "src/cache.ts", by: "codex" });
   const lockDir = join(r, "decision-cards.jsonl.lock");
-  mkdirSync(lockDir); writeFileSync(join(lockDir, "owner"), "dead.holder");
-  const old = Date.now() / 1000 - 40; utimesSync(lockDir, old, old); // 40s old => stale (>30s window)
-  const worker = join(r, "w.mjs");
-  writeFileSync(worker, `import { editCard } from ${JSON.stringify(CLI)};\nconst [,, d, c, i] = process.argv;\neditCard(d, d, { cardId: c, claim: "e" + i, by: "p" + i });\n`);
-  await Promise.all(Array.from({ length: 8 }, (_, i) => new Promise((res) =>
-    spawn(process.execPath, [worker, r, m.card.cardId, String(i)], { stdio: "ignore" }).on("exit", () => res()))));
-  const st = loadCards(r);
-  assert.equal(st.malformed, false, "concurrent editors forked the journal after stealing a stale lock");
-  assert.ok(st.current.get(m.card.cardId).rev > 1, "no edit landed after the stale lock was stolen");
+  mkdirSync(lockDir); // a prior run crashed holding the lock (age is irrelevant — it is never stolen)
+  const t0 = Date.now();
+  const res = editCard(r, r, { cardId: m.card.cardId, expectedRevHash: m.card.revHash, claim: "x", by: "z" });
+  const waited = Date.now() - t0;
+  assert.ok(res.error && /held|remove/.test(res.error), "expected a bounded lock-held error, got " + JSON.stringify(res));
+  assert.ok(waited >= 4000 && waited < 20000, "acquisition was not bounded (waited " + waited + "ms)");
+  assert.ok(existsSync(lockDir), "the crashed lock was auto-stolen — it must require deliberate manual removal");
+  rmSync(lockDir, { recursive: true, force: true });      // deliberate manual recovery
+  assert.ok(editCard(r, r, { cardId: m.card.cardId, expectedRevHash: m.card.revHash, claim: "x", by: "z" }).card, "edits do not resume after manual lock removal");
   rmSync(r, { recursive: true, force: true });
 });
 
-test("audit: a malformed legacy acceptance surfaces malformed and is not emitted as a review", () => {
-  const { r, sha } = mkAcceptRepo();
-  const ann = { sha, why: "decision", by: "gpt", date: "2024-01-01" };
-  const h = canonicalAnnotationHash(ann);
-  const bad = [{ type: "acceptance", sha, annotationSha256: h, paths: ["../../etc/passwd", "src/**/*.ts", 42], acceptedBy: { evil: 1 }, acceptedAt: "2024-01-02" }];
-  const res = projectLegacy([ann], bad);
-  assert.equal(res.malformed, true);
-  assert.equal(res.cardReviews.length, 0);
-  const bad2 = [{ type: "acceptance", sha, annotationSha256: h, paths: "src/x", acceptedBy: "a", acceptedAt: "b" }]; // paths must be an array
-  assert.equal(projectLegacy([ann], bad2).malformed, true);
-  const good = [{ type: "acceptance", sha, annotationSha256: h, paths: ["src/x.ts"], acceptedBy: "a", acceptedAt: "b" }];
-  assert.equal(projectLegacy([ann], good).malformed, false);
-  rmSync(r, { recursive: true, force: true });
-});
-
-test("audit: dedup keeps cardReview revHash consistent — an acceptance never binds a non-emitted revision", () => {
+test("audit: legacy rows differing only by date are DISTINCT draft cards (date is part of legacy identity)", () => {
   const { r, sha } = mkAcceptRepo();
   const a1 = { sha, why: "same claim", by: "gpt", date: "2024-01-01" };
-  const a2 = { sha, why: "same claim", by: "gpt", date: "2024-09-09" }; // identical but for date => same cardId, different revHash
-  const acc = [{ type: "acceptance", sha, annotationSha256: canonicalAnnotationHash(a2), paths: ["src/x.ts"], acceptedBy: "a", acceptedAt: "2024-01-02" }];
-  const { cards, cardReviews } = projectLegacy([a1, a2], acc);
-  assert.equal(cards.length, 1);
-  assert.equal(cardReviews.length, 1);
-  const revHashes = new Set(cards.map((c) => c.revHash));
-  assert.ok(revHashes.has(cardReviews[0].revHash), "review bound to a revHash absent from the emitted cards");
+  const a2 = { sha, why: "same claim", by: "gpt", date: "2024-09-09" };
+  const { cards, cardReviews } = projectLegacy([a1, a2], []);
+  assert.equal(cards.length, 2);            // two historical rows => two distinct cards, nothing silently collapsed
+  assert.equal(cardReviews.length, 0);
+  assert.equal(projectLegacy([a1, { ...a1 }], []).cards.length, 1); // a byte-identical duplicate still dedups
   rmSync(r, { recursive: true, force: true });
+});
+
+// ---------- Stage 1 hardening round 5: git-hardening + merge + bidi + author --
+function tmpGitRepo(prefix) {
+  const d = mkdtempSync(join(tmpdir(), prefix));
+  const env = { GIT_AUTHOR_NAME: "T", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "T", GIT_COMMITTER_EMAIL: "t@t" };
+  const g = (...a) => execFileSync("git", ["-C", d, ...a], { env, encoding: "utf8" });
+  const gq = (...a) => { try { return execFileSync("git", ["-C", d, ...a], { env, encoding: "utf8" }); } catch (e) { return e.stdout || ""; } };
+  return { d, g, gq };
+}
+
+test("audit: a merge commit is not diff-groundable — no cross-file (or even honest) attribution from a combined diff", () => {
+  const { d, g, gq } = tmpGitRepo("logbook-merge-");
+  g("init", "-q"); mkdirSync(join(d, "src"));
+  writeFileSync(join(d, "src", "x.js"), "base_x\n"); writeFileSync(join(d, "src", "y.js"), "base_y\n");
+  g("add", "-A"); g("commit", "-qm", "base");
+  const main = g("branch", "--show-current").trim();
+  g("checkout", "-q", "-b", "feature");
+  writeFileSync(join(d, "src", "x.js"), "feat_x\n"); writeFileSync(join(d, "src", "y.js"), "feat_y\n"); g("add", "-A"); g("commit", "-qm", "feature");
+  g("checkout", "-q", main);
+  writeFileSync(join(d, "src", "x.js"), "main_x\n"); writeFileSync(join(d, "src", "y.js"), "main_y\n"); g("add", "-A"); g("commit", "-qm", "main");
+  gq("merge", "feature"); // conflicts (non-zero) — resolve both files
+  writeFileSync(join(d, "src", "x.js"), "MERGE_X_RESOLVED\n"); writeFileSync(join(d, "src", "y.js"), "MERGE_Y_RESOLVED\n");
+  g("add", "-A"); g("commit", "--no-edit", "-q");
+  const M = g("rev-parse", "HEAD").trim();
+  assert.equal(spanGroundedStrict(d, M, "MERGE_Y_RESOLVED", "diff", "src/x.js"), false); // wrong-file attribution refused
+  assert.equal(spanGroundedStrict(d, M, "MERGE_X_RESOLVED", "diff", "src/x.js"), false); // merges not diff-groundable at all
+  assert.ok(saveMachineCard(d, d, { sha: M, claim: "c", span: "MERGE_Y_RESOLVED", side: "diff", path: "src/x.js", by: "x" }).error);
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("audit: bidi isolates (U+2066-2069) and ALM (U+061C) are rejected in card fields", () => {
+  const { r, sha } = mkAcceptRepo();
+  for (const cp of [0x2066, 0x2067, 0x2068, 0x2069, 0x061c]) {
+    const ch = String.fromCharCode(cp);
+    assert.ok(saveMachineCard(r, r, { sha, claim: "a" + ch + "b", span: "v2", side: "diff", path: "src/cache.ts", by: "x" }).error, "accepted U+" + cp.toString(16));
+  }
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("audit: an edit with identical content but a DIFFERENT author is a real new revision, not a no-op", () => {
+  const { r, sha } = mkAcceptRepo();
+  const m = saveMachineCard(r, r, { sha, claim: "pool removed", span: "v2", side: "diff", path: "src/cache.ts", by: "codex" });
+  const same = editCard(r, r, { cardId: m.card.cardId, expectedRevHash: m.card.revHash, claim: "pool removed", span: "v2", side: "diff", path: "src/cache.ts", by: "codex", sourceType: "machine_source" });
+  assert.ok(same.idempotent, "same author+content should collapse");
+  const diff = editCard(r, r, { cardId: m.card.cardId, expectedRevHash: m.card.revHash, claim: "pool removed", span: "v2", side: "diff", path: "src/cache.ts", by: "alice", sourceType: "machine_source" });
+  assert.ok(diff.card && !diff.idempotent, "different author should NOT collapse");
+  assert.equal(diff.card.rev, 2);
+  assert.equal(diff.card.by, "alice"); // the re-attestation is attributed to alice
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("audit: grounding uses RAW bytes, not a textconv driver's transformed output", () => {
+  const { d, g } = tmpGitRepo("logbook-textconv-");
+  g("init", "-q");
+  g("config", "diff.fake.textconv", "sed s/RAW/SHOWN/");
+  writeFileSync(join(d, ".gitattributes"), "secret.txt diff=fake\n");
+  writeFileSync(join(d, "secret.txt"), "line1\nRAW_KEY_42\n"); g("add", "-A"); g("commit", "-qm", "seed");
+  writeFileSync(join(d, "secret.txt"), "line1\nRAW_KEY_99\n"); g("add", "-A"); g("commit", "-qm", "rotate");
+  const sha = g("rev-parse", "HEAD").trim();
+  assert.equal(spanGroundedStrict(d, sha, "RAW_KEY_99", "diff", "secret.txt"), true);    // the real changed bytes ground
+  assert.equal(spanGroundedStrict(d, sha, "SHOWN_KEY_99", "diff", "secret.txt"), false);  // the textconv display does NOT
+  rmSync(d, { recursive: true, force: true });
+});
+
+// ---------- Pivot regressions: raw-object grounding is presentation-proof -----
+test("pivot: a replace ref cannot fabricate evidence — grounding reads the REAL object", () => {
+  const { d, g } = tmpGitRepo("logbook-replace-");
+  g("init", "-q");
+  writeFileSync(join(d, "f.js"), "L1\n"); g("add", "-A"); g("commit", "-qm", "base");
+  const c1 = g("rev-parse", "HEAD").trim();
+  writeFileSync(join(d, "f.js"), "L1\nREAL_ADDED\n"); g("add", "-A"); g("commit", "-qm", "real");
+  const real = g("rev-parse", "HEAD").trim();
+  g("checkout", "-q", c1);
+  writeFileSync(join(d, "f.js"), "L1\nFAKE_ADDED\n"); g("add", "-A"); g("commit", "-qm", "fake");
+  const fake = g("rev-parse", "HEAD").trim();
+  g("replace", real, fake);                        // reads of `real` now yield `fake`
+  assert.equal(spanGroundedStrict(d, real, "REAL_ADDED", "diff", "f.js"), true);   // uses the real object
+  assert.equal(spanGroundedStrict(d, real, "FAKE_ADDED", "diff", "f.js"), false);  // NOT the replacement
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("pivot: grounding ignores grafts — real parents come from the commit object, not .git/info/grafts", () => {
+  const { d, g } = tmpGitRepo("logbook-graft-");
+  g("init", "-q");
+  writeFileSync(join(d, "f.js"), "L1\n"); g("add", "-A"); g("commit", "-qm", "c1");
+  const c1 = g("rev-parse", "HEAD").trim();
+  writeFileSync(join(d, "f.js"), "L1\nL2_MID\n"); g("add", "-A"); g("commit", "-qm", "c2");
+  writeFileSync(join(d, "f.js"), "L1\nL2_MID\nL3_TOP\n"); g("add", "-A"); g("commit", "-qm", "c3");
+  const c3 = g("rev-parse", "HEAD").trim();
+  writeFileSync(join(d, ".git", "info", "grafts"), c3 + " " + c1 + "\n"); // graft c3's parent to c1, skipping c2
+  assert.equal(spanGroundedStrict(d, c3, "L3_TOP", "diff", "f.js"), true);  // genuinely introduced vs the REAL parent c2
+  assert.equal(spanGroundedStrict(d, c3, "L2_MID", "diff", "f.js"), false); // graft would call this "introduced" (vs c1); real parent c2 already has it
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("pivot: a declared-but-unavailable parent (shallow) makes diff-grounding unmeasurable (refused)", () => {
+  const { d, g } = tmpGitRepo("logbook-shallow-src-");
+  g("init", "-q");
+  writeFileSync(join(d, "f.js"), "L1\n"); g("add", "-A"); g("commit", "-qm", "base");
+  writeFileSync(join(d, "f.js"), "L1\nADDED_LINE\n"); g("add", "-A"); g("commit", "-qm", "change");
+  const s = mkdtempSync(join(tmpdir(), "logbook-shallow-"));
+  execFileSync("git", ["clone", "--depth", "1", "--no-local", "-q", d, s], { encoding: "utf8" });
+  const head = execFileSync("git", ["-C", s, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  // HEAD's commit object declares a parent, but that object was not fetched
+  assert.equal(spanGroundedStrict(s, head, "ADDED_LINE", "diff", "f.js"), false);
+  rmSync(s, { recursive: true, force: true }); rmSync(d, { recursive: true, force: true });
+});
+
+test("pivot: Unicode / non-ASCII paths ground correctly via -z raw paths (quotepath on)", () => {
+  const { d, g } = tmpGitRepo("logbook-uni-");
+  g("init", "-q"); g("config", "core.quotepath", "true"); mkdirSync(join(d, "src"));
+  const p = "src/café_λ.js";
+  writeFileSync(join(d, p), "base\n"); g("add", "-A"); g("commit", "-qm", "add");
+  writeFileSync(join(d, p), "base\nCAFE_CHANGED\n"); g("add", "-A"); g("commit", "-qm", "change");
+  const sha = g("rev-parse", "HEAD").trim();
+  assert.equal(spanGroundedStrict(d, sha, "CAFE_CHANGED", "diff", p), true);
+  assert.ok(saveMachineCard(d, d, { sha, claim: "unicode path", span: "CAFE_CHANGED", side: "diff", path: p, by: "x" }).card);
+  rmSync(d, { recursive: true, force: true });
 });

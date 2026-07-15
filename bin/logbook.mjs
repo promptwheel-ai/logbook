@@ -1694,7 +1694,7 @@ const MAX_CLAIM = 400, MAX_SPAN = 600, MAX_BY = 128, MAX_EVPATH = 400;
 // Reject C0 controls (except tab) + newline, DEL + C1 controls (incl U+0085
 // NEL), soft hyphen, zero-width / bidi marks, U+2028/U+2029 line & paragraph
 // separators, word joiner, and BOM. Reused (globally) by the legacy cleaner.
-const CTRL_SRC = "\\u0000-\\u0008\\u000a-\\u001f\\u007f-\\u009f\\u00ad\\u200b-\\u200f\\u2028-\\u202e\\u2060\\ufeff";
+const CTRL_SRC = "\\u0000-\\u0008\\u000a-\\u001f\\u007f-\\u009f\\u00ad\\u061c\\u200b-\\u200f\\u2028-\\u202e\\u2060-\\u2069\\ufeff";
 const CTRL = new RegExp("[" + CTRL_SRC + "]");
 
 function okText(v, max) {
@@ -1729,8 +1729,15 @@ function normEvPath(v) {
 // re-write on another day is the SAME card). Evidence fields ARE part of identity
 // so "same claim, different evidence" is a distinct card, not a competing root.
 function cardOrigin(rec) {
-  return { schema: CARD_SCHEMA, sha: rec.sha, sourceType: rec.sourceType, claim: rec.claim,
+  const o = { schema: CARD_SCHEMA, sha: rec.sha, sourceType: rec.sourceType, claim: rec.claim,
     side: rec.side ?? null, evidenceFile: rec.evidenceFile ?? null, span: rec.span ?? null, by: rec.by };
+  // A legacy annotation row is a historical record: its DATE is part of its
+  // identity, so two same-claim rows written on different days are distinct
+  // cards (not one card with two conflicting rev-1 roots, and not a silent
+  // rebind of one date's acceptance onto the other's revHash). Native cards
+  // exclude `at` so a same-content re-draft on another day stays idempotent.
+  if (rec.sourceType === "legacy_unverified") o.at = rec.at;
+  return o;
 }
 export function cardIdFor(rec) { return sha256("logbook.cardId.v1\n" + JSON.stringify(cardOrigin(rec))); }
 
@@ -1746,60 +1753,83 @@ export function revHashFor(rec) {
   }));
 }
 
-// A machine span must be verbatim in the NAMED side, and a diff span must be
-// meaningful CHANGED-LINE content of the EXACT changed file — not merely present
-// somewhere in `git show` (which would let a hunk header `@@`, `diff --git`,
-// whitespace, or another file's text qualify). Pathspec is literal.
+// RAW-OBJECT grounding — presentation-independent. It NEVER parses `git show`,
+// uses `<rev>:<path>`, walks revisions, or lets textconv / replace refs / grafts
+// interpret anything: it reads raw commit/tree/blob objects by explicit OID and
+// compares blob CONTENT. A diff span grounds iff it was INTRODUCED (verbatim in
+// the new blob and NOWHERE in the old) or REMOVED (the inverse); anything else
+// abstains — conservative on recall, but no false attribution. Merges are
+// refused (a combined diff has no per-file attribution); a declared-but-missing
+// parent (shallow / graft) is unmeasurable and refused. `-z` carries
+// quoted / Unicode paths losslessly.
+const ZERO_OID = /^0+$/;
+function gitObj(repo, args, opts = {}) {
+  return spawnSync("git", ["-C", repo, "--no-replace-objects", ...args], { encoding: "utf8", maxBuffer: 1 << 30, ...opts });
+}
+function catCommit(repo, sha) {
+  const r = gitObj(repo, ["cat-file", "commit", sha]);
+  if (r.status !== 0) return null;
+  const nl = r.stdout.indexOf("\n\n");
+  const header = nl >= 0 ? r.stdout.slice(0, nl) : r.stdout;
+  let tree = null; const parents = [];
+  for (const line of header.split("\n")) {
+    if (line.startsWith("tree ")) tree = line.slice(5).trim();
+    else if (line.startsWith("parent ")) parents.push(line.slice(7).trim());
+  }
+  return OID.test(tree || "") ? { tree, parents, message: nl >= 0 ? r.stdout.slice(nl + 2) : "" } : null;
+}
+function catBlob(repo, oid) {
+  if (!oid || ZERO_OID.test(oid)) return "";              // absent side (add/delete) => empty
+  const r = gitObj(repo, ["cat-file", "blob", oid]);
+  return r.status === 0 ? r.stdout : null;                // null => unreadable => caller refuses
+}
+function emptyTree(repo) {
+  const r = gitObj(repo, ["mktree"], { input: "" });
+  return r.status === 0 ? r.stdout.trim() : null;
+}
+// Raw diff between two explicit tree OIDs. Entries carry both blob OIDs; -z keeps
+// paths raw (unquoted); --find-renames pairs a rename so a moved file's unchanged
+// content is compared against its source, not treated as all-new.
+function rawTreeDiff(repo, treeOld, treeNew) {
+  const r = gitObj(repo, ["diff-tree", "-r", "-z", "--raw", "--find-renames", "--no-textconv", treeOld, treeNew]);
+  if (r.status !== 0) return null;
+  const toks = r.stdout.split("\0");
+  const out = []; let i = 0;
+  while (i < toks.length) {
+    const meta = toks[i++];
+    if (!meta || meta[0] !== ":") continue;               // ":oldmode newmode oldsha newsha status"
+    const p = meta.slice(1).split(" ");
+    if (p.length < 5) continue;
+    const status = p[4], two = /^[RC]/.test(status);
+    const first = toks[i++], second = two ? toks[i++] : null; // R/C: src, dst
+    out.push({ status, oldSha: p[2], newSha: p[3], path: two ? second : first });
+  }
+  return out;
+}
 export function spanGroundedStrict(repo, sha, span, side, evidenceFile) {
   if (typeof span !== "string" || !span.trim()) return false;
   const norm = (s) => String(s).replace(/\r\n/g, "\n");
   const needle = norm(span);
-  if (side === "message") {
-    const r = spawnSync("git", ["-C", repo, "show", "-s", "--format=%B", sha], { encoding: "utf8", maxBuffer: 1 << 30 });
-    return r.status === 0 && norm(r.stdout).includes(needle);
+  const commit = catCommit(repo, sha);
+  if (!commit) return false;
+  if (side === "message") return norm(commit.message).includes(needle);
+  if (side !== "diff" || !evidenceFile) return false;
+  if (commit.parents.length > 1) return false;            // merge: refuse (no per-file attribution)
+  let treeOld;
+  if (commit.parents.length === 0) { treeOld = emptyTree(repo); if (!treeOld) return false; } // root: vs empty tree
+  else {
+    const parent = catCommit(repo, commit.parents[0]);
+    if (!parent) return false;                            // declared parent unavailable (shallow/graft) => unmeasurable
+    treeOld = parent.tree;
   }
-  if (side === "diff") {
-    if (!evidenceFile) return false;
-    const files = changedFilesOf(repo, sha);
-    if (!files || !files.includes(evidenceFile)) return false;         // exact changed file only
-    const changed = changedLineTextOf(repo, sha, evidenceFile);
-    return changed != null && changed.length > 0 && norm(changed).includes(needle);
-  }
-  return false;
-}
-// Rename-aware, so the file list AGREES with changedLineTextOf's rename-aware
-// diff (a repo config of diff.renames=false must not make one honor renames and
-// the other not — that would let a rename source path masquerade as changed).
-function changedFilesOf(repo, sha) {
-  const r = spawnSync("git", ["-C", repo, "show", "--name-only", "--format=", "--no-color", "--find-renames", sha], { encoding: "utf8", maxBuffer: 1 << 30 });
-  if (r.status !== 0) return null;
-  return r.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
-}
-// Only the CONTENT of genuinely added/removed lines of `file`, extracted from
-// the SAME rename-aware full diff that produced the file list. A single-path
-// pathspec would defeat rename pairing and re-emit an entire moved file as
-// "added" — so a pure `git mv` (no hunk) grounds NOTHING, and a rename+modify
-// grounds only the truly changed lines. File-header markers (--- / +++) are
-// recognized only OUTSIDE a hunk body, so a removed/added line whose content
-// starts with --- / +++ is not mistaken for a header.
-function changedLineTextOf(repo, sha, file) {
-  const r = spawnSync("git", ["-C", repo, "show", "--no-color", "--format=", "--find-renames", sha], { encoding: "utf8", maxBuffer: 1 << 30 });
-  if (r.status !== 0) return null;
-  const out = [];
-  let inTarget = false, inHunk = false, aMatch = false, bDevNull = false;
-  for (const l of r.stdout.split("\n")) {
-    if (l.startsWith("diff --git ")) { inTarget = false; inHunk = false; aMatch = false; bDevNull = false; continue; }
-    // Attribute a section's lines ONLY to the surviving path: the `+++ b/file`
-    // NEW side (add / modify), OR the `--- a/file` OLD side of a PURE DELETION
-    // (its `+++` is /dev/null). A rename SOURCE (`--- a/old`, `+++ b/new`) is NOT
-    // the target of `old`, so a renamed file's new content never grounds under
-    // its deleted old name. Markers recognized only outside a hunk body.
-    if (!inHunk && l.startsWith("--- ")) { aMatch = l.slice(4) === "a/" + file; continue; }
-    if (!inHunk && l.startsWith("+++ ")) { bDevNull = l.slice(4) === "/dev/null"; inTarget = l.slice(4) === "b/" + file || (aMatch && bDevNull); continue; }
-    if (l.startsWith("@@")) { inHunk = true; continue; }
-    if (inHunk && inTarget && (l[0] === "+" || l[0] === "-")) out.push(l.slice(1));
-  }
-  return out.join("\n");
+  const diff = rawTreeDiff(repo, treeOld, commit.tree);
+  if (!diff) return false;
+  const entry = diff.find((e) => e.path === evidenceFile); // exact raw path (Unicode/quoted safe via -z)
+  if (!entry) return false;
+  const newBlob = catBlob(repo, entry.newSha), oldBlob = catBlob(repo, entry.oldSha);
+  if (newBlob == null || oldBlob == null) return false;   // unreadable blob => refuse
+  const inNew = norm(newBlob).includes(needle), inOld = norm(oldBlob).includes(needle);
+  return (inNew && !inOld) || (inOld && !inNew);          // introduced XOR removed; else abstain
 }
 
 // One fail-closed schema check per record: allowed keys only, typed values,
@@ -1909,41 +1939,34 @@ export function loadCards(dir) {
   return { current: folded.current, malformed: malformed || folded.malformed, records };
 }
 
-// Serialize load -> validate -> append so two processes cannot each read the
-// same current revision and append competing revisions (a fork that would brick
-// the journal). mkdir is the atomic mutex. An OWNER TOKEN lets a holder detect
-// if its lock was stolen — by a stale-steal race, or because its own in-lock
-// work outran the staleness window — and ABORT its append (via stillOwned())
-// rather than fork. A lock older than the window is assumed crashed and
-// stealable; foldCards is the fail-closed backstop for any residual race.
+// NON-STEALABLE mutex: atomic mkdir, bounded acquisition, no stale-steal. A lock
+// left by a crashed run is NOT auto-stolen (that is where the TOCTOUs lived) —
+// acquisition simply times out with a bounded error telling the operator to
+// remove it deliberately. Correctness does not rest on the lock: the writers do
+// mandatory CAS (append only onto the exact revision they read) inside it, so a
+// fork is structurally impossible. Slow work (grounding) happens OUTSIDE.
 function withCardLock(dir, fn) {
   const lockDir = cardsPath(dir) + ".lock";
-  const ownerFile = join(lockDir, "owner");
-  const token = `${process.pid}.${Date.now()}.${cardLockCtr++}`;
   const deadline = Date.now() + 5000;
   for (;;) {
-    try { mkdirSync(lockDir); break; }                                     // atomic acquire
+    try { mkdirSync(lockDir); break; }
     catch (e) {
       if (e.code !== "EEXIST") throw e;
-      let st; try { st = lstatSync(lockDir); } catch { continue; }         // vanished — retry
-      if (Date.now() - st.mtimeMs > 30000) { try { rmSync(lockDir, { recursive: true, force: true }); } catch { /* raced */ } continue; }
-      if (Date.now() > deadline) return { error: "decision-cards.jsonl.lock is held (a crashed run may have left it — remove it to proceed)" };
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);   // 20ms backoff
+      if (Date.now() > deadline)
+        return { error: "decision-cards.jsonl.lock is held — retry; if no logbook process is running, a prior run crashed: remove decision-cards.jsonl.lock manually" };
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
     }
   }
-  const stillOwned = () => { try { return readFileSync(ownerFile, "utf8") === token; } catch { return false; } };
-  try { writeFileSync(ownerFile, token); return fn(stillOwned); }
-  finally { try { if (stillOwned()) rmSync(lockDir, { recursive: true, force: true }); } catch { /* already released / stolen */ } }
+  try { return fn(); } finally { try { rmSync(lockDir, { recursive: true, force: true }); } catch { /* already gone */ } }
 }
-let cardLockCtr = 0;
 
-// Write a NEW machine_source card (rev 1), grounded in the exact changed-line
-// evidence of the named side/file. Identical re-drafts are idempotent; the same
-// claim with different evidence is a DISTINCT card (different id), not a fork.
+// Write a NEW machine_source card (rev 1). Grounding (slow, git) is done OUTSIDE
+// the lock; only load -> existence-CAS -> append is inside. Identical re-drafts
+// are idempotent; the same claim with different evidence is a DISTINCT card.
 export function saveMachineCard(repo, dir, { sha, claim, span, side, path, evidenceFile, by }) {
-  const rp = spawnSync("git", ["-C", repo, "rev-parse", "--verify", "--quiet", `${sha}^{commit}`], { encoding: "utf8" });
-  const full = (rp.stdout || "").trim();
-  if (rp.status !== 0 || !OID.test(full)) return { error: `commit not found or unreachable: ${sha}` };
+  const rp = gitObj(repo, ["rev-parse", "--verify", "--quiet", `${sha}^{commit}`]);
+  const resolved = (rp.stdout || "").trim();
+  if (rp.status !== 0 || !OID.test(resolved)) return { error: `commit not found or unreachable: ${sha}` };
   const cl = normText(claim, MAX_CLAIM); if (cl.error) return { error: `claim ${cl.error}` };
   const au = normText(by || "agent", MAX_BY); if (au.error) return { error: `author ${au.error}` };
   const sd = side || "diff";
@@ -1951,58 +1974,65 @@ export function saveMachineCard(repo, dir, { sha, claim, span, side, path, evide
   let ev = null;
   if (sd === "diff") { const ep = normEvPath(evidenceFile ?? path); if (ep.error) return { error: `--file ${ep.error}` }; ev = ep.value; }
   const sp = normText(span, MAX_SPAN); if (sp.error) return { error: `--span ${sp.error}` };
-  if (!spanGroundedStrict(repo, full, sp.value, sd, ev))
-    return { error: `--span is not verbatim changed-line evidence in the ${sd}${sd === "diff" ? ` of ${ev}` : ""} at ${full.slice(0, 12)}` };
-  const rec = { schema: CARD_SCHEMA, cardId: "", rev: 1, revHash: "", sha: full,
+  if (!spanGroundedStrict(repo, resolved, sp.value, sd, ev))
+    return { error: sd === "message"
+      ? `--span is not verbatim in the commit message at ${resolved.slice(0, 12)}`
+      : `--span is not introduced/removed evidence of ${ev} at ${resolved.slice(0, 12)}` };
+  const rec = { schema: CARD_SCHEMA, cardId: "", rev: 1, revHash: "", sha: resolved,
     sourceType: "machine_source", claim: cl.value, side: sd, evidenceFile: ev, span: sp.value,
     by: au.value, at: today(), supersedes: null };
   rec.cardId = cardIdFor(rec); rec.revHash = revHashFor(rec);
-  return withCardLock(dir, (stillOwned) => {
+  return withCardLock(dir, () => {
     const state = loadCards(dir);
     if (state.malformed) return { error: "decision-cards.jsonl is malformed — refusing to append (fix or remove corrupt lines first)" };
     const sameId = state.records.filter((c) => c.cardId === rec.cardId);
-    if (sameId.length) return { card: state.current.get(rec.cardId) || sameId[0], idempotent: true }; // byte-identical origin only
-    if (!stillOwned()) return { error: "lost the card lock to a concurrent writer — retry" };
+    if (sameId.length) return { card: state.current.get(rec.cardId) || sameId[0], idempotent: true }; // CAS: identity already present => idempotent
     appendPrivateLine(cardsPath(dir), canonicalCardLine(rec) + "\n");
     return { card: rec };
   });
 }
 
-// Human edit -> new revision (N+1) superseding the current one. human_attestation
-// carries off-git context with NO span; machine_source re-grounds a real span.
-// Never sidecar metadata — always a revision. No-op edits collapse. Optional
-// expectedRevHash gives optimistic concurrency: a divergent concurrent edit is
-// rejected (not forked); the read-inside-lock means a plain edit just chains.
+// Human edit -> new revision (N+1). Grounding is done OUTSIDE the lock against
+// the card's (commit-invariant) sha; inside the lock a MANDATORY expectedRevHash
+// CAS gates the append — the new rev supersedes exactly the revision the caller
+// read, or the edit is rejected for a re-read+retry. A fork is impossible.
 export function editCard(repo, dir, { cardId, claim, span, side, path, evidenceFile, by, sourceType, expectedRevHash }) {
+  if (typeof expectedRevHash !== "string" || !HASH64.test(expectedRevHash))
+    return { error: "an edit requires expectedRevHash (the revHash you read) — CAS" };
   const cl = normText(claim, MAX_CLAIM); if (cl.error) return { error: `claim ${cl.error}` };
   const au = normText(by || "human", MAX_BY); if (au.error) return { error: `author ${au.error}` };
   const st = sourceType || "human_attestation";
   if (st !== "human_attestation" && st !== "machine_source") return { error: "an edit is human_attestation or machine_source" };
-  return withCardLock(dir, (stillOwned) => {
+  // ---- slow work OUTSIDE the lock: read the card, ground the new span ----
+  const pre = loadCards(dir);
+  if (pre.malformed) return { error: "decision-cards.jsonl is malformed — refusing to append (fix or remove corrupt lines first)" };
+  const base = pre.current.get(cardId);
+  if (!base) return { error: `no card ${String(cardId).slice(0, 12)} with a valid revision chain to edit` };
+  let sd = null, ev = null, spVal = null;
+  if (st === "machine_source") {
+    sd = side || base.side || "diff";
+    if (sd !== "message" && sd !== "diff") return { error: "--side must be message | diff" };
+    if (sd === "diff") { const ep = normEvPath(evidenceFile ?? path ?? base.evidenceFile); if (ep.error) return { error: `--file ${ep.error}` }; ev = ep.value; }
+    const sp = normText(span != null ? span : base.span, MAX_SPAN); if (sp.error) return { error: `--span ${sp.error}` }; spVal = sp.value;
+    if (!spanGroundedStrict(repo, base.sha, spVal, sd, ev))       // base.sha is commit-invariant across revisions
+      return { error: `re-grounded --span is not introduced/removed evidence at ${base.sha.slice(0, 12)}` };
+  }
+  // ---- fast critical section INSIDE the lock: reload, CAS, append ----
+  return withCardLock(dir, () => {
     const state = loadCards(dir);
     if (state.malformed) return { error: "decision-cards.jsonl is malformed — refusing to append (fix or remove corrupt lines first)" };
     const current = state.current.get(cardId);
     if (!current) return { error: `no card ${String(cardId).slice(0, 12)} with a valid revision chain to edit` };
-    let sd = null, ev = null, spVal = null;
-    if (st === "machine_source") {
-      sd = side || current.side || "diff";
-      if (sd !== "message" && sd !== "diff") return { error: "--side must be message | diff" };
-      if (sd === "diff") { const ep = normEvPath(evidenceFile ?? path ?? current.evidenceFile); if (ep.error) return { error: `--file ${ep.error}` }; ev = ep.value; }
-      const sp = normText(span != null ? span : current.span, MAX_SPAN); if (sp.error) return { error: `--span ${sp.error}` }; spVal = sp.value;
-      if (!spanGroundedStrict(repo, current.sha, spVal, sd, ev))
-        return { error: `re-grounded --span is not verbatim changed-line evidence at ${current.sha.slice(0, 12)}` };
-    }
-    // byte-identical retry collapses (idempotent) regardless of expectedRevHash
-    if (st === current.sourceType && cl.value === current.claim && (spVal || "") === (current.span || "") &&
+    if (current.revHash !== expectedRevHash)                      // CAS: the tip must be exactly what the caller read
+      return { error: `card changed since you read it (expected ${expectedRevHash.slice(0, 12)}, now ${current.revHash.slice(0, 12)}) — re-read and retry` };
+    // no-op collapse: same source, author, and content is not a new revision
+    if (st === current.sourceType && au.value === current.by && cl.value === current.claim && (spVal || "") === (current.span || "") &&
         (sd || "") === (current.side || "") && (ev || "") === (current.evidenceFile || ""))
       return { card: current, idempotent: true };
-    if (expectedRevHash && current.revHash !== expectedRevHash)
-      return { error: `card was edited concurrently (current ${current.revHash.slice(0, 12)} ≠ expected ${String(expectedRevHash).slice(0, 12)}) — re-read and retry` };
     const rec = { schema: CARD_SCHEMA, cardId, rev: current.rev + 1, revHash: "", sha: current.sha,
       sourceType: st, claim: cl.value, side: sd, evidenceFile: ev, span: spVal, by: au.value,
       at: today(), supersedes: current.revHash };
     rec.revHash = revHashFor(rec);
-    if (!stillOwned()) return { error: "lost the card lock to a concurrent writer — retry" };
     appendPrivateLine(cardsPath(dir), canonicalCardLine(rec) + "\n");
     return { card: rec };
   });
@@ -2033,48 +2063,30 @@ export function projectLegacyAnnotation(ann) {
   rec.cardId = cardIdFor(rec); rec.revHash = revHashFor(rec);
   return validCardRecord(rec) ? rec : null;
 }
-// Map legacy annotations + their acceptances into card records + card-scoped
-// acceptances. cardReviews retarget onto cardId@revHash; the human's accepted
-// paths become the APPLICABILITY scope (kept separate from card evidence).
+// Migrate legacy annotations to INERT DRAFTS. This transfers NO AUTHORITY: old
+// acceptances, scopes, and applicability grant nothing — a human must RE-ACCEPT
+// in the new model. (Preserving a prior attestation's exact binding across a
+// model change is the single most fragile thing we could do, and it broke every
+// round; re-acceptance is also exactly the behavior the alpha measures.) A human
+// amendment (off-git context on an old acceptance) becomes a PENDING
+// human_attestation draft — also unaccepted. `cardReviews` is always empty.
 export function projectLegacy(annotations, legacyAcceptances) {
-  // Key by the annotation's canonical hash — the SAME byte-binding the native
-  // acceptance layer uses — so a re-annotated sha (its pinned hash no longer
-  // maps to any current annotation) invalidates a stale acceptance instead of
-  // letting it drift onto edited prose the human never saw.
-  const cards = [], byHash = new Map(), survivor = new Map();
-  for (const ann of annotations || []) {
-    const rec = projectLegacyAnnotation(ann);
-    if (!rec) continue;
-    let emitted = survivor.get(rec.cardId);
-    if (!emitted) { cards.push(rec); survivor.set(rec.cardId, rec); emitted = rec; } // dedup identical roots (no fork)
-    byHash.set(canonicalAnnotationHash(ann), emitted);                    // always the EMITTED card, never a dropped dup
-  }
-  const cardReviews = [];
-  let malformed = false;
+  const cards = [], seen = new Set();
+  const add = (rec) => { if (rec && !seen.has(rec.cardId)) { cards.push(rec); seen.add(rec.cardId); } };
+  for (const ann of annotations || []) add(projectLegacyAnnotation(ann));
+  const clean = (v, max) => String(v ?? "").replace(new RegExp("[" + CTRL_SRC + "]", "g"), " ").slice(0, max).trim();
   for (const acc of legacyAcceptances || []) {
-    // Validate the legacy acceptance with parity to parseReviews: a corrupt
-    // legacy review journal must surface malformed (unmeasurable), never migrate
-    // as a partial-clean active review.
-    if (!acc || typeof acc !== "object" ||
-        typeof acc.annotationSha256 !== "string" || !HASH64.test(acc.annotationSha256) ||
-        typeof acc.sha !== "string" || !OID.test(acc.sha) ||
-        !Array.isArray(acc.paths) || acc.paths.length === 0 ||
-        !acc.paths.every((p) => typeof p === "string" && normalizeScope(p) === p) ||
-        (acc.acceptedBy != null && typeof acc.acceptedBy !== "string") ||
-        (acc.acceptedAt != null && typeof acc.acceptedAt !== "string") ||
-        (acc.amendment != null && typeof acc.amendment !== "string") ||
-        (acc.applicability != null && !["active", "uncertain", "retired"].includes(acc.applicability))) {
-      malformed = true; continue;
-    }
-    const rec = byHash.get(acc.annotationSha256);
-    if (!rec || rec.sha !== acc.sha) continue; // no annotation match, OR acceptance sha ≠ the annotation's commit (cross-commit) — drop, never fabricate
-    cardReviews.push({ type: acc.type || "acceptance", cardId: rec.cardId, revHash: rec.revHash,
-      applicability: acc.applicability || "active",
-      scopes: [...new Set(acc.paths)].sort(),
-      by: acc.acceptedBy || "unknown", at: acc.acceptedAt || rec.at,
-      legacy: true, amendment: acc.amendment ?? null });
+    if (!acc || typeof acc.amendment !== "string") continue;
+    const claim = clean(acc.amendment, MAX_CLAIM);
+    if (!claim || typeof acc.sha !== "string" || !OID.test(acc.sha)) continue;
+    const rec = { schema: CARD_SCHEMA, cardId: "", rev: 1, revHash: "", sha: acc.sha,
+      sourceType: "human_attestation", claim, side: null, evidenceFile: null, span: null,
+      by: clean(acc.acceptedBy, MAX_BY) || "unknown",
+      at: /^\d{4}-\d{2}-\d{2}$/.test(String(acc.acceptedAt || "")) ? acc.acceptedAt : "1970-01-01", supersedes: null };
+    rec.cardId = cardIdFor(rec); rec.revHash = revHashFor(rec);
+    if (validCardRecord(rec)) add(rec);
   }
-  return { cards, cardReviews, malformed };
+  return { cards, cardReviews: [] };   // ZERO authority migrated — re-acceptance required
 }
 
 // Drafts awaiting a human: annotations with no CURRENT active acceptance of
