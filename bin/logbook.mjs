@@ -31,7 +31,7 @@ function rawGitStatus(repo, args) { // raw, no-throw; returns {status, stdout}
 }
 import {
   writeFileSync, existsSync, realpathSync, readFileSync, mkdirSync, lstatSync, readdirSync,
-  renameSync, unlinkSync, chmodSync, openSync, fstatSync, writeSync, closeSync,
+  renameSync, unlinkSync, chmodSync, openSync, fstatSync, writeSync, closeSync, readSync,
   rmSync, rmdirSync, linkSync, constants as FS,
 } from "node:fs";
 import { pathToFileURL } from "node:url";
@@ -2455,16 +2455,39 @@ export function acceptDraft(repo, cardId, { scopes, by } = {}) {
   try { git(repo, ["add", "--", `.logbook/${DECISION_PLANE}/${cardId}.json`, `.logbook/${REVIEW_PLANE}/${cardId}.json`]); } catch (e) { return { error: `git add failed: ${e.message}` }; }
   return { cardId, disposition: "accepted", reviewedBy: cleanLegacyText(by, MAX_BY) || "human" };
 }
-// Deterministic render of a publishPolicyLeads result for the `publish` CLI.
+// Read at most `max` bytes from a REGULAR file or stdin (fd 0). Rejects FIFOs/devices
+// (fstat isFile), never follows a candidate path into a device, and caps the read so a
+// slow/endless stream cannot OOM before publishPolicyLeads' own bounds run.
+const PUBLISH_INPUT_MAX = 8 << 20;
+function readBoundedInput(source, max) {
+  let fd;
+  // O_NOFOLLOW: reject a symlinked candidates path; O_NONBLOCK: a FIFO/device must not block the open.
+  try { fd = source === 0 ? 0 : openSync(source, FS.O_RDONLY | FS.O_NOFOLLOW | FS.O_NONBLOCK); } catch (e) { return { error: `cannot open input: ${e.code || e.message}` }; }
+  try {
+    const st = fstatSync(fd);
+    if (source !== 0 && !st.isFile()) return { error: "candidates path must be a regular file (not a device/FIFO/dir/symlink)" };
+    if (st.isFile() && st.size > max) return { error: `input too large (>${max} bytes)` };
+    const buf = Buffer.alloc(max + 1); let total = 0, n;
+    for (;;) {
+      try { n = readSync(fd, buf, total, Math.min(1 << 16, max + 1 - total), null); }
+      catch (e) { if (e.code === "EAGAIN") { n = 0; break; } throw e; }        // non-blocking EOF/no-data
+      if (n <= 0) break;
+      total += n;
+      if (total > max) return { error: `input too large (>${max} bytes)` };
+    }
+    return { text: buf.slice(0, total).toString("utf8") };
+  } catch (e) { return { error: `read failed: ${e.code || e.message}` }; }
+  finally { if (source !== 0) { try { closeSync(fd); } catch { /* ignore */ } } }
+}
+// Deterministic render of a publishPolicyLeads result for the `publish` CLI. Every field
+// is sanitized (repo-controlled policy text can carry control sequences) and the COUNTS
+// are shown even on error, so a partial publish never conceals already-written leads.
 export function renderPublish(r) {
-  if (r.error) return `logbook publish: ${r.error} (exit nonzero, not "clean")`;
-  const parts = [`logbook publish: ${r.published} lead(s) published`];
-  if (r.idempotent) parts.push(`, ${r.idempotent} unchanged`);
-  if (r.conflicts) parts.push(`, ${r.conflicts} conflict(s)`);
-  if (r.unmeasurable) parts.push(`, ${r.unmeasurable} unmeasurable`);
-  if (r.skipped && r.skipped.length) parts.push(`, ${r.skipped.length} skipped`);
-  if (r.incomplete) parts.push(" — INCOMPLETE (exit nonzero)");
-  return parts.join("") + (r.published ? "\n  commit .logbook/leads/ to record them; they surface as machine LEADS (lower authority), reviewed via accept-lead." : "");
+  const s = (v) => sanitizeContextText(String(v ?? ""), 300, { markdown: false });
+  const counts = `${r.published || 0} published, ${r.idempotent || 0} unchanged, ${r.conflicts || 0} conflict(s), ${r.unmeasurable || 0} unmeasurable, ${(r.skipped || []).length} skipped`;
+  if (r.error) return `logbook publish: ${counts} — ${s(r.error)} (exit nonzero, not "clean")`;
+  return `logbook publish: ${counts}${r.incomplete ? " — INCOMPLETE (exit nonzero)" : ""}` +
+    (r.published ? "\n  commit .logbook/leads/ to record them; they surface as machine LEADS (lower authority), reviewed via accept-lead." : "");
 }
 
 // ---- Stage 3: automatic mode (opt-in policy-published LEADS) -----------------
@@ -3890,10 +3913,9 @@ async function main() {
   if (o.cmd === "publish") {
     // candidates are caller-proposed (agent's job); publishPolicyLeads does ALL the
     // authorization (committed policy, grounding, ancestry, quota, kill switch).
-    let text;
-    try { text = o.candidates ? readFileSync(resolve(o.candidates), "utf8") : readFileSync(0, "utf8"); }
-    catch (e) { console.error(`  publish: cannot read candidates (${o.candidates ? "--candidates file" : "stdin"}): ${e.message}`); process.exit(1); }
-    let cands; try { cands = JSON.parse(text); } catch { console.error("  publish: candidates must be a JSON array of {sha, claim, span, side, evidenceFile, scopes}"); process.exit(1); }
+    const inp = readBoundedInput(o.candidates ? resolve(o.candidates) : 0, PUBLISH_INPUT_MAX);
+    if (inp.error) { console.error(`  publish: cannot read candidates (${o.candidates ? "--candidates file" : "stdin"}): ${inp.error}`); process.exit(1); }
+    let cands; try { cands = JSON.parse(inp.text); } catch { console.error("  publish: candidates must be a JSON array of {sha, claim, span, side, evidenceFile, scopes}"); process.exit(1); }
     const r = publishPolicyLeads(repo, cands, { trustRef: "HEAD" });
     console.log(renderPublish(r));
     process.exitCode = r.exitCode || (r.error ? 1 : 0);

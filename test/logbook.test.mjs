@@ -3854,8 +3854,8 @@ test("stage4b: `publish` wires publishPolicyLeads to the CLI (agent proposes, to
   const { d, g, sha } = policyRepo("s4bpub-", GOOD_TOML);
   const r = publishPolicyLeads(d, [goodCand(sha)], { trustRef: "HEAD" });
   assert.equal(r.published, 1);
-  assert.match(renderPublish(r), /1 lead\(s\) published/);
-  assert.match(renderPublish({ error: "automation disabled (kill switch)" }), /kill switch.*exit nonzero/);
+  assert.match(renderPublish(r), /1 published/);
+  assert.match(renderPublish({ error: "automation disabled (kill switch)", published: 0 }), /0 published.*kill switch.*exit nonzero/s); // counts shown even on error
   assert.match(renderPublish({ published: 0, incomplete: true, skipped: [] }), /INCOMPLETE/);
   // the published lead is a real machine lead the funnel can then measure
   g("add", "-A"); g("commit", "-qm", "publish");
@@ -3909,5 +3909,21 @@ test("stage4b: accept-draft refuses an unknown draft; lead disposition records r
   assert.equal(r.disposition, "accepted-as-is"); assert.equal(r.reviewedBy, "matthew");
   const rev = parseReview(readFileSync(join(d, ".logbook", "reviews", lead.cardId + ".json"), "utf8"));
   assert.equal(rev.reviewedBy, "matthew"); assert.equal(rev.source, "lead"); assert.equal(rev.verdict, "accepted");
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("stage4b: `publish` installed-CLI — stdin parse, size bound, device rejection, exit codes", () => {
+  const { d, sha } = policyRepo("s4bpubcli-", GOOD_TOML);
+  const run = (input, args = []) => spawnSync(process.execPath, [CLI, "publish", ...args, d], { input, encoding: "utf8", maxBuffer: 1 << 26 });
+  const ok = run(JSON.stringify([goodCand(sha)]));
+  assert.equal(ok.status, 0); assert.match(ok.stdout, /1 published/);
+  const big = run("x".repeat((8 << 20) + 100));                 // oversized stdin rejected before OOM
+  assert.equal(big.status, 1); assert.match(big.stderr, /too large/);
+  const bad = run("not json");
+  assert.equal(bad.status, 1); assert.match(bad.stderr, /must be a JSON array/);
+  const nonArr = run(JSON.stringify({ not: "an array" }));       // structured error WITH counts shown, not a bare crash
+  assert.equal(nonArr.status, 1); assert.match(nonArr.stdout, /0 published/); assert.match(nonArr.stdout, /must be an array/);
+  const dev = run("", ["--candidates", "/dev/zero"]);            // a device path is refused, no OOM/hang
+  assert.equal(dev.status, 1); assert.match(dev.stderr, /regular file/);
   rmSync(d, { recursive: true, force: true });
 });
