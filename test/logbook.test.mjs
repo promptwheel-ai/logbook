@@ -28,6 +28,7 @@ import {
   decisionCardId, validDecisionCard, serializeDecisionCard, parseDecisionCard, DECISION_SCHEMA,
   checkDecisions, renderDecisionLeads, parsePolicy, publishPolicyLeads, withPublishLock, migrateLegacyToDrafts, readPlane,
   acceptLead, rejectLead, computeReviewOutcomes, renderReviewOutcomes, renderPublish,
+  annotateDraft, acceptDraft, parseReview,
   projectLegacyAnnotation, projectLegacy, CARD_SCHEMA, canonicalCardLine,
 } from "../bin/logbook.mjs";
 
@@ -3860,5 +3861,53 @@ test("stage4b: `publish` wires publishPolicyLeads to the CLI (agent proposes, to
   g("add", "-A"); g("commit", "-qm", "publish");
   const o = computeReviewOutcomes(d);
   assert.equal(o.published, 1); assert.equal(o.pending, 1);
+  rmSync(d, { recursive: true, force: true });
+});
+
+// ---------- stage 4b: plane human authoring (annotate -> draft -> accept-draft) --------
+test("stage4b: annotate-draft writes an inert draft; accept-draft promotes it with reviewer provenance", () => {
+  const { d, g, sha } = poolRepo("s4bauth-");
+  const a = annotateDraft(d, { sha, why: "pool added because raw connections exhausted the db under load", by: "codex" });
+  assert.ok(a.cardId && !a.error);
+  assert.ok(existsSync(join(d, ".logbook", "drafts", a.cardId + ".json")));   // draft exists
+  assert.ok(!existsSync(join(d, ".logbook", "decisions", a.cardId + ".json"))); // NOT yet a decision (inert)
+  assert.match(readFileSync(join(d, ".logbook", ".gitignore"), "utf8"), /drafts\//); // drafts stay local
+  // promote with a human reviewer distinct from the agent proposer
+  const p = acceptDraft(d, a.cardId, { by: "matthew" });
+  assert.equal(p.disposition, "accepted");
+  assert.ok(existsSync(join(d, ".logbook", "decisions", a.cardId + ".json")));  // now a decision
+  assert.ok(!existsSync(join(d, ".logbook", "drafts", a.cardId + ".json")));    // draft consumed
+  g("commit", "-qm", "accept");                             // acceptDraft staged it; commit so HEAD carries it
+  const dec = readPlane(d, "HEAD", "decisions").cards.find((c) => c.card.cardId === a.cardId);
+  assert.equal(dec.card.by, "codex");                       // proposer preserved on the card
+  const rev = parseReview(readFileSync(join(d, ".logbook", "reviews", a.cardId + ".json"), "utf8"));
+  assert.ok(rev); assert.equal(rev.reviewedBy, "matthew");  // reviewer recorded SEPARATELY, not conflated with the proposer
+  assert.equal(rev.verdict, "accepted"); assert.equal(rev.source, "draft");
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("stage4b: a promoted human decision surfaces in check as human-reviewed + authoritative", () => {
+  const { d, g, sha } = poolRepo("s4bsurf-");
+  const a = annotateDraft(d, { sha, why: "pooling was deliberate", by: "codex" });
+  acceptDraft(d, a.cardId, { by: "matthew" });
+  g("add", "-A"); g("commit", "-qm", "human decision"); const base = g("rev-parse", "HEAD").trim();
+  writeFileSync(join(d, "src", "db.js"), "createPool({max:20})\n"); g("add", "-A"); g("commit", "-qm", "bump");
+  const res = checkDecisions(d, { base, head: g("rev-parse", "HEAD").trim() });
+  assert.equal(res.result, "leads");
+  const lead = res.leads.find((l) => l.card.cardId === a.cardId);
+  assert.ok(lead); assert.equal(lead.tier, "human-reviewed"); assert.ok(lead.authoritative);
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("stage4b: accept-draft refuses an unknown draft; lead disposition records reviewer provenance too", () => {
+  const { d, g, sha } = policyRepo("s4brev-", GOOD_TOML);
+  assert.match(acceptDraft(d, "a".repeat(64), {}).error, /no local draft/);
+  // acceptLead now also writes a review record separating reviewer from machine proposer
+  const lead = mkDecision({ sha, evidenceFile: "src/db.js", span: "createPool", scopes: ["src/db.js"], by: "auto-policy" });
+  writeCard(d, g, "leads", lead); g("commit", "-qm", "publish lead");
+  const r = acceptLead(d, lead.cardId, { by: "matthew" });
+  assert.equal(r.disposition, "accepted-as-is"); assert.equal(r.reviewedBy, "matthew");
+  const rev = parseReview(readFileSync(join(d, ".logbook", "reviews", lead.cardId + ".json"), "utf8"));
+  assert.equal(rev.reviewedBy, "matthew"); assert.equal(rev.source, "lead"); assert.equal(rev.verdict, "accepted");
   rmSync(d, { recursive: true, force: true });
 });

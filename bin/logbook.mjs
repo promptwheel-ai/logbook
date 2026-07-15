@@ -2251,7 +2251,7 @@ export function renderDecisionLeads(res) {
 // NOTE: this measures REVIEW OUTCOMES, not semantic claim precision — a wrong claim a
 // human corrects still counts as "kept/edited". Genuine precision needs an explicit
 // correctness verdict + reviewer provenance, which is the plane review layer (Stage 4b).
-function dispositionLead(repo, cardId, dest, transform) {
+function dispositionLead(repo, cardId, dest, transform, by) {
   if (!HASH64.test(cardId || "")) return { error: "invalid cardId" };
   const leads = readPlane(repo, "HEAD", LEAD_PLANE);
   if (leads.unreadable) return { error: "committed leads unreadable (unmeasurable)" };
@@ -2276,11 +2276,14 @@ function dispositionLead(repo, cardId, dest, transform) {
     if (res.error) return { error: res.error };
     staged.push(`.logbook/${dest}/${cardId}.json`);
   }
-  try { unlinkSync(leadFile); } catch (e) { return { error: `${dest} written but lead not removed (${e.code}) — re-run to complete` }; } // recoverable: re-run is idempotent
-  try { git(repo, ["add", "--", ...staged]); } catch (e) { return { error: `git add failed: ${e.message}` }; } // stage ONLY source+dest, never `add -A`
-  return { cardId, disposition: t ? t.disposition : "rejected" };
+  const rev = writeReview(repo, { cardId, source: "lead", verdict: t ? (t.disposition === "edited" ? "edited" : "accepted") : "rejected", by }); // reviewer provenance, separate from the machine proposer
+  if (rev.error) return rev;
+  staged.push(`.logbook/${REVIEW_PLANE}/${cardId}.json`);
+  try { unlinkSync(leadFile); } catch (e) { return { error: `${dest || "review"} written but lead not removed (${e.code}) — re-run to complete` }; } // recoverable: re-run is idempotent
+  try { git(repo, ["add", "--", ...staged]); } catch (e) { return { error: `git add failed: ${e.message}` }; } // stage ONLY source+dest+review, never `add -A`
+  return { cardId, disposition: t ? t.disposition : "rejected", reviewedBy: cleanLegacyText(by, MAX_BY) || "human" };
 }
-export function acceptLead(repo, cardId, { editClaim } = {}) {
+export function acceptLead(repo, cardId, { editClaim, by } = {}) {
   return dispositionLead(repo, cardId, DECISION_PLANE, (card) => {
     let c = card, disposition = "accepted-as-is";
     if (editClaim !== undefined && editClaim !== card.claim) {
@@ -2291,9 +2294,9 @@ export function acceptLead(repo, cardId, { editClaim } = {}) {
     const content = serializeDecisionCard(c);
     if (Buffer.byteLength(content, "utf8") > MAX_CARD_BYTES) return { error: "card too large" };
     return { content, disposition };
-  });
+  }, by);
 }
-export function rejectLead(repo, cardId) { return dispositionLead(repo, cardId, null, null); }
+export function rejectLead(repo, cardId, { by } = {}) { return dispositionLead(repo, cardId, null, null, by); }
 // THE INSTRUMENT (honest): review outcomes of machine leads over plane history. Fails
 // CLOSED when history cannot be trusted (shallow/too-large/malformed) and returns
 // nonzero then. Rejection is NOT inferred from disappearance — a vanished lead is
@@ -2368,6 +2371,89 @@ export function renderReviewOutcomes(res) {
   if (res.historyIncomplete) lines.push("", "  warning: some lead history was missing/malformed — outcomes are degraded (exit nonzero).");
   if (res.reviewed < 20) lines.push("", `  note: only ${res.reviewed} reviewed — too few to promote automation to authoritative; keep machine cards lower-authority until this grows.`);
   return lines.join("\n");
+}
+// ---- Plane human authoring: annotate -> inert draft -> accept-draft -> decision ----
+// A committed, explicit REVIEW record captures reviewer provenance (who vouched, when,
+// verdict) SEPARATELY from the card's proposer (`by`), so an accepted card never
+// silently claims a machine/agent as its human reviewer.
+const REVIEW_SCHEMA = 1, REVIEW_PLANE = "reviews";
+const REVIEW_KEYS = new Set(["schema", "cardId", "source", "verdict", "reviewedBy", "reviewedAt"]);
+const REVIEW_ORDER = ["schema", "cardId", "source", "verdict", "reviewedBy", "reviewedAt"];
+const REVIEW_VERDICTS = new Set(["accepted", "edited", "rejected"]);
+const REVIEW_SOURCES = new Set(["draft", "lead"]);
+function validReview(r) {
+  if (!r || typeof r !== "object" || Array.isArray(r)) return false;
+  for (const k of Object.keys(r)) if (!REVIEW_KEYS.has(k)) return false;
+  return r.schema === REVIEW_SCHEMA && HASH64.test(r.cardId || "") && REVIEW_SOURCES.has(r.source) &&
+    REVIEW_VERDICTS.has(r.verdict) && okText(r.reviewedBy, MAX_BY) && typeof r.reviewedAt === "string" && /^\d{4}-\d{2}-\d{2}$/.test(r.reviewedAt);
+}
+export function serializeReview(r) { const o = {}; for (const k of REVIEW_ORDER) o[k] = r[k] === undefined ? null : r[k]; return JSON.stringify(o, null, 2) + "\n"; }
+export function parseReview(text) { let r; try { r = JSON.parse(text); } catch { return null; } if (!validReview(r)) return null; if (serializeReview(r) !== text) return null; return r; }
+function todayLocal() { const n = new Date(); return new Date(n.getTime() - n.getTimezoneOffset() * 60000).toISOString().slice(0, 10); }
+function writeReview(repo, { cardId, source, verdict, by }) {
+  const rec = { schema: REVIEW_SCHEMA, cardId, source, verdict, reviewedBy: cleanLegacyText(by, MAX_BY) || "human", reviewedAt: todayLocal() };
+  if (!validReview(rec)) return { error: "invalid review record" };
+  const pin = pinPlaneDir(repo, REVIEW_PLANE);
+  if (pin.error) return { error: pin.error };
+  const res = installCard(pin.dir, cardId, serializeReview(rec));         // atomic, symlink-safe; conflict => a different review already exists
+  if (res.conflict) return { error: `a different review record ${cardId} already exists` };
+  if (res.error) return { error: res.error };
+  return { ok: true };
+}
+// annotate: write a canonical, INERT draft card (never surfaces in check). Same shape as
+// migration, from CLI args; a --span must be verbatim in the commit, or abstain.
+export function annotateDraft(repo, { sha, why, span, by }) {
+  const r = rawGitStatus(repo, ["rev-parse", "--verify", "--quiet", `${sha}^{commit}`]);
+  const full = r.status === 0 ? r.stdout.trim() : null;
+  if (!full || !OID.test(full)) return { error: `no such commit ${sha}` };
+  const claim = cleanLegacyText(why, MAX_CLAIM);
+  if (!claim) return { error: "empty why" };
+  const spanVal = span != null && span !== "" ? String(span).slice(0, MAX_SPAN) : null;
+  if (spanVal && !spanGrounded(repo, full, spanVal)) return { error: `--span is not a verbatim substring of ${full.slice(0, 12)} (message + diff); quote it exactly or omit it` };
+  const scopes = commitChangedFiles(repo, full);
+  if (!scopes.length) return { error: "commit changed no scopable files" };
+  const card = { schema: DECISION_SCHEMA, cardId: "", sha: full, sourceType: "legacy_unverified", claim, side: null, evidenceFile: null, span: spanVal, scopes, by: cleanLegacyText(by, MAX_BY) || "agent", at: todayLocal() };
+  card.cardId = decisionCardId(card);
+  if (!validDecisionCard(card)) return { error: "resulting draft is invalid" };
+  const pin = pinPlaneDir(repo, "drafts");
+  if (pin.error) return { error: pin.error };
+  const res = installCard(pin.dir, card.cardId, serializeDecisionCard(card));
+  if (res.conflict) return { error: "a different draft with this id already exists" };
+  if (res.error) return { error: res.error };
+  const gi = join(realpathSync(repo), ".logbook", ".gitignore");         // drafts are local + inert — keep them out of git
+  if (!existsSync(gi)) writeFileSync(gi, "drafts/\n");
+  return { cardId: card.cardId, sha: full };
+}
+// accept-draft: promote ONE exact local draft into decisions/ (a human vouch), optionally
+// narrowing scopes, and record reviewer provenance. The draft is local/gitignored, so its
+// removal is not staged; only the decision + review record are.
+export function acceptDraft(repo, cardId, { scopes, by } = {}) {
+  if (!HASH64.test(cardId || "")) return { error: "invalid cardId" };
+  const dpin = pinPlaneDir(repo, "drafts");
+  if (dpin.error) return { error: dpin.error };
+  const draftFile = join(dpin.dir, cardId + ".json");
+  let text; try { text = readFileSync(draftFile, "utf8"); } catch { return { error: `no local draft ${cardId} (run annotate first)` }; }
+  const draft = parseDecisionCard(text);
+  if (!draft || draft.cardId !== cardId) return { error: "draft is malformed" };
+  let card = draft;
+  if (scopes && scopes.length) {
+    const sc = canonicalizeScopes(scopes);
+    if (sc.error || !sc.value.length) return { error: "bad scopes" };
+    card = { ...draft, scopes: sc.value };
+  }
+  if (!validDecisionCard(card)) return { error: "resulting decision is invalid" };
+  const content = serializeDecisionCard(card);
+  if (Buffer.byteLength(content, "utf8") > MAX_CARD_BYTES) return { error: "card too large" };
+  const pin = pinPlaneDir(repo, DECISION_PLANE);
+  if (pin.error) return { error: pin.error };
+  const res = installCard(pin.dir, cardId, content);
+  if (res.conflict) return { error: `a different decision ${cardId} already exists` };
+  if (res.error) return { error: res.error };
+  const rev = writeReview(repo, { cardId, source: "draft", verdict: "accepted", by });
+  if (rev.error) return { error: rev.error };
+  try { unlinkSync(draftFile); } catch (e) { if (e.code !== "ENOENT") return { error: `decision written but local draft not removed: ${e.code}` }; }
+  try { git(repo, ["add", "--", `.logbook/${DECISION_PLANE}/${cardId}.json`, `.logbook/${REVIEW_PLANE}/${cardId}.json`]); } catch (e) { return { error: `git add failed: ${e.message}` }; }
+  return { cardId, disposition: "accepted", reviewedBy: cleanLegacyText(by, MAX_BY) || "human" };
 }
 // Deterministic render of a publishPolicyLeads result for the `publish` CLI.
 export function renderPublish(r) {
@@ -3603,6 +3689,8 @@ export function parseArgs(argv) {
     else if (a === "refine") o.cmd = "refine";
     else if (a === "outcomes") o.cmd = "outcomes";
     else if (a === "publish") o.cmd = "publish";
+    else if (a === "annotate-draft") o.cmd = "annotate-draft";
+    else if (a === "accept-draft") o.cmd = "accept-draft";
     else if (a === "accept-lead") o.cmd = "accept-lead";
     else if (a === "reject-lead") o.cmd = "reject-lead";
     else if (a === "--claim") { if (i + 1 >= argv.length) o._missing = "--claim"; else o.claim = argv[++i]; }
@@ -3652,10 +3740,14 @@ export function parseArgs(argv) {
     // <sha> [repo] — sha positional; scope via --file/--dir (accept only)
     o.sha = rest[0];
     if (rest[1]) o.repo = rest[1];
-  } else if (o.cmd === "accept-lead" || o.cmd === "reject-lead") {
-    // <cardId> [repo] — cardId positional; --claim edits the claim on accept
+  } else if (o.cmd === "accept-lead" || o.cmd === "reject-lead" || o.cmd === "accept-draft") {
+    // <cardId> [repo] — cardId positional; --claim edits the claim on accept-lead
     o.cardId = rest[0];
     if (rest[1]) o.repo = rest[1];
+  } else if (o.cmd === "annotate-draft") {
+    // <sha> "<why>" [repo] — sha + why positional
+    o.sha = rest[0]; o.why = rest[1];
+    if (rest[2]) o.repo = rest[2];
   } else if (rest.length) o.repo = rest[0];
   return o;
 }
@@ -3807,13 +3899,26 @@ async function main() {
     process.exitCode = r.exitCode || (r.error ? 1 : 0);
     return;
   }
+  if (o.cmd === "annotate-draft") {
+    const r = annotateDraft(repo, { sha: o.sha, why: o.why, span: o.span, by: o.by });
+    if (r.error) { console.error(`  annotate-draft: ${r.error}`); process.exit(1); }
+    console.log(`  annotate-draft: drafted ${r.cardId.slice(0, 12)}… for ${r.sha.slice(0, 8)} (inert; run: logbook accept-draft ${r.cardId.slice(0, 12)}… to promote)`);
+    return;
+  }
+  if (o.cmd === "accept-draft") {
+    if (!o.cardId) { console.error(`  usage: logbook accept-draft <cardId> [--file P ...] [--by WHO] [repo]`); process.exit(1); }
+    const r = acceptDraft(repo, o.cardId, { scopes: o.files, by: o.by });
+    if (r.error) { console.error(`  accept-draft: ${r.error}`); process.exit(1); }
+    console.log(`  accept-draft: ${o.cardId.slice(0, 12)}… → decision (reviewed by ${r.reviewedBy}); commit .logbook/ to record it`);
+    return;
+  }
   if (o.cmd === "accept-lead" || o.cmd === "reject-lead") {
-    if (!o.cardId) { console.error(`  usage: logbook ${o.cmd} <cardId> [--claim "..."] [repo]`); process.exit(1); }
+    if (!o.cardId) { console.error(`  usage: logbook ${o.cmd} <cardId> [--claim "..."] [--by WHO] [repo]`); process.exit(1); }
     const r = o.cmd === "accept-lead"
-      ? acceptLead(repo, o.cardId, o.claim !== undefined ? { editClaim: o.claim } : {})
-      : rejectLead(repo, o.cardId);
+      ? acceptLead(repo, o.cardId, { editClaim: o.claim, by: o.by })
+      : rejectLead(repo, o.cardId, { by: o.by });
     if (r.error) { console.error(`  ${o.cmd}: ${r.error}`); process.exit(1); }
-    console.log(`  ${o.cmd}: ${o.cardId.slice(0, 12)}… → ${r.disposition}; commit .logbook/ to record it`);
+    console.log(`  ${o.cmd}: ${o.cardId.slice(0, 12)}… → ${r.disposition} (reviewed by ${r.reviewedBy}); commit .logbook/ to record it`);
     return;
   }
   if (o.cmd === "check") {
