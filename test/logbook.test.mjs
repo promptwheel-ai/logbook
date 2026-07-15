@@ -26,7 +26,7 @@ import {
   saveMachineCard, editCard, foldCards, cardIdFor, revHashFor,
   parseCards, spanGroundedStrict, groundStatus, loadCards, validCardRecord,
   decisionCardId, validDecisionCard, serializeDecisionCard, parseDecisionCard, DECISION_SCHEMA,
-  checkDecisions, renderDecisionLeads,
+  checkDecisions, renderDecisionLeads, parsePolicy, loadPolicy, autopublish,
   projectLegacyAnnotation, projectLegacy, CARD_SCHEMA, canonicalCardLine,
 } from "../bin/logbook.mjs";
 
@@ -3071,5 +3071,58 @@ test("gitfiles stage2: a malformed card (filename != cardId) is unmeasurable, ne
   writeFileSync(join(d, "src", "db.js"), "createPool({max:20})\n"); g("add", "-A"); g("commit", "-qm", "bump");
   const res = checkDecisions(d, { base, head: g("rev-parse", "HEAD").trim() });
   assert.equal(res.malformedCount, 1); assert.equal(res.exitCode, 1);
+  rmSync(d, { recursive: true, force: true });
+});
+
+// ---------- git-files platform Stage 3: automatic mode (policy leads) ----------
+test("gitfiles stage3: parsePolicy is strict (unknown key / glob scope / bad enabled rejected)", () => {
+  assert.ok(parsePolicy('enabled = true\nallowed_scopes = ["src/"]\nmax_cards_per_run = 5\n').policy);
+  assert.ok(parsePolicy("mystery = 1\n").error);
+  assert.ok(parsePolicy('allowed_scopes = ["src/**"]\n').error);         // glob
+  assert.ok(parsePolicy("enabled = yes\n").error);
+  const p = parsePolicy('enabled = true\nallowed_scopes = ["src/", "lib/"]\nprotected_paths = ["src/auth/"]\nmax_total_cards = 200\n').policy;
+  assert.deepEqual(p.allowedScopes, ["src/", "lib/"]); assert.equal(p.maxTotal, 200);
+});
+
+test("gitfiles stage3: loadPolicy is opt-in and honours the kill switch", () => {
+  const { d } = tmpGitRepo("logbook-pol-");
+  assert.match(loadPolicy(d).error, /opt-in/);                            // absent
+  mkdirSync(join(d, ".logbook"), { recursive: true });
+  writeFileSync(join(d, ".logbook", "policy.toml"), "enabled = false\n");
+  assert.match(loadPolicy(d).error, /disabled/);
+  writeFileSync(join(d, ".logbook", "policy.toml"), 'enabled = true\nallowed_scopes = ["src/"]\n');
+  assert.ok(loadPolicy(d).policy);
+  writeFileSync(join(d, ".logbook", "AUTOMATION_DISABLED"), "");
+  assert.match(loadPolicy(d).error, /kill switch/);                       // immediate kill switch
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("gitfiles stage3: autopublish writes grounded+allowed candidates to LEADS only, never decisions", () => {
+  const { d, sha } = poolRepo("logbook-auto-");
+  const policy = { enabled: true, allowedScopes: ["src/"], protectedPaths: ["src/auth/"], maxPerRun: 10, maxTotal: 100 };
+  const r = autopublish(d, [
+    { sha, claim: "pool grounded", span: "createPool", side: "diff", evidenceFile: "src/db.js", scopes: ["src/db.js"] },
+    { sha, claim: "not grounded", span: "DOES_NOT_EXIST", side: "diff", evidenceFile: "src/db.js", scopes: ["src/db.js"] },
+    { sha, claim: "protected", span: "createPool", side: "diff", evidenceFile: "src/db.js", scopes: ["src/auth/keys.js"] },
+    { sha, claim: "outside allowed", span: "createPool", side: "diff", evidenceFile: "src/db.js", scopes: ["lib/x.js"] },
+  ], policy);
+  assert.equal(r.published.length, 1); assert.equal(r.published[0].claim, "pool grounded");
+  assert.ok(r.skipped.some((s) => s.reason === "not-grounded"));
+  assert.ok(r.skipped.some((s) => s.reason === "protected-path"));
+  assert.ok(r.skipped.some((s) => s.reason === "scope-not-allowed"));
+  assert.ok(existsSync(join(d, ".logbook", "leads", r.published[0].cardId + ".json")));
+  assert.ok(!existsSync(join(d, ".logbook", "decisions")));               // NEVER writes human-reviewed
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("gitfiles stage3: autopublish enforces the per-run cap", () => {
+  const { d, sha } = poolRepo("logbook-cap-");
+  const policy = { enabled: true, allowedScopes: ["src/"], protectedPaths: [], maxPerRun: 1, maxTotal: 100 };
+  const r = autopublish(d, [
+    { sha, claim: "a", span: "createPool", side: "diff", evidenceFile: "src/db.js", scopes: ["src/db.js"] },
+    { sha, claim: "b", span: "raw", side: "diff", evidenceFile: "src/db.js", scopes: ["src/db.js"] }, // "raw" removed in the pool commit => grounded (removed)
+  ], policy);
+  assert.equal(r.published.length, 1);
+  assert.ok(r.skipped.some((s) => s.reason === "run-cap"));
   rmSync(d, { recursive: true, force: true });
 });

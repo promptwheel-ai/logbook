@@ -16,7 +16,7 @@
 import { spawnSync } from "node:child_process";
 import { createHash, timingSafeEqual } from "node:crypto";
 import {
-  writeFileSync, existsSync, realpathSync, readFileSync, mkdirSync, lstatSync,
+  writeFileSync, existsSync, realpathSync, readFileSync, mkdirSync, lstatSync, readdirSync,
   renameSync, unlinkSync, chmodSync, openSync, fstatSync, writeSync, closeSync,
   rmSync, rmdirSync, constants as FS,
 } from "node:fs";
@@ -2085,6 +2085,86 @@ export function renderDecisionLeads(res) {
   if (res.malformedCount) parts.push(`\nunmeasurable: ${res.malformedCount} malformed card(s) in the trusted planes (exit nonzero — not "clean").`);
   if (res.leads.length) parts.push(`\nLead, not verdict: scope overlap proves relevance only. Verify the source and confirm the decision still applies.`);
   return parts.join("");
+}
+
+// ---- Stage 3: automatic mode (opt-in policy-published LEADS) -----------------
+// AUTONOMOUS mode publishes machine LEADS only (never human-reviewed decisions),
+// gated by an EXPLICIT, repo-owner-authored .logbook/policy.toml. It requires
+// mechanical grounding, confines cards to allowed scopes, excludes protected
+// paths, enforces run/total caps, and honours an immediate kill switch. There is
+// NO confidence-based promotion and NO blocking — leads surface as leads.
+function parseTomlStringArray(val) {
+  if (val[0] !== "[" || val[val.length - 1] !== "]") return { error: "not an array" };
+  const inner = val.slice(1, -1).trim();
+  if (!inner) return { value: [] };
+  const out = [];
+  for (const part of inner.split(",")) {
+    const m = part.trim().match(/^"([^"\\]*)"$/);          // simple quoted string, no escapes
+    if (!m) return { error: `bad array element ${part.trim().slice(0, 30)}` };
+    out.push(m[1]);
+  }
+  return { value: out };
+}
+// Minimal FLAT toml (no tables): enabled, allowed_scopes, protected_paths,
+// max_cards_per_run, max_total_cards. Strict — unknown keys / malformed lines error.
+export function parsePolicy(text) {
+  const p = { enabled: false, allowedScopes: [], protectedPaths: [], maxPerRun: 0, maxTotal: 0 };
+  for (const raw of String(text || "").split("\n")) {
+    const line = raw.replace(/#.*$/, "").trim();
+    if (!line) continue;
+    const m = line.match(/^([a-z_]+)\s*=\s*(.+)$/);
+    if (!m) return { error: `malformed line: ${raw.slice(0, 60)}` };
+    const key = m[1], val = m[2].trim();
+    if (key === "enabled") { if (val !== "true" && val !== "false") return { error: "enabled must be true|false" }; p.enabled = val === "true"; }
+    else if (key === "max_cards_per_run" || key === "max_total_cards") {
+      if (!/^\d+$/.test(val)) return { error: `${key} must be a non-negative integer` };
+      if (key === "max_cards_per_run") p.maxPerRun = parseInt(val, 10); else p.maxTotal = parseInt(val, 10);
+    } else if (key === "allowed_scopes" || key === "protected_paths") {
+      const arr = parseTomlStringArray(val); if (arr.error) return { error: `${key}: ${arr.error}` };
+      if (!arr.value.every(okScope)) return { error: `${key} contains an invalid scope (glob / traversal / non-normalized)` };
+      if (key === "allowed_scopes") p.allowedScopes = arr.value; else p.protectedPaths = arr.value;
+    } else return { error: `unknown policy key: ${key}` };
+  }
+  return { policy: p };
+}
+// Opt-in + kill switch. Refuses if the policy is absent, disabled, malformed, or
+// the kill-switch file is present. Reads via O_NOFOLLOW (no symlinked policy).
+export function loadPolicy(repo) {
+  if (existsSync(join(repo, ".logbook", "AUTOMATION_DISABLED")))
+    return { error: "kill switch engaged: .logbook/AUTOMATION_DISABLED present" };
+  const path = join(realpathSync(repo), ".logbook", "policy.toml");
+  const text = readPrivateText(path);
+  if (text == null) return { error: "automation not configured (.logbook/policy.toml absent) — autonomous mode is opt-in" };
+  const parsed = parsePolicy(text);
+  if (parsed.error) return { error: `policy.toml: ${parsed.error}` };
+  if (!parsed.policy.enabled) return { error: "automation disabled in policy.toml (enabled = false)" };
+  if (!parsed.policy.allowedScopes.length) return { error: "policy.toml has no allowed_scopes — nothing may be auto-published" };
+  return { policy: parsed.policy };
+}
+// Publish grounded candidate cards to .logbook/leads/ (policy-published tier).
+// NEVER writes to .logbook/decisions/. Returns {published, skipped[{reason}]}.
+export function autopublish(repo, candidates, policy) {
+  const leadsDir = join(realpathSync(repo), ".logbook", LEAD_PLANE);
+  const existing = existsSync(leadsDir) ? readdirSync(leadsDir).filter((f) => f.endsWith(".json")).length : 0;
+  const published = [], skipped = [];
+  for (const cand of candidates || []) {
+    const card = { schema: DECISION_SCHEMA, cardId: "", sha: cand.sha, sourceType: "machine_source",
+      claim: cand.claim, side: cand.side || "diff", evidenceFile: cand.evidenceFile, span: cand.span,
+      scopes: (cand.scopes && cand.scopes.length ? cand.scopes : (cand.evidenceFile ? [cand.evidenceFile] : [])),
+      by: cand.by || "auto-policy", at: today() };
+    if (!card.scopes.length) { skipped.push({ reason: "no-scope", claim: cand.claim }); continue; }
+    if (groundStatus(repo, card.sha, card.span, card.side, card.evidenceFile) !== "grounded") { skipped.push({ reason: "not-grounded", claim: cand.claim }); continue; }
+    if (!card.scopes.every((s) => policy.allowedScopes.some((a) => scopeMatches(a, s)))) { skipped.push({ reason: "scope-not-allowed", scopes: card.scopes }); continue; }
+    if (card.scopes.some((s) => policy.protectedPaths.some((pp) => scopeMatches(pp, s)))) { skipped.push({ reason: "protected-path", scopes: card.scopes }); continue; }
+    card.cardId = decisionCardId(card);
+    if (!validDecisionCard(card)) { skipped.push({ reason: "invalid", claim: cand.claim }); continue; }
+    if (policy.maxPerRun && published.length >= policy.maxPerRun) { skipped.push({ reason: "run-cap" }); continue; }
+    if (policy.maxTotal && existing + published.length >= policy.maxTotal) { skipped.push({ reason: "total-cap" }); continue; }
+    mkdirSync(leadsDir, { recursive: true });
+    writeFileSync(join(leadsDir, card.cardId + ".json"), serializeDecisionCard(card));
+    published.push(card);
+  }
+  return { published, skipped, existingBefore: existing };
 }
 
 export function parseCards(text) {
