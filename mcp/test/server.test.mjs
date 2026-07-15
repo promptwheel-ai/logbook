@@ -5,7 +5,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, rmSync, readFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, readFileSync, mkdirSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
@@ -59,7 +59,7 @@ test("handshake and tool inventory", async () => {
   const init = await rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {},
     clientInfo: { name: "behavioral-test", version: "0.0.0" } });
   assert.equal(init.result.serverInfo.name, "logbook");
-  assert.equal(init.result.serverInfo.version, "0.4.1");
+  assert.equal(init.result.serverInfo.version, "0.5.0");
   child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
   const tools = await rpc("tools/list", {});
   assert.deepEqual(tools.result.tools.map((t) => t.name).sort(),
@@ -134,14 +134,14 @@ test("multi-file schemas reject empty or oversized combined filters", async () =
   assert.equal(oversizedArrayItem.result.isError, true, "array items use the CLI's UTF-8 byte cap");
 });
 
-test("release metadata requires the first multi-file core", () => {
+test("release metadata requires the plane-native core", () => {
   const mcpRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
   const pkg = JSON.parse(readFileSync(join(mcpRoot, "package.json"), "utf8"));
   const lock = JSON.parse(readFileSync(join(mcpRoot, "package-lock.json"), "utf8"));
   const listing = JSON.parse(readFileSync(join(mcpRoot, "server.json"), "utf8"));
-  assert.equal(pkg.version, "0.4.1");
-  assert.equal(pkg.dependencies["@promptwheel/logbook"], ">=0.8.1 <1");
-  assert.equal(lock.packages[""].dependencies["@promptwheel/logbook"], ">=0.8.1 <1");
+  assert.equal(pkg.version, "0.5.0");
+  assert.equal(pkg.dependencies["@promptwheel/logbook"], "^0.9.0");
+  assert.equal(lock.packages[""].dependencies["@promptwheel/logbook"], "^0.9.0");
   assert.equal(listing.version, pkg.version);
   assert.equal(listing.packages[0].version, pkg.version);
 });
@@ -243,6 +243,7 @@ test("MCP render paths sanitize repository evidence while query JSON stays raw",
     g(["init", "-q"]);
     mkdirSync(join(isolated, "src"), { recursive: true });
     writeFileSync(join(isolated, maliciousPath), "class Demo {\n  @Disabled\n  void flaky() {}\n}\n");
+    writeFileSync(join(isolated, "src", "safe.js"), "export const marker = 1;\n");
     g(["add", "-A"]);
     g(["commit", "-q", "-m", rawSubject]);
 
@@ -251,6 +252,7 @@ test("MCP render paths sanitize repository evidence while query JSON stays raw",
     g(["commit", "-q", "-m", "remove suppression"]);
 
     writeFileSync(join(isolated, maliciousPath), "class Demo {\n  @Disabled\n  void flaky() {}\n}\n");
+    writeFileSync(join(isolated, "src", "safe.js"), "export const marker = 2;\n");
     g(["add", "-A"]);
     g(["commit", "-q", "-m", "re-add suppression"]);
 
@@ -262,19 +264,22 @@ test("MCP render paths sanitize repository evidence while query JSON stays raw",
 
     const head = g(["rev-parse", "HEAD"]).trim();
     const annotated = await callTool("logbook_annotate", {
-      repo: isolated, sha: head, why: "verified reason", by: maliciousBy,
+      repo: isolated, sha: head, why: "verified reason", span: "re-add suppression",
+      side: "message", by: maliciousBy,
     });
     assert.doesNotMatch(annotated, /\[agent\]\(http:\/\/evil\)|`model`|@name/);
     assert.match(annotated,
       /&#91;agent&#93;&#40;http&#58;\/\/evil&#41; &#96;model&#96; &#64;name/,
       "annotation confirmation renders attribution as inert evidence");
-    assert.equal(JSON.parse(readFileSync(join(isolated, "annotations.jsonl"), "utf8")).by, maliciousBy,
-      "sanitization is render-only; persisted annotation JSON stays raw");
+    const draftDir = join(isolated, ".logbook", "drafts");
+    const draftFile = readdirSync(draftDir).find((file) => file.endsWith(".json"));
+    assert.equal(JSON.parse(readFileSync(join(draftDir, draftFile), "utf8")).by, maliciousBy,
+      "sanitization is render-only; persisted inert draft JSON stays raw");
 
     const invalidSha = "[bad](http://evil) `sha` @ref";
     const invalid = await rpc("tools/call", {
       name: "logbook_annotate",
-      arguments: { repo: isolated, sha: invalidSha, why: "unused", by: "agent" },
+      arguments: { repo: isolated, sha: invalidSha, why: "unused", span: "x", side: "message", by: "agent" },
     });
     assert.equal(invalid.result.isError, true);
     const invalidText = invalid.result.content[0].text;

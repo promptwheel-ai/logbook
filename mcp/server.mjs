@@ -8,7 +8,7 @@ import { z } from "zod";
 import { execFileSync } from "node:child_process";
 import {
   collectEvents, diffScan, hotspots, analyze, renderLogbookMd,
-  auditHead, queryEvents, loadEvents, loadAnnotations, saveAnnotation,
+  auditHead, queryEvents, loadEvents, annotateDraft,
   formatContextPage, sanitizeContextText,
 } from "@promptwheel/logbook";
 
@@ -69,7 +69,7 @@ function progressFor(extra) {
   }).catch(() => {});
 }
 
-const server = new McpServer({ name: "logbook", version: "0.4.1" });
+const server = new McpServer({ name: "logbook", version: "0.5.0" });
 
 server.registerTool(
   "logbook_digest",
@@ -80,30 +80,34 @@ server.registerTool(
   },
   async ({ repo }, extra) => {
     const { A, capped } = pipeline(repo, progressFor(extra));
-    // annotations load per-call (cheap file read) so fresh whys appear without
-    // invalidating the HEAD-keyed event cache
     const root = rootOf(repo);
-    return { content: [{ type: "text", text: renderLogbookMd(root.split("/").pop(), A, false, capped, loadAnnotations(root)) }] };
+    return { content: [{ type: "text", text: renderLogbookMd(root.split("/").pop(), A, false, capped) }] };
   }
 );
 
 server.registerTool(
   "logbook_annotate",
   {
-    description: "Persist WHY a commit happened (lazy enrichment). When you investigate a do-not-retry revert or a suppression — its failure mode, its cause — save the finding so the next session gets it for free instead of re-investigating. Judgments, not records: attributed and dated.",
+    description: "Create a local, inert decision draft after investigating a commit. The quoted evidence is raw-object verified; only a human can promote the returned card ID into the trusted decision plane.",
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     inputSchema: {
     repo: z.string().describe("absolute path to the git repository"),
     sha: z.string().describe("the commit being explained (any unique prefix)"),
     why: z.string().describe("the inferred cause, one sentence, specific (max 400 chars)"),
+    span: z.string().min(1).max(600).describe("an exact contiguous quote from the commit message or changed blob"),
+    side: z.enum(["message", "diff"]).describe("where the exact evidence quote occurs"),
+    evidenceFile: z.string().optional().describe("required literal changed path when side=diff; omit for message"),
     by: z.string().optional().describe("who inferred it (model/agent name)"),
     },
   },
-  async ({ repo: repoArg, sha, why, by }) => {
+  async ({ repo: repoArg, sha, why, span, side, evidenceFile, by }) => {
     const repo = rootOf(repoArg);
-    const a = saveAnnotation(repo, repo, { sha, why, by });
-    if (!a) return { content: [{ type: "text", text: `not a commit in this repo: ${sanitizeContextText(sha, 512)}` }], isError: true };
-    return { content: [{ type: "text", text: `annotated ${a.sha.slice(0, 8)} (by ${sanitizeContextText(a.by, 512)}, ${a.date}) — merged into future digests` }] };
+    if ((side === "diff") !== Boolean(evidenceFile)) return { content: [{ type: "text", text: side === "diff"
+      ? "diff evidence requires evidenceFile"
+      : "message evidence must not name evidenceFile" }], isError: true };
+    const draft = annotateDraft(repo, { sha, why, span, side, evidenceFile, by });
+    if (draft.error) return { content: [{ type: "text", text: sanitizeContextText(draft.error, 700) }], isError: true };
+    return { content: [{ type: "text", text: `drafted ${draft.cardId} for ${draft.sha.slice(0, 8)} (proposed by ${sanitizeContextText(by || "agent", 512)}) — local and inert; a human may run logbook accept-draft ${draft.cardId} --by WHO` }] };
   }
 );
 

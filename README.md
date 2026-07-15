@@ -2,257 +2,269 @@
 
 [![ci](https://github.com/promptwheel-ai/logbook/actions/workflows/ci.yml/badge.svg)](https://github.com/promptwheel-ai/logbook/actions/workflows/ci.yml) [![npm](https://img.shields.io/npm/v/%40promptwheel%2Flogbook)](https://www.npmjs.com/package/@promptwheel/logbook)
 
-**Coding agents often skip git history. It is large, and an arbitrary slice
-can give the wrong picture.**
+**Git history is large. Coding agents usually skip it, and then rediscover old
+mistakes.**
 
-Every feature gets added by someone who can read the code but not the
-decisions behind it: the module that was rewritten three times, the approach
-that was tried and reverted, the "fix" last quarter that was actually a
-skipped test. Fresh agent sessions often start without those decisions. Code
-maps (Graphify and friends) tell them where things are, not what happened. The
-logbook mines the existing git history — up to the newest 20,000 commits — and
-writes a compact recall layer that your agent is instructed to consult.
+Logbook turns a repository's history into two complementary things:
 
-```
+- a deterministic recall layer: hotspots, reverted approaches, suppressions,
+  assertion weakening, and bounded history queries; and
+- an opt-in temporal decision layer: reviewable decision cards attached to code
+  paths and surfaced when a later diff touches those paths.
+
+Everything runs locally. The CLI has zero npm dependencies, reads raw Git
+objects for evidence checks, and never sends repository data anywhere.
+
+```bash
 npx -y @promptwheel/logbook init
 ```
 
-One line: it reads the history, writes the brief, and adds a history workflow to
-your agent config (AGENTS.md, CLAUDE.md, or .cursorrules).
+`init` analyzes the repo, writes the history artifacts, and installs a compact
+workflow in `AGENTS.md`, `CLAUDE.md`, or `.cursorrules`.
 
-```
+```text
   1,326 commits · 322 files · 7.3 years · 354 authors
 
   ✓ wrote LOGBOOK.md     hotspots · do-not-retry · suppression ledger
-  ✓ wrote events.jsonl   1,326 structured events
-  ✓ wrote JOURNEY.md     the repo's story, told back to you
+  ✓ wrote events.jsonl   structured history events
+  ✓ wrote JOURNEY.md     the repo's story
 ```
 
-![logbook running on zustand: files written, then the colorized journey and Almanac](https://raw.githubusercontent.com/promptwheel-ai/logbook/master/logbook-journey.gif)
+## What it produces
 
-Single file. Zero npm dependencies. It never touches your source code or
-git history, and no repository data leaves your machine — it writes only
-its own brief files (and `init` adds a block to your agent config).
+| Path | Purpose |
+|---|---|
+| `LOGBOOK.md` | Bounded history brief for agents: hotspots, do-not-retry reverts, suppressions, weakened assertions, and fragile areas |
+| `events.jsonl` | Structured deterministic history events for tools and queries |
+| `JOURNEY.md` | Human-readable narrative of the repository's history |
+| `.logbook/drafts/` | Local, gitignored, inert decision proposals; never trusted or surfaced by `check` |
+| `.logbook/leads/` | Committed policy-published machine leads; lower authority and always labeled as such |
+| `.logbook/decisions/` | Committed decisions that have an exact matching human review record |
+| `.logbook/reviews/` | Committed reviewer provenance and byte bindings for promotions/rejections |
 
-## Why "logbook"
+One card per file makes the reviewed bytes visible in a normal Git diff and
+lets Git provide authority history, merge behavior, and rollback.
 
-Because you need a compact index of the decisions its detectors can recover
-without pulling every book out of the library. In a random 400-repo sample of
-the top 2,500 GitHub repositories, 34% of full logs exceeded a 150k-token
-context estimate. Logbook turns that record into a bounded brief and
-verifiable leads; it does not claim complete decision recall.
+## Quick start
 
-## The three artifacts
-
-| File | What it is | Who it's for |
-|---|---|---|
-| `LOGBOOK.md` | The brief a fresh session needs: hotspots, **do-not-retry** (reverted approaches), the **suppression ledger** (the times a test was skipped or a warning hushed), assertion-weakening events, fragile areas | Your agent. Drop it in context — `CLAUDE.md` can point at it |
-| `events.jsonl` | One structured event per analyzed commit: shape (src/test/config/docs), adds/dels, suppressions found in the diff, assertion deltas | Your tools. The data layer |
-| `JOURNEY.md` | Your repo's history as a hero's journey: The Call, The Threshold, The Abyss, The Long Winter, the Whispered Bargains | You. Run `logbook journey` to see it in color |
-
-## Usage
+Analyze and query history:
 
 ```bash
-npx @promptwheel/logbook              # analyze the current repo
-npx @promptwheel/logbook path/to/repo # or any repo
-npx @promptwheel/logbook journey      # the story, in color (writes nothing)
-npx @promptwheel/logbook journey --compare  # rank your almanac vs the top 2,500 GitHub repos
-npx @promptwheel/logbook audit        # what is STILL suppressed in HEAD, and since when
-npx @promptwheel/logbook doctor       # read-only artifact/wiring/skill/query health check
-npx @promptwheel/logbook context --file path/to/file --revert  # bounded, paged query view
-npx @promptwheel/logbook context --file src/a.ts --file src/b.ts # multi-path OR query
-npx @promptwheel/logbook annotate SHA "why it happened" --by WHO   # persist WHY a commit happened
-npx @promptwheel/logbook --json       # events to stdout (writes nothing)
-
-# era-scoped archaeology
-npx @promptwheel/logbook --since 2024-01-01 --until 2025-01-01
+npx @promptwheel/logbook
+npx @promptwheel/logbook context --file src/cache.ts --revert
+npx @promptwheel/logbook audit
+npx @promptwheel/logbook doctor
 ```
 
-Options: `-n/--max N` (commit cap, default 20000) · `--compare` · `--out DIR` · `-q/--quiet`
-
-`context` preserves the filtered `query` order but serializes it into pages of
-at most 20 events and 8 KiB, with an opaque `NEXT` cursor and explicit
-`END complete`. It is a delivery format, not relevance ranking; use `query`
-when you need the raw JSONL interface. A cursor is bound to the repository
-HEAD, filters, analysis window, and ordered event set; if any changes, restart
-from the first page. Repeat `--file` to match commits touching any supplied
-path; remaining filters still combine with that union. Repeat the same filters
-with every `NEXT` cursor. On a default-window cold run, the CLI creates or refreshes
-`events.jsonl` after page one so `NEXT` pages reuse the scan; it never changes
-source or Git history. Non-default `-n` or `--since`/`--until` windows remain
-uncached, so each CLI page rescans that explicit window. Across 7,123 measured
-events, the 0.8 representation used 72.7% fewer bytes than the raw rows
-([method and scope](docs/context-format.md)).
-
-## The ledger is batched
-
-The expensive part (scanning 20k commits of diffs) runs once, in bounded
-windows, and every consumer reuses it: if `events.jsonl` is present and
-matches HEAD it is loaded instantly; if new commits landed, only they are
-scanned and merged. Measured on a 20k-commit repo: 43s cold, 0.4s with a
-prior run on disk, 4ms on repeat calls in an MCP session. Escape hatches:
-`LOGBOOK_NO_CACHE=1` forces a full rebuild; `LOGBOOK_WINDOW=N` tunes the
-scan window.
-
-`--compare` uses a percentile table baked into the CLI from a 2,500-repo fleet
-run — still zero dependencies and zero network calls.
-
-## Trust and diagnostics
-
-Git subjects, paths, authors, and annotations are repository-controlled input.
-Logbook stores the event record unchanged, but sanitizes those values when it
-renders Markdown or agent-facing audit output and labels the result as untrusted
-evidence. Generated files are replaced atomically one at a time; the two
-Markdown artifacts carry matching HEAD, event-count, scope, and ledger-hash
-records that bind `events.jsonl`. A multi-file refresh is not transactional, so
-an interrupted bundle is detected on the next check.
-
-Run the read-only doctor when a report looks stale or when filing a bug:
+When an agent investigates a prior decision during real work, it can preserve
+the result as an inert draft:
 
 ```bash
-npx -y @promptwheel/logbook@latest doctor
+logbook annotate-draft <commit> "why this approach was rejected" \
+  --span "exact bytes introduced or removed" \
+  --side diff \
+  --evidence-file src/cache.ts \
+  --by codex
+
+logbook pending
 ```
 
-It checks generated-record freshness and ledger integrity, current agent wiring
-(including a shadowing `AGENTS.override.md`), an installed Logbook skill, and a
-real path query. It does not separately hash user edits to the Markdown prose.
-It writes nothing, returns nonzero on a failed check, and prints a compact report
-suitable for pasting into an issue or launch-thread reply.
+`annotate` is a compatibility alias for `annotate-draft`. A message citation
+uses `--side message` and no `--evidence-file`. A claim supplied directly by a
+human may omit a span, but an agent should cite evidence whenever its claim is
+derived from Git. An absent or unverifiable quote is rejected rather than
+guessed.
 
-## Wire it into your agent
-
-`logbook init` does this for you. Manually, it's one block in your
-CLAUDE.md (or AGENTS.md / .cursorrules) so every fresh session is instructed
-to read the history first:
-
-```markdown
-## Repo memory
-Before planning or editing:
-1. Read LOGBOOK.md at the repo root completely before any history query.
-2. Use the raw history inventory as orientation, not a task-level risk score.
-   Inspect task-relevant do-not-retry, test-trust, and reviewed-annotation
-   entries regardless of repo-wide totals.
-3. For complete do-not-retry coverage, inspect all relevant paths:
-   npx -y @promptwheel/logbook context --file path/to/file --revert
-   Repeat --file for each other relevant path. If output says NEXT, repeat the
-   identical filters with --cursor TOKEN until END complete before concluding.
-4. Treat findings as leads, not verdicts. Verify claims with git show SHA and
-   confirm that the constraint still applies to the current tree.
-Refresh the record: npx -y @promptwheel/logbook
-Check what is still silenced: npx -y @promptwheel/logbook audit
-When you investigate WHY a listed commit happened and verify it in the
-diffs, persist it (replace SHA, the sentence, and MODEL with your own
-model name; never annotate guesses):
-npx -y @promptwheel/logbook annotate SHA "one specific sentence" --by MODEL
-```
-
-Wiring installs the history workflow instead of relying on the agent to invent
-it. It is still an instruction, not a guarantee; observed consultation remains
-imperfect, so confirm it for high-risk work.
-
-## Lazy enrichment: the record says WHAT, your agent persists WHY
-
-The ledger can tell you a refactor was reverted; it can't tell you it was
-reverted because webpack4 broke. Your agent figures that out anyway the
-first time a task collides with the revert — `annotate` keeps the finding
-instead of discarding it at session end:
+A person reviews the complete draft and promotes the exact card:
 
 ```bash
-logbook annotate c08adc2 "WeakMap cache added to dodge a React-Compiler lint warning; reverted to direct ref mutation" --by claude
+logbook accept-draft <full-card-id> --by matthew
+git commit .logbook/ -m "logbook: accept cache decision"
 ```
 
-LOGBOOK.md is updated immediately (a later session that finds fresh
-artifacts on disk may never re-run the CLI), and the do-not-retry entry
-carries the why:
+`accept` is a compatibility alias for `accept-draft`. The full card ID and an
+explicit reviewer attribution are required. The commit or reviewed PR—not the
+`--by` string—is the authority boundary.
 
-```
-- 2024-09-15 c08adc2 revert useShallow refactor in #2701 (#2703)
-  - why (inferred by claude, 2026-07-11): WeakMap cache added to dodge a React-Compiler lint warning; reverted to direct ref mutation
-```
+At diff time:
 
-Annotations live in `annotations.jsonl` — sha-keyed (immutable, so they
-never go stale as facts), attributed, dated, last write per commit wins.
-They are **judgments layered on the record, never mixed into it**: the
-deterministic ledger stays untouched, the whys render with provenance and
-a disclaimer. Measured on the A/B benchmark: an agent whose logbook carried
-the whys stated real failure causes as design constraints at plan time
-(+2% read tokens), where the un-enriched agent planned an investigation —
-and, on zustand, guessed the cause wrong. One caution: annotations age as
-constraints even though they never invalidate as facts — a "broke webpack4"
-reason stops binding once webpack4 is dead, so the date is always shown.
-Commit the file for a shared team memory, or gitignore it for a private one.
-
-## The audit: archaeology becomes a to-do list
-
-`logbook audit` joins the ledger's dates with what is still true in HEAD:
-
-```
-  describe.skip  test/express.static.js:137  since 2019-05-02 (7.2y)
-
-  1 live suppression · oldest 7.2 years
+```bash
+logbook check --diff
+logbook check --diff --base origin/main --head HEAD
 ```
 
-That is express, today: its static-file test suite has been skipped for
-seven years. The ledger tells you when it happened; the audit tells you it
-is still happening. And when a suppression has been removed and RE-added,
-the audit shows the fight log: `re-silenced ×3 (+-++--+)` — a test someone
-keeps trying to fix, and keeps losing to.
+The range form reads trust state from the pinned base commit, so a PR cannot
+make its own newly added card authoritative. Local mode trusts the captured
+`HEAD`. Output is bounded to 20 rows / 8 KiB and provides an opaque `NEXT`
+cursor when more candidates remain. A page with `NEXT` exits nonzero because
+later cards have not been checked yet; only `END complete` can finish cleanly.
 
-## Context economics
+## Authority tiers
 
-In a random 400-repo sample of the top 2,500, the median LOGBOOK.md was
-**~1,000 estimated tokens**. The sample's median full `git log` was 82× that,
-and 34% exceeded a 150k-token estimate. This is potential context avoided only
-when a session would otherwise ingest raw history:
-[docs/context-economics.md](docs/context-economics.md).
+Logbook never converts model confidence into authority.
 
-## Does it actually change agent behavior?
+- **Draft** — local and inert. It cannot surface in `check --diff`.
+- **Policy-published lead** — machine-authored, grounded and admitted by a
+  repository-owned policy. It surfaces as a conspicuous lead, not as a human
+  decision.
+- **Human-reviewed decision** — the card bytes have a matching committed review
+  record. It is authoritative only within its explicit path scopes and trusted
+  Git boundary.
 
-On selected history-dense planning tasks, yes—with an important boundary. In a
-later screen of ten new, less history-selected tasks, the packaged Logbook arm
-did not beat strong raw-Git instructions (2/10 safe plans versus 3/10). Every
-known receipt was indexed, but none reached the agents through Logbook queries,
-identifying retrieval and consumption as the bottleneck. See the evidence-status
-note in [docs/wrong-work-benchmark.md](docs/wrong-work-benchmark.md). In the
-original A/B test, an agent asked to plan a `useShallow`
-refactor in zustand walked straight into re-attempting a refactor that was
-merged and reverted in 2024. The same agent with LOGBOOK.md in context
-started from the revert, inferred the repo's characteristic failure class
-from the do-not-retry list, and planned to pin the old failure with a test
-first. Full transcripts: [docs/does-it-change-agent-behavior.md](docs/does-it-change-agent-behavior.md).
+The same card ID stays the handle as a lead is accepted. A human can accept it
+unchanged, correct the claim while accepting, or reject it:
 
-In a six-task internal experiment across deliberately history-dense planning
-tasks, agents without supplied history proposed already-reverted or completed
-work in 4 of 6 tasks; agents supplied the full generated LOGBOOK.md did so in
-0 of 6, for about +4.7k tokens of context. This was planning-only, internally
-graded, and selected for historical landmines. Method and scope:
-[docs/wrong-work-benchmark.md](docs/wrong-work-benchmark.md).
+```bash
+logbook accept-lead <full-card-id> --by matthew
+logbook accept-lead <full-card-id> --by matthew --claim "corrected claim"
+logbook reject-lead <full-card-id> --by matthew
+git commit .logbook/ -m "logbook: review machine leads"
+```
+
+`logbook outcomes` reports the Git-observable funnel for machine leads: kept
+as-is, edited, pending, or vanished. It is not semantic claim precision and it
+refuses to report a clean result when the relevant history is unreadable.
+
+## Automatic publication
+
+Automatic mode is opt-in and publishes only lower-authority leads. It never
+creates a human-reviewed decision.
+
+Commit a strict policy to the trusted branch:
+
+```toml
+# .logbook/policy.toml
+enabled = true
+allowed_scopes = ["src/"]
+protected_paths = ["src/auth/", "src/security/"]
+max_cards_per_run = 10
+max_total_cards = 500
+```
+
+Then pass a bounded JSON array on stdin or with `--candidates`:
+
+```bash
+logbook publish --candidates candidates.json
+git add .logbook/leads/
+git commit -m "logbook: publish decision leads"
+```
+
+Publication requires a single Git worktree. Linked worktrees cannot share
+uncommitted plane counts safely, so the command fails closed in that topology;
+run automatic publication from a single-worktree checkout or CI clone. The
+trusted-ref reader also rejects a merged lead plane above `max_total_cards`.
+
+Each candidate contains `sha`, `claim`, `span`, `side`, `evidenceFile` when the
+side is `diff`, and `scopes`. Publication independently reloads the committed
+policy, checks source ancestry, mechanically grounds the quote against raw Git
+objects, enforces allowed/protected scopes and quotas, and honors
+`.logbook/AUTOMATION_DISABLED` as an immediate kill switch.
+
+Mechanical grounding proves only that the quote occurs in the named commit
+message, or was introduced/removed in the named changed file. It does **not** prove that the generated
+interpretation is correct, that the evidence caused the change, or that the
+decision still applies. That is why automatic cards remain leads until a human
+reviews them.
+
+## Trust model
+
+The trusted Git ref is the authority plane. In a team repository, use normal
+branch protection and code review for `.logbook/decisions/`,
+`.logbook/reviews/`, `.logbook/leads/`, and `.logbook/policy.toml`. `--by` is
+auditable attribution, not proof of identity. In an unprotected solo repo, the
+trust boundary is simply whoever can commit to that ref.
+
+At read time Logbook pins refs to immutable commits, validates canonical card
+and review bytes, checks path scopes and source ancestry, and re-grounds machine
+evidence. Missing or malformed trust data is *unmeasurable*, never silently
+reported as clean. Drafts cannot confer authority.
+
+This model protects against malformed repository input and accidental or
+unreviewed promotion. It does not make a hostile committer trustworthy; protect
+the branch that supplies authority.
+
+## Command reference
+
+```text
+logbook init [path]
+logbook [path]
+logbook journey [path]
+logbook audit [path]
+logbook doctor [path]
+logbook query [path] [filters]
+logbook context [path] [filters] [--cursor TOKEN]
+
+logbook annotate|annotate-draft SHA "WHY" [evidence options] [--by WHO]
+logbook pending [path]
+logbook refine [path] [--limit N]
+logbook accept|accept-draft CARDID --by WHO [--file P ...] [--dir P/]
+
+logbook publish [--candidates FILE]
+logbook accept-lead CARDID --by WHO [--claim "corrected text"]
+logbook reject-lead CARDID --by WHO
+logbook outcomes [path]
+logbook check --diff [--base SHA --head SHA] [--cursor TOKEN]
+                     [--metrics-out PATH]
+```
+
+`refine` is a deterministic worklist of unannotated notable history. It does
+not generate claims: the agent must inspect each commit and cite what it found.
+
+`--metrics-out` writes aggregate check counts only; it does not include repo
+names, paths, SHAs, prose, or authors, and nothing phones home.
+
+## History queries and context economics
+
+`context` preserves filtered `query` order but emits pages of at most 20 events
+and 8 KiB. Repeat identical filters with each `NEXT` cursor until `END
+complete`. A cursor is bound to the repository HEAD, filters, analysis window,
+and ordered event set.
+
+The history scan is cached in bounded windows. On a measured 20k-commit repo:
+43s cold, 0.4s with a prior run on disk, and 4ms on repeat calls in an MCP
+session. `LOGBOOK_NO_CACHE=1` forces a rebuild; `LOGBOOK_WINDOW=N` tunes the
+window.
+
+In a random 400-repo sample of the top 2,500 GitHub repositories, the median
+`LOGBOOK.md` was about 1,000 estimated tokens while the median full `git log`
+was 82× larger. See [context economics](docs/context-economics.md) and the
+[bounded context format](docs/context-format.md).
+
+## Evidence status
+
+Logbook's deterministic history inventory is useful, but reviewed decision
+cards remain an instrumented alpha. Existing experiments do not establish the
+prevalence of decision conflicts, durable business value, or how often teams
+will review cards. The Git-observable funnel begins measuring review behavior;
+prevalence and downstream task impact require longitudinal usage and fresh
+benchmarks.
+
+Likewise, this release is not a complete accepted-decision lifecycle manager.
+It supports drafting, initial promotion, machine-lead correction/rejection,
+and diff-time surfacing. It does not yet provide first-class CLI commands to
+revise or retire an already accepted decision. Do not hand-edit an accepted
+card and expect it to remain authoritative: its review binding will fail until
+a future reviewed lifecycle operation replaces it.
+
+Selected benchmark evidence and its limits are documented in
+[wrong-work-benchmark.md](docs/wrong-work-benchmark.md) and
+[does-it-change-agent-behavior.md](docs/does-it-change-agent-behavior.md).
 
 ## Honest scope
 
-- Findings are **leads, not verdicts**. A suppression commit means "a human
-  should look here," not misconduct. Large assertion removals are usually
-  feature deletions — they're tagged as such.
-- Detection is regex over commit subjects and diffs (lineage: a calibrated
-  classifier from a 1,800-PR study of agent-authored code). It will miss
-  clever evasions and flag some innocents. That's the right trade for a
-  zero-dependency tool that runs in seconds — and it's a deliberate division
-  of labor: the logbook is the cheap, deterministic recall layer; the agent
-  reading it is the precision layer that triages leads against the task.
-- It reads what survived. Squash and rebase erase in-branch attempts (a
-  tried-then-reverted change nets to zero in the squashed diff), and
-  uncommitted experiments were never visible at all. The logbook
-  complements an agent journaling during the work — `annotate` is the
-  bridge for exactly that — it does not replace it.
-- Shallow clones starve the analysis — the logbook will tell you to
-  `git fetch --unshallow`.
+- Findings are leads, not verdicts. A suppression means “look here,” not
+  misconduct.
+- Detection is deterministic regex over commit subjects and diffs. It misses
+  history erased by squash/rebase and anything never committed.
+- Shallow clones starve historical analysis; fetch the missing history before
+  treating absence as evidence.
+- Code maps explain where code is. Logbook focuses on what happened over time
+  and what a reviewed team decision says about a touched scope.
 
 ## The logbook records; the referee judges
 
-This tool is one half of a pair. The logbook tells you a test was skipped
-in March. [promptwheel](https://github.com/promptwheel-ai/promptwheel) — the
-referee — proves whether today's "win" came from the code or from editing the
-tests. Past tense and present tense of the same question: *did this actually
-improve?*
+Logbook tells you what history and reviewed decisions say. [promptwheel](https://github.com/promptwheel-ai/promptwheel)
+is the referee that judges whether today's claimed improvement came from the
+code rather than moving the goalposts.
 
 MIT.

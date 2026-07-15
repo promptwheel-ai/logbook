@@ -17,10 +17,11 @@ Cursor, and any MCP client).
   it compacts delivery but does not rank relevance. Cursors reject changed
   HEADs, filters, analysis windows, or event order instead of silently drifting.
   Pass `files` for a multi-path OR query; remaining filters stay AND constraints.
-- **logbook_annotate** — persist WHY a commit happened (lazy enrichment):
-  when the agent investigates a revert or suppression, the finding is kept —
-  sha-keyed, attributed, dated — and merged into future digests as
-  "why (inferred)" lines instead of being re-derived every session.
+- **logbook_annotate** — create a local, inert decision draft after an agent
+  investigates a revert or suppression. Its exact quote is verified against raw
+  Git objects and the tool returns the full card ID. It never grants authority:
+  a human must promote it with `logbook accept-draft CARD_ID --by WHO` and commit
+  the readable decision/review files.
 
 ## Setup
 

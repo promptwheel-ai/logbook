@@ -61,6 +61,7 @@ ledgers contained every sealed lineage item, but task-facing queries
 delivered none of them before agents fell back to raw git.
 
 The calibrated claim across all evidence: valuable on sufficiently
-difficult, history-dense tasks; not universally better; currently limited
-by the query/retrieval path, which is being redesigned and will be
-re-tested on a fresh held-out sample before any claim here is upgraded.
+difficult, history-dense tasks; not universally better. Retrieval now has
+bounded context pages plus a separate structurally ranked diff-time decision
+preflight, but that new path has not yet been re-tested on a fresh held-out
+sample. No behavioral claim here is upgraded until that test exists.

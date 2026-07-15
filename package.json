@@ -1,7 +1,7 @@
 {
   "name": "@promptwheel/logbook",
-  "version": "0.8.1",
-  "description": "Turn git history into memory an agent can use: hotspots, do-not-retry, suppression ledger — and your repo's story, told back to you.",
+  "version": "0.9.0",
+  "description": "Local Git-history memory and a reviewable temporal decision layer for coding agents.",
   "type": "module",
   "bin": {
     "logbook": "bin/logbook.mjs"
@@ -24,7 +24,9 @@
     "claude",
     "ai",
     "repo",
-    "archaeology"
+    "archaeology",
+    "decisions",
+    "provenance"
   ],
   "repository": {
     "type": "git",
