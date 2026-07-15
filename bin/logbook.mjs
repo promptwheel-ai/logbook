@@ -1691,7 +1691,11 @@ const OID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;                 // git object id:
 const CARD_KEYS = new Set(["schema", "cardId", "rev", "revHash", "sha", "sourceType",
   "claim", "side", "evidenceFile", "span", "by", "at", "supersedes"]);
 const MAX_CLAIM = 400, MAX_SPAN = 600, MAX_BY = 128, MAX_EVPATH = 400;
-const CTRL = /[\u0000-\u0008\u000a-\u001f\u007f]/; // controls incl newline; tab allowed
+// Reject C0 controls (except tab) + newline, DEL + C1 controls (incl U+0085
+// NEL), soft hyphen, zero-width / bidi marks, U+2028/U+2029 line & paragraph
+// separators, word joiner, and BOM. Reused (globally) by the legacy cleaner.
+const CTRL_SRC = "\\u0000-\\u0008\\u000a-\\u001f\\u007f-\\u009f\\u00ad\\u200b-\\u200f\\u2028-\\u202e\\u2060\\ufeff";
+const CTRL = new RegExp("[" + CTRL_SRC + "]");
 
 function okText(v, max) {
   return typeof v === "string" && !CTRL.test(v) && v.trim().length > 0 && v.length <= max;
@@ -1779,11 +1783,15 @@ function changedLineTextOf(repo, sha, file) {
   const r = spawnSync("git", ["-C", repo, "show", "--no-color", "--format=", "--find-renames", sha], { encoding: "utf8", maxBuffer: 1 << 30 });
   if (r.status !== 0) return null;
   const out = [];
-  let inTarget = false, inHunk = false;
+  let inTarget = false, inHunk = false, aMatch = false, bMatch = false;
   for (const l of r.stdout.split("\n")) {
-    if (l.startsWith("diff --git ")) { inTarget = false; inHunk = false; continue; }
-    if (!inHunk && l.startsWith("+++ ")) { inTarget = l.slice(4) === "b/" + file; continue; }
-    if (!inHunk && l.startsWith("--- ")) continue;
+    if (l.startsWith("diff --git ")) { inTarget = false; inHunk = false; aMatch = false; bMatch = false; continue; }
+    // A section is the target if EITHER side names the file: `+++ b/file` (added
+    // / modified) OR `--- a/file` (deleted — its `+++` is /dev/null). Markers are
+    // recognized only OUTSIDE a hunk, so a +/- content line starting with ---/+++
+    // is never mistaken for a header.
+    if (!inHunk && l.startsWith("--- ")) { aMatch = l.slice(4) === "a/" + file; inTarget = aMatch || bMatch; continue; }
+    if (!inHunk && l.startsWith("+++ ")) { bMatch = l.slice(4) === "b/" + file; inTarget = aMatch || bMatch; continue; }
     if (l.startsWith("@@")) { inHunk = true; continue; }
     if (inHunk && inTarget && (l[0] === "+" || l[0] === "-")) out.push(l.slice(1));
   }
@@ -1842,7 +1850,7 @@ export function parseCards(text) {
     if (!line.trim()) continue;
     let c; try { c = JSON.parse(line); } catch { malformed = true; continue; }
     if (!validCardRecord(c)) { malformed = true; continue; }
-    if (line.trim() !== canonicalCardLine(c)) { malformed = true; continue; } // non-canonical bytes (dup keys / reorder)
+    if (line !== canonicalCardLine(c)) { malformed = true; continue; } // exact bytes: dup keys / reorder / surrounding ws rejected
     records.push(c);
   }
   return { records, malformed };
@@ -1885,14 +1893,10 @@ function readPrivateText(path) {
 }
 function cardsPath(dir) { return join(realpathSync(dir), "decision-cards.jsonl"); }
 
-export function loadCardRecords(dir) {
-  const t = readPrivateText(cardsPath(dir));
-  return t == null ? [] : parseCards(t).records;
-}
-
 // Read-path API: current revision per card + a single malformed signal (parse
 // OR broken lineage). Stage 2 surfaces (check/pending) treat malformed as
-// unmeasurable, never as "no cards / clean".
+// unmeasurable, never as "no cards / clean". This is the ONLY card loader — there
+// is no fail-open variant that returns surviving records past corruption.
 export function loadCards(dir) {
   const t = readPrivateText(cardsPath(dir));
   if (t == null) return { current: new Map(), malformed: false, records: [] };
@@ -1901,12 +1905,26 @@ export function loadCards(dir) {
   return { current: folded.current, malformed: malformed || folded.malformed, records };
 }
 
-// Fail closed: never append against a corrupt journal (would trust surviving
-// records after tampering). Returns {error} if malformed.
-function appendCardRevision(dir, rec) {
-  const state = loadCards(dir);
-  if (state.malformed) return { error: "decision-cards.jsonl is malformed — refusing to append (fix or remove corrupt lines first)" };
-  return { state };
+// Serialize load -> validate -> append so two processes cannot each read the
+// same current revision and append competing revisions (a fork that would brick
+// the journal). Advisory O_EXCL lock file, stale-stealable; the read happens
+// INSIDE the lock, so every writer chains onto the freshest revision. Returns
+// fn()'s result, or {error} if the lock cannot be acquired within the budget.
+function withCardLock(dir, fn) {
+  const lock = cardsPath(dir) + ".lock";
+  const deadline = Date.now() + 5000;
+  let held = false;
+  while (!held) {
+    try { closeSync(openSync(lock, FS.O_CREAT | FS.O_EXCL | FS.O_WRONLY | FS.O_NOFOLLOW, 0o600)); held = true; }
+    catch (e) {
+      if (e.code !== "EEXIST") throw e;
+      try { const st = lstatSync(lock); if (Date.now() - st.mtimeMs > 10000) { unlinkSync(lock); continue; } }
+      catch { continue; }                                                  // lock vanished — retry immediately
+      if (Date.now() > deadline) return { error: "decision-cards.jsonl is locked by another process — retry" };
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);   // 20ms backoff
+    }
+  }
+  try { return fn(); } finally { try { unlinkSync(lock); } catch { /* already released */ } }
 }
 
 // Write a NEW machine_source card (rev 1), grounded in the exact changed-line
@@ -1929,42 +1947,53 @@ export function saveMachineCard(repo, dir, { sha, claim, span, side, path, evide
     sourceType: "machine_source", claim: cl.value, side: sd, evidenceFile: ev, span: sp.value,
     by: au.value, at: today(), supersedes: null };
   rec.cardId = cardIdFor(rec); rec.revHash = revHashFor(rec);
-  const guard = appendCardRevision(dir, rec); if (guard.error) return guard;
-  const sameId = guard.state.records.filter((c) => c.cardId === rec.cardId);
-  if (sameId.length) return { card: guard.state.current.get(rec.cardId) || sameId[0], idempotent: true };
-  appendPrivateLine(cardsPath(dir), canonicalCardLine(rec) + "\n");
-  return { card: rec };
+  return withCardLock(dir, () => {
+    const state = loadCards(dir);
+    if (state.malformed) return { error: "decision-cards.jsonl is malformed — refusing to append (fix or remove corrupt lines first)" };
+    const sameId = state.records.filter((c) => c.cardId === rec.cardId);
+    if (sameId.length) return { card: state.current.get(rec.cardId) || sameId[0], idempotent: true }; // byte-identical origin only
+    appendPrivateLine(cardsPath(dir), canonicalCardLine(rec) + "\n");
+    return { card: rec };
+  });
 }
 
 // Human edit -> new revision (N+1) superseding the current one. human_attestation
 // carries off-git context with NO span; machine_source re-grounds a real span.
-// Never sidecar metadata — always a revision. No-op edits collapse.
-export function editCard(repo, dir, { cardId, claim, span, side, path, evidenceFile, by, sourceType }) {
-  const guard = appendCardRevision(dir, {}); if (guard.error) return guard;
-  const current = guard.state.current.get(cardId);
-  if (!current) return { error: `no card ${String(cardId).slice(0, 12)} with a valid revision chain to edit` };
-  const st = sourceType || "human_attestation";
-  if (st !== "human_attestation" && st !== "machine_source") return { error: "an edit is human_attestation or machine_source" };
+// Never sidecar metadata — always a revision. No-op edits collapse. Optional
+// expectedRevHash gives optimistic concurrency: a divergent concurrent edit is
+// rejected (not forked); the read-inside-lock means a plain edit just chains.
+export function editCard(repo, dir, { cardId, claim, span, side, path, evidenceFile, by, sourceType, expectedRevHash }) {
   const cl = normText(claim, MAX_CLAIM); if (cl.error) return { error: `claim ${cl.error}` };
   const au = normText(by || "human", MAX_BY); if (au.error) return { error: `author ${au.error}` };
-  let sd = null, ev = null, spVal = null;
-  if (st === "machine_source") {
-    sd = side || current.side || "diff";
-    if (sd !== "message" && sd !== "diff") return { error: "--side must be message | diff" };
-    if (sd === "diff") { const ep = normEvPath(evidenceFile ?? path ?? current.evidenceFile); if (ep.error) return { error: `--file ${ep.error}` }; ev = ep.value; }
-    const sp = normText(span != null ? span : current.span, MAX_SPAN); if (sp.error) return { error: `--span ${sp.error}` }; spVal = sp.value;
-    if (!spanGroundedStrict(repo, current.sha, spVal, sd, ev))
-      return { error: `re-grounded --span is not verbatim changed-line evidence at ${current.sha.slice(0, 12)}` };
-  }
-  if (st === current.sourceType && cl.value === current.claim && (spVal || "") === (current.span || "") &&
-      (sd || "") === (current.side || "") && (ev || "") === (current.evidenceFile || ""))
-    return { card: current, idempotent: true };
-  const rec = { schema: CARD_SCHEMA, cardId, rev: current.rev + 1, revHash: "", sha: current.sha,
-    sourceType: st, claim: cl.value, side: sd, evidenceFile: ev, span: spVal, by: au.value,
-    at: today(), supersedes: current.revHash };
-  rec.revHash = revHashFor(rec);
-  appendPrivateLine(cardsPath(dir), canonicalCardLine(rec) + "\n");
-  return { card: rec };
+  const st = sourceType || "human_attestation";
+  if (st !== "human_attestation" && st !== "machine_source") return { error: "an edit is human_attestation or machine_source" };
+  return withCardLock(dir, () => {
+    const state = loadCards(dir);
+    if (state.malformed) return { error: "decision-cards.jsonl is malformed — refusing to append (fix or remove corrupt lines first)" };
+    const current = state.current.get(cardId);
+    if (!current) return { error: `no card ${String(cardId).slice(0, 12)} with a valid revision chain to edit` };
+    let sd = null, ev = null, spVal = null;
+    if (st === "machine_source") {
+      sd = side || current.side || "diff";
+      if (sd !== "message" && sd !== "diff") return { error: "--side must be message | diff" };
+      if (sd === "diff") { const ep = normEvPath(evidenceFile ?? path ?? current.evidenceFile); if (ep.error) return { error: `--file ${ep.error}` }; ev = ep.value; }
+      const sp = normText(span != null ? span : current.span, MAX_SPAN); if (sp.error) return { error: `--span ${sp.error}` }; spVal = sp.value;
+      if (!spanGroundedStrict(repo, current.sha, spVal, sd, ev))
+        return { error: `re-grounded --span is not verbatim changed-line evidence at ${current.sha.slice(0, 12)}` };
+    }
+    // byte-identical retry collapses (idempotent) regardless of expectedRevHash
+    if (st === current.sourceType && cl.value === current.claim && (spVal || "") === (current.span || "") &&
+        (sd || "") === (current.side || "") && (ev || "") === (current.evidenceFile || ""))
+      return { card: current, idempotent: true };
+    if (expectedRevHash && current.revHash !== expectedRevHash)
+      return { error: `card was edited concurrently (current ${current.revHash.slice(0, 12)} ≠ expected ${String(expectedRevHash).slice(0, 12)}) — re-read and retry` };
+    const rec = { schema: CARD_SCHEMA, cardId, rev: current.rev + 1, revHash: "", sha: current.sha,
+      sourceType: st, claim: cl.value, side: sd, evidenceFile: ev, span: spVal, by: au.value,
+      at: today(), supersedes: current.revHash };
+    rec.revHash = revHashFor(rec);
+    appendPrivateLine(cardsPath(dir), canonicalCardLine(rec) + "\n");
+    return { card: rec };
+  });
 }
 
 // ---- Legacy dual-read migration (defined + tested before Stage 2 rewiring) --
@@ -1981,7 +2010,7 @@ export function projectLegacyAnnotation(ann) {
   // GLOBAL collapse — a non-global regex would leave a 2nd control char behind,
   // so an annotation with CRLF or multiple controls would silently drop out of
   // the migration instead of round-tripping.
-  const clean = (v, max) => String(v ?? "").replace(/[\u0000-\u0008\u000a-\u001f\u007f]/g, " ").slice(0, max).trim();
+  const clean = (v, max) => String(v ?? "").replace(new RegExp("[" + CTRL_SRC + "]", "g"), " ").slice(0, max).trim();
   const claim = clean(ann.why, MAX_CLAIM);
   if (!claim) return null;
   const spanRaw = clean(ann.span, MAX_SPAN);
@@ -2000,17 +2029,22 @@ export function projectLegacy(annotations, legacyAcceptances) {
   // acceptance layer uses — so a re-annotated sha (its pinned hash no longer
   // maps to any current annotation) invalidates a stale acceptance instead of
   // letting it drift onto edited prose the human never saw.
-  const cards = [], byHash = new Map();
+  const cards = [], byHash = new Map(), seen = new Set();
   for (const ann of annotations || []) {
     const rec = projectLegacyAnnotation(ann);
-    if (rec) { cards.push(rec); byHash.set(canonicalAnnotationHash(ann), rec); }
+    if (!rec) continue;
+    if (!seen.has(rec.cardId)) { cards.push(rec); seen.add(rec.cardId); } // dedup identical roots (no fork)
+    byHash.set(canonicalAnnotationHash(ann), rec);                        // identical dupes map to the same card
   }
   const cardReviews = [];
   for (const acc of legacyAcceptances || []) {
-    const rec = acc && typeof acc.annotationSha256 === "string" ? byHash.get(acc.annotationSha256) : null;
-    if (!rec) continue; // stale / edited / unknown acceptance — drop, never fabricate (anti-drift)
+    if (!acc || typeof acc.annotationSha256 !== "string" || !HASH64.test(acc.annotationSha256)) continue; // strict review shape
+    if (typeof acc.sha !== "string" || !OID.test(acc.sha)) continue;
+    const rec = byHash.get(acc.annotationSha256);
+    if (!rec || rec.sha !== acc.sha) continue; // no annotation match, OR the acceptance sha ≠ the annotation's commit (cross-commit retarget) — drop, never fabricate
     cardReviews.push({ type: acc.type || "acceptance", cardId: rec.cardId, revHash: rec.revHash,
-      applicability: acc.applicability || "active", scopes: [...(acc.paths || [])].sort(),
+      applicability: ["active", "uncertain", "retired"].includes(acc.applicability) ? acc.applicability : "active",
+      scopes: [...(acc.paths || [])].sort(),
       by: acc.acceptedBy || acc.by || "unknown", at: acc.acceptedAt || acc.at || rec.at,
       legacy: true, amendment: acc.amendment });
   }

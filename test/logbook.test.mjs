@@ -23,7 +23,7 @@ import {
   parseReviews, foldRatifications, verificationSummary, collectChangedPaths, parseAnnotations,
   saveRejection, saveVerification, spanGrounded, reviewKey,
   appendPrivateLine, renderLeads, writeCheckMetrics, pendingDrafts,
-  saveMachineCard, editCard, loadCardRecords, foldCards, cardIdFor, revHashFor,
+  saveMachineCard, editCard, foldCards, cardIdFor, revHashFor,
   parseCards, spanGroundedStrict, loadCards, validCardRecord,
   projectLegacyAnnotation, projectLegacy, CARD_SCHEMA, canonicalCardLine,
 } from "../bin/logbook.mjs";
@@ -2279,7 +2279,7 @@ test("machine card: identical re-draft is idempotent (no duplicate journal line)
   const first = saveMachineCard(r, r, { sha, claim: "x", span: "v2", side: "diff", path: "src/cache.ts", by: "codex" });
   const second = saveMachineCard(r, r, { sha, claim: "x", span: "v2", side: "diff", path: "src/cache.ts", by: "codex" });
   assert.ok(second.idempotent);
-  assert.equal(loadCardRecords(r).length, 1);
+  assert.equal(loadCards(r).records.length, 1);
   assert.equal(first.card.cardId, second.card.cardId);
   rmSync(r, { recursive: true, force: true });
 });
@@ -2289,7 +2289,7 @@ test("multiple cards may reference one commit (distinct claims => distinct cardI
   const a = saveMachineCard(r, r, { sha, claim: "reason one", span: "v2", side: "diff", path: "src/cache.ts", by: "codex" });
   const b = saveMachineCard(r, r, { sha, claim: "reason two", span: "remove sync.Pool", side: "message", by: "codex" });
   assert.notEqual(a.card.cardId, b.card.cardId);
-  assert.equal(foldCards(loadCardRecords(r)).current.size, 2);
+  assert.equal(loadCards(r).current.size, 2);
   rmSync(r, { recursive: true, force: true });
 });
 
@@ -2302,7 +2302,7 @@ test("human edit creates revision N+1 (human_attestation, no span) superseding t
   assert.equal(e.card.sourceType, "human_attestation");
   assert.equal(e.card.span, null); // off-git context needs no span
   assert.equal(e.card.supersedes, m.card.revHash);
-  const cur = foldCards(loadCardRecords(r)).current.get(m.card.cardId);
+  const cur = loadCards(r).current.get(m.card.cardId);
   assert.equal(cur.rev, 2); // latest revision wins
   rmSync(r, { recursive: true, force: true });
 });
@@ -2408,7 +2408,6 @@ test("adversarial: a symlinked decision-cards.jsonl is refused on read (O_NOFOLL
   writeFileSync(join(d, "outside.jsonl"), "{}\n");
   symlinkSync(join(d, "outside.jsonl"), join(d, "decision-cards.jsonl"));
   assert.throws(() => loadCards(d));
-  assert.throws(() => loadCardRecords(d));
   rmSync(d, { recursive: true, force: true });
 });
 
@@ -2577,5 +2576,77 @@ test("audit: legacy clean() collapses ALL control chars (CRLF / multi-control wh
   assert.ok(!/[\u0000-\u0008\u000a-\u001f\u007f]/.test(rec.claim)); // fully cleaned
   const acc = [{ type: "acceptance", sha, annotationSha256: canonicalAnnotationHash({ sha, why: "fix\r\nmore\rstuff", by: "gpt", date: "2024-03-01" }), paths: ["src/cache.ts"], acceptedBy: "a", acceptedAt: "2024-03-02" }];
   assert.equal(projectLegacy([{ sha, why: "fix\r\nmore\rstuff", by: "gpt", date: "2024-03-01" }], acc).cardReviews.length, 1);
+  rmSync(r, { recursive: true, force: true });
+});
+
+// ---------- Stage 1 hardening round 3: concurrency + migration + grounding ----
+test("audit: concurrent edits serialize under a lock — journal never forks/bricks", async () => {
+  const { r, sha } = mkAcceptRepo();
+  const m = saveMachineCard(r, r, { sha, claim: "base", span: "v2", side: "diff", path: "src/cache.ts", by: "codex" });
+  const worker = join(r, "edit-worker.mjs");
+  writeFileSync(worker,
+    `import { editCard } from ${JSON.stringify(CLI)};\n` +
+    `const [,, dir, cardId, i] = process.argv;\n` +
+    `editCard(dir, dir, { cardId, claim: "edit-" + i, by: "p" + i });\n`);
+  const N = 24;
+  await Promise.all(Array.from({ length: N }, (_, i) => new Promise((res) => {
+    spawn(process.execPath, [worker, r, m.card.cardId, String(i)], { stdio: "ignore" }).on("exit", () => res());
+  })));
+  const st = loadCards(r);
+  assert.equal(st.malformed, false, "concurrent edits bricked the journal");
+  assert.ok(st.current.has(m.card.cardId), "card no longer resolvable after concurrent edits");
+  assert.ok(st.current.get(m.card.cardId).rev > 1, "edits did not actually land/chain (all lock-timed-out?)");
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("audit: legacy migration refuses a cross-commit acceptance (acc.sha must equal the annotation's commit)", () => {
+  const { r, sha } = mkAcceptRepo();
+  const annA = { sha, why: "decision on commit A", by: "gpt", date: "2024-01-01" };
+  const cross = [{ type: "acceptance", sha: "b".repeat(40), annotationSha256: canonicalAnnotationHash(annA), paths: ["x"], acceptedBy: "a", acceptedAt: "2024-01-02" }];
+  assert.equal(projectLegacy([annA], cross).cardReviews.length, 0);
+  const good = [{ type: "acceptance", sha, annotationSha256: canonicalAnnotationHash(annA), paths: ["x"], acceptedBy: "a", acceptedAt: "2024-01-02" }];
+  assert.equal(projectLegacy([annA], good).cardReviews.length, 1);
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("audit: identical legacy annotations dedup to one card (no duplicate rev-1 root)", () => {
+  const { r, sha } = mkAcceptRepo();
+  const ann = { sha, why: "same decision twice", by: "gpt", date: "2024-01-01" };
+  const { cards } = projectLegacy([ann, { ...ann }], []);
+  assert.equal(cards.length, 1);
+  const p = join(r, "decision-cards.jsonl");
+  writeFileSync(p, cards.map((c) => canonicalCardLine(c)).join("\n") + "\n");
+  assert.equal(loadCards(r).malformed, false); // would be a fork (malformed) before dedup
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("audit: a span from a DELETED file's removed lines grounds (--- a/file side)", () => {
+  const d = mkdtempSync(join(tmpdir(), "logbook-del-"));
+  const env = { GIT_AUTHOR_NAME: "T", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "T", GIT_COMMITTER_EMAIL: "t@t" };
+  const g = (...a) => execFileSync("git", ["-C", d, ...a], { env, encoding: "utf8" });
+  g("init", "-q"); mkdirSync(join(d, "src"));
+  writeFileSync(join(d, "src", "gone.ts"), "export const OLD_SECRET = 7;\n"); g("add", "-A"); g("commit", "-qm", "add gone");
+  rmSync(join(d, "src", "gone.ts")); g("add", "-A"); g("commit", "-qm", "delete gone.ts");
+  const delSha = g("rev-parse", "HEAD").trim();
+  assert.equal(spanGroundedStrict(d, delSha, "export const OLD_SECRET = 7;", "diff", "src/gone.ts"), true);
+  assert.ok(saveMachineCard(d, d, { sha: delSha, claim: "removed the secret", span: "export const OLD_SECRET = 7;", side: "diff", path: "src/gone.ts", by: "x" }).card);
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("audit: Unicode controls (U+0085 NEL, U+2028/9 separators, zero-width, BOM) are rejected in card fields", () => {
+  const { r, sha } = mkAcceptRepo();
+  for (const cp of [0x85, 0x2028, 0x2029, 0x200b, 0xfeff]) {
+    const ch = String.fromCharCode(cp);
+    assert.ok(saveMachineCard(r, r, { sha, claim: "clean" + ch + "spoof", span: "v2", side: "diff", path: "src/cache.ts", by: "x" }).error, "accepted U+" + cp.toString(16));
+  }
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("audit: a card line with surrounding whitespace is rejected (exact-canonical bytes, no trim)", () => {
+  const { r, sha } = mkAcceptRepo();
+  const canon = canonicalCardLine(projectLegacyAnnotation({ sha, why: "real claim", by: "x", date: "2024-01-01" }));
+  assert.equal(parseCards(canon).records.length, 1);
+  assert.equal(parseCards("  " + canon).malformed, true);
+  assert.equal(parseCards(canon + "  ").malformed, true);
   rmSync(r, { recursive: true, force: true });
 });
