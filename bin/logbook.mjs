@@ -15,6 +15,20 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash, timingSafeEqual } from "node:crypto";
+import { devNull } from "node:os";
+// Every TRUST-PATH git call must read RAW objects: --no-replace-objects (ignore
+// replace refs) + GIT_GRAFT_FILE=<null> (ignore grafts) + GIT_NO_LAZY_FETCH. So a
+// locally-planted replace ref / graft cannot rewrite the policy, cards, or the
+// ancestry the grounding plane already reads raw.
+const RAW_GIT_ENV = { GIT_NO_LAZY_FETCH: "1", GIT_GRAFT_FILE: devNull };
+function gitRaw(repo, args) {
+  const r = spawnSync("git", ["-C", repo, "--no-replace-objects", ...args], { encoding: "utf8", maxBuffer: 1 << 30, env: { ...process.env, ...RAW_GIT_ENV } });
+  if (r.status !== 0) throw new Error((r.stderr || "").trim() || `git ${args[0]} failed`);
+  return r.stdout;
+}
+function rawGitStatus(repo, args) { // raw, no-throw; returns {status, stdout}
+  return spawnSync("git", ["-C", repo, "--no-replace-objects", ...args], { encoding: "utf8", maxBuffer: 1 << 30, env: { ...process.env, ...RAW_GIT_ENV } });
+}
 import {
   writeFileSync, existsSync, realpathSync, readFileSync, mkdirSync, lstatSync, readdirSync,
   renameSync, unlinkSync, chmodSync, openSync, fstatSync, writeSync, closeSync,
@@ -1786,7 +1800,7 @@ const CARRY_BUDGET_BYTES = 64 << 20; // aggregate cap for the carry scan; exceed
 // missing blob over the network — it must fail, i.e. be treated as unmeasurable).
 function gitBuf(repo, args, opts = {}) {
   return spawnSync("git", ["-C", repo, "--no-replace-objects", ...args],
-    { maxBuffer: MAX_GROUND_BYTES + (1 << 20), env: { ...process.env, GIT_NO_LAZY_FETCH: "1" }, ...opts }); // Buffer stdout (no encoding)
+    { maxBuffer: MAX_GROUND_BYTES + (1 << 20), env: { ...process.env, ...RAW_GIT_ENV }, ...opts }); // Buffer stdout (no encoding)
 }
 function gitObj(repo, args, opts = {}) { return gitBuf(repo, args, { encoding: "utf8", ...opts }); }
 // Raw commit object as bytes. Enforces the commit-header GRAMMAR (what git fsck
@@ -2025,11 +2039,11 @@ export const LEAD_PLANE = "leads";           // policy-published (machine)
 function readPlane(repo, ref, plane) {
   const out = { cards: [], malformed: [] };
   let ls;
-  try { ls = git(repo, ["ls-tree", "-r", "--name-only", "-z", ref, "--", `.logbook/${plane}/`]); }
+  try { ls = gitRaw(repo, ["ls-tree", "-r", "--name-only", "-z", ref, "--", `.logbook/${plane}/`]); }
   catch { return out; }                                                    // plane absent at ref => empty
   for (const path of ls.split("\0").filter(Boolean)) {
     if (!path.endsWith(".json")) continue;
-    let text; try { text = git(repo, ["show", `${ref}:${path}`]); } catch { out.malformed.push(path); continue; }
+    let text; try { text = gitRaw(repo, ["show", `${ref}:${path}`]); } catch { out.malformed.push(path); continue; }
     const card = parseDecisionCard(text);
     if (!card || basename(path) !== card.cardId + ".json") { out.malformed.push(path); continue; } // filename==id anchor
     out.cards.push({ path, card });
@@ -2167,13 +2181,13 @@ export function parsePolicy(text) {
 // protected `src/auth/` subtree, and vice-versa).
 function scopesOverlap(a, b) { return scopeMatches(a, b) || scopeMatches(b, a); }
 function resolveTrustCommit(repo, ref) {
-  const r = spawnSync("git", ["-C", repo, "--no-replace-objects", "rev-parse", "--verify", "--quiet", `${ref}^{commit}`], { encoding: "utf8" });
+  const r = rawGitStatus(repo, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
   const oid = (r.stdout || "").trim();
   return r.status === 0 && OID.test(oid) ? oid : null;
 }
 // Load + fully validate the COMMITTED policy at an immutable commit.
 function loadTrustedPolicy(repo, commit) {
-  let text; try { text = git(repo, ["show", `${commit}:.logbook/policy.toml`]); }
+  let text; try { text = gitRaw(repo, ["show", `${commit}:.logbook/policy.toml`]); }
   catch { return { error: `no committed .logbook/policy.toml at ${commit.slice(0, 12)} — autonomous mode is opt-in` }; }
   const parsed = parsePolicy(text);
   if (parsed.error) return { error: `policy.toml: ${parsed.error}` };
@@ -2187,7 +2201,7 @@ function loadTrustedPolicy(repo, commit) {
 // re-enable), OR any local entry exists at the path (lstat — a dangling symlink
 // counts). Rechecked immediately before every install.
 function killSwitchEngaged(repo, commit) {
-  const c = spawnSync("git", ["-C", repo, "--no-replace-objects", "cat-file", "-e", `${commit}:.logbook/AUTOMATION_DISABLED`], { encoding: "utf8" });
+  const c = rawGitStatus(repo, ["cat-file", "-e", `${commit}:.logbook/AUTOMATION_DISABLED`]);
   if (c.status === 0) return "committed";
   try { lstatSync(join(realpathSync(repo), ".logbook", "AUTOMATION_DISABLED")); return "local"; }
   catch (e) { if (e.code !== "ENOENT") return "local"; }
@@ -2196,7 +2210,7 @@ function killSwitchEngaged(repo, commit) {
 function isAncestor(repo, sha, ref) {
   let full = sha;
   if (typeof sha !== "string" || !OID.test(sha)) { const rp = resolveTrustCommit(repo, sha); if (!rp) return false; full = rp; }
-  const r = spawnSync("git", ["-C", repo, "--no-replace-objects", "merge-base", "--is-ancestor", full, ref], { encoding: "utf8" });
+  const r = rawGitStatus(repo, ["merge-base", "--is-ancestor", full, ref]);
   return r.status === 0;
 }
 // Scope + evidence authorization against a validated policy (pure — no writes).
@@ -2254,7 +2268,7 @@ function installCard(dir, cardId, content) {
 }
 // Non-stealable publication lock in git's COMMON dir (not the hostile .logbook).
 function withPublishLock(repo, fn) {
-  let common; try { common = git(repo, ["rev-parse", "--git-common-dir"]).trim(); } catch { return { error: "not a git repository" }; }
+  let common; try { common = gitRaw(repo, ["rev-parse", "--git-common-dir"]).trim(); } catch { return { error: "not a git repository" }; }
   const lockDir = join(isAbsolute(common) ? common : join(realpathSync(repo), common), "logbook-publish.lock");
   const start = process.hrtime.bigint(), budget = 5_000_000_000n;
   for (;;) {
@@ -2268,7 +2282,7 @@ function withPublishLock(repo, fn) {
   try { return fn(); } finally { try { rmdirSync(lockDir); } catch { /* released */ } }
 }
 function planeIdsAtRef(repo, commit, plane) {
-  let out; try { out = git(repo, ["ls-tree", "-r", "--name-only", "-z", commit, "--", `.logbook/${plane}/`]); } catch { return new Set(); }
+  let out; try { out = gitRaw(repo, ["ls-tree", "-r", "--name-only", "-z", commit, "--", `.logbook/${plane}/`]); } catch { return new Set(); }
   const ids = new Set();
   for (const p of out.split("\0").filter(Boolean)) { const b = basename(p); if (b.endsWith(".json")) ids.add(b.slice(0, -5)); }
   return ids;
@@ -2741,7 +2755,7 @@ export function collectChangedPaths(repo, { base, head }) {
   const paths = new Set();
   if (base && head) {
     let out;
-    try { out = git(repo, ["diff", "--name-status", "-z", `${base}...${head}`]); }
+    try { out = gitRaw(repo, ["diff", "--name-status", "-z", `${base}...${head}`]); }
     catch (e) { return { error: `invalid range ${base}...${head}: ${e.message}` }; }
     const parts = out.split("\0");
     for (let i = 0; i < parts.length;) {

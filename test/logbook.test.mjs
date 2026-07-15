@@ -3292,3 +3292,38 @@ test("gate16: an unmeasurable candidate (merge commit) makes the run incomplete/
   assert.equal(r.unmeasurable, 1); assert.equal(r.incomplete, true); assert.equal(r.published, 0);
   rmSync(d, { recursive: true, force: true });
 });
+
+// ---------- git-files trust-path RAW consistency (replace refs / grafts) ------
+test("gate-raw1: a replace ref swapping a disabled policy for an enabled one does NOT enable publication", () => {
+  const { d, g, sha } = poolRepo("graw1-");
+  mkdirSync(join(d, ".logbook"), { recursive: true });
+  writeFileSync(join(d, ".logbook", "policy.toml"), 'enabled = false\nallowed_scopes = ["src/"]\nmax_cards_per_run = 5\nmax_total_cards = 50\n');
+  g("add", "-A"); g("commit", "-qm", "REAL disabled policy");
+  const realCommit = g("rev-parse", "HEAD").trim();
+  writeFileSync(join(d, ".logbook", "policy.toml"), 'enabled = true\nallowed_scopes = ["src/"]\nmax_cards_per_run = 5\nmax_total_cards = 50\n');
+  g("add", "-A"); g("commit", "-qm", "FAKE enabled policy");
+  const fakeCommit = g("rev-parse", "HEAD").trim();
+  g("replace", realCommit, fakeCommit);          // reads of realCommit now yield the ENABLED tree
+  g("reset", "--hard", realCommit);
+  const r = publishPolicyLeads(d, [goodCand(sha)], { trustRef: realCommit });
+  assert.ok(r.error && /enabled|opt-in/.test(r.error));  // raw read sees the REAL disabled policy
+  assert.equal(r.published, 0);
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("gate-raw2: a graft cannot make a non-ancestral source pass the ancestry check (publish + read)", () => {
+  const { d, g, sha } = poolRepo("graw2-");
+  mkdirSync(join(d, ".logbook"), { recursive: true });
+  writeFileSync(join(d, ".logbook", "policy.toml"), GOOD_TOML); g("add", "-A"); g("commit", "-qm", "policy");
+  const main = g("branch", "--show-current").trim();
+  const head = g("rev-parse", "HEAD").trim();
+  const realParent = g("rev-parse", "HEAD~1").trim();
+  g("checkout", "-q", "-b", "side"); writeFileSync(join(d, "src", "db.js"), "sideCreatePool()\n"); g("add", "-A"); g("commit", "-qm", "side");
+  const sideSha = g("rev-parse", "HEAD").trim(); g("checkout", "-q", main);
+  mkdirSync(join(d, ".git", "info"), { recursive: true });
+  writeFileSync(join(d, ".git", "info", "grafts"), `${head} ${realParent} ${sideSha}\n`); // fake sideSha as a parent of head
+  const r = publishPolicyLeads(d, [{ sha: sideSha, claim: "side", span: "sideCreatePool", side: "diff", evidenceFile: "src/db.js", scopes: ["src/db.js"] }], { trustRef: head });
+  assert.ok(r.skipped.some((s) => s.reason === "non-ancestral"));         // graft ignored -> still non-ancestral
+  assert.equal(r.published, 0);
+  rmSync(d, { recursive: true, force: true });
+});
