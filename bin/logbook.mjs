@@ -2199,6 +2199,7 @@ export function checkDecisions(repo, { base, head } = {}) {
       const gs = machine ? groundStatus(repo, card.sha, card.span, card.side, card.evidenceFile) : "grounded";
       if (machine && gs !== "grounded") reasons.push(`evidence ${gs}`);
       if (tier === "policy-published") {
+        if (!machine) reasons.push("policy lead is not machine-source"); // a leads/ card must be a machine lead, never an ungrounded human/legacy card
         if (curPolicy.error) reasons.push("policy absent/disabled");
         else {
           const az = authorizeScopesEvidence(card, curPolicy.policy);
@@ -2241,110 +2242,130 @@ export function renderDecisionLeads(res) {
   return parts.join("");
 }
 
-// ---- Claim-precision funnel: review machine leads + measure precision --------
-// A human dispositions a policy-published LEAD: accept (promote leads/<id> ->
-// decisions/<id>, same cardId handle; unchanged bytes = accepted-as-is, edited claim =
-// edited) or reject (remove the lead). The change is staged for the human to COMMIT;
-// the git history of the two planes is what computePrecision reads — no side log.
-export function acceptLead(repo, cardId, { editClaim } = {}) {
+// ---- Review-outcomes funnel: disposition machine leads + measure REVIEW OUTCOMES ----
+// A human dispositions a policy-published (machine) LEAD: accept (promote leads/<id> ->
+// decisions/<id>; unchanged CLAIM = accepted-as-is, changed claim = edited) or reject
+// (remove the lead). Safety: only a MACHINE lead, whose worktree file is a clean,
+// byte-identical, regular file, may be dispositioned; the leads dir is pinned (no symlink
+// escape); only the exact source+destination are staged; the human COMMITS the change.
+// NOTE: this measures REVIEW OUTCOMES, not semantic claim precision — a wrong claim a
+// human corrects still counts as "kept/edited". Genuine precision needs an explicit
+// correctness verdict + reviewer provenance, which is the plane review layer (Stage 4b).
+function dispositionLead(repo, cardId, dest, transform) {
   if (!HASH64.test(cardId || "")) return { error: "invalid cardId" };
   const leads = readPlane(repo, "HEAD", LEAD_PLANE);
   if (leads.unreadable) return { error: "committed leads unreadable (unmeasurable)" };
   const found = leads.cards.find((c) => c.card.cardId === cardId);
   if (!found) return { error: `no committed lead ${cardId}` };
-  let card = found.card, disposition = "accepted-as-is";
-  if (editClaim !== undefined && editClaim !== card.claim) {
-    if (!okText(editClaim, MAX_CLAIM)) return { error: "edited claim is empty or too long" };
-    card = { ...card, claim: editClaim }; disposition = "edited";        // cardId (stable handle) preserved
+  if (found.card.sourceType !== "machine_source") return { error: "not a machine lead" }; // only policy-published machine leads are reviewed here
+  const leadPin = pinPlaneDir(repo, LEAD_PLANE);                          // real dir only — no symlink redirect for the delete
+  if (leadPin.error) return { error: leadPin.error };
+  const leadFile = join(leadPin.dir, cardId + ".json");
+  let st; try { st = lstatSync(leadFile); } catch { return { error: "worktree lead file missing (already dispositioned?)" }; }
+  if (!st.isFile() || st.nlink !== 1) return { error: "worktree lead is not a regular file" };
+  let wtBytes; try { wtBytes = readFileSync(leadFile, "utf8"); } catch (e) { return { error: `cannot read worktree lead: ${e.code}` }; }
+  if (wtBytes !== serializeDecisionCard(found.card)) return { error: "worktree lead has local edits — commit or discard them first" }; // never silently discard
+  const staged = [`.logbook/${LEAD_PLANE}/${cardId}.json`];
+  const t = transform ? transform(found.card) : null;                    // accept: install a decision; reject: null
+  if (t && t.error) return t;
+  if (t) {
+    const pin = pinPlaneDir(repo, dest);
+    if (pin.error) return { error: pin.error };
+    const res = installCard(pin.dir, cardId, t.content);
+    if (res.conflict) return { error: `a different ${dest} card ${cardId} already exists` };
+    if (res.error) return { error: res.error };
+    staged.push(`.logbook/${dest}/${cardId}.json`);
   }
-  if (!validDecisionCard(card)) return { error: "resulting decision card is invalid" };
-  const content = serializeDecisionCard(card);
-  if (Buffer.byteLength(content, "utf8") > MAX_CARD_BYTES) return { error: "card too large" };
-  const pin = pinPlaneDir(repo, DECISION_PLANE);
-  if (pin.error) return { error: pin.error };
-  const res = installCard(pin.dir, cardId, content);
-  if (res.conflict) return { error: `a different decision ${cardId} already exists` };
-  if (res.error) return { error: res.error };
-  const leadFile = join(realpathSync(repo), ".logbook", LEAD_PLANE, cardId + ".json");
-  try { unlinkSync(leadFile); } catch (e) { if (e.code !== "ENOENT") return { error: `cannot remove lead: ${e.code}` }; }
-  try { git(repo, ["add", "-A", "--", ".logbook"]); } catch (e) { return { error: `git add failed: ${e.message}` }; }
-  return { disposition, cardId, decisionPath: `.logbook/${DECISION_PLANE}/${cardId}.json` };
+  try { unlinkSync(leadFile); } catch (e) { return { error: `${dest} written but lead not removed (${e.code}) — re-run to complete` }; } // recoverable: re-run is idempotent
+  try { git(repo, ["add", "--", ...staged]); } catch (e) { return { error: `git add failed: ${e.message}` }; } // stage ONLY source+dest, never `add -A`
+  return { cardId, disposition: t ? t.disposition : "rejected" };
 }
-export function rejectLead(repo, cardId) {
-  if (!HASH64.test(cardId || "")) return { error: "invalid cardId" };
-  const leads = readPlane(repo, "HEAD", LEAD_PLANE);
-  if (leads.unreadable) return { error: "committed leads unreadable (unmeasurable)" };
-  if (!leads.cards.some((c) => c.card.cardId === cardId)) return { error: `no committed lead ${cardId}` };
-  const leadFile = join(realpathSync(repo), ".logbook", LEAD_PLANE, cardId + ".json");
-  try { unlinkSync(leadFile); } catch (e) { if (e.code !== "ENOENT") return { error: `cannot remove lead: ${e.code}` }; }
-  try { git(repo, ["add", "-A", "--", ".logbook"]); } catch (e) { return { error: `git add failed: ${e.message}` }; }
-  return { disposition: "rejected", cardId };
+export function acceptLead(repo, cardId, { editClaim } = {}) {
+  return dispositionLead(repo, cardId, DECISION_PLANE, (card) => {
+    let c = card, disposition = "accepted-as-is";
+    if (editClaim !== undefined && editClaim !== card.claim) {
+      if (!okText(editClaim, MAX_CLAIM)) return { error: "edited claim is empty or too long" };
+      c = { ...card, claim: editClaim }; disposition = "edited";
+    }
+    if (!validDecisionCard(c)) return { error: "resulting decision card is invalid" };
+    const content = serializeDecisionCard(c);
+    if (Buffer.byteLength(content, "utf8") > MAX_CARD_BYTES) return { error: "card too large" };
+    return { content, disposition };
+  });
 }
-// THE INSTRUMENT: classify every machine lead by its fate across plane history so we can
-// MEASURE claim precision (kept vs edited vs tossed). Reads git history, never a side log.
-export function computePrecision(repo, { ref = "HEAD" } = {}) {
-  const curLeads = readPlane(repo, ref, LEAD_PLANE);
-  const curDecisions = readPlane(repo, ref, DECISION_PLANE);
-  if (curLeads.unreadable || curDecisions.unreadable) return { error: "trusted planes unreadable" };
-  const decById = new Map(curDecisions.cards.map((c) => [c.card.cardId, c.card]));
+export function rejectLead(repo, cardId) { return dispositionLead(repo, cardId, null, null); }
+// THE INSTRUMENT (honest): review outcomes of machine leads over plane history. Fails
+// CLOSED when history cannot be trusted (shallow/too-large/malformed) and returns
+// nonzero then. Rejection is NOT inferred from disappearance — a vanished lead is
+// reported as "vanished (unverified: rejected OR retired)". Accepted-vs-edited compares
+// the CLAIM specifically. Genuine semantic precision requires an explicit verdict (Stage 4b).
+const OUTCOMES_MAX_LEADS = 20000;
+export function computeReviewOutcomes(repo, { ref = "HEAD" } = {}) {
+  try { lstatSync(join(realpathSync(repo), ".git", "shallow")); return { error: "shallow clone — history incomplete (git fetch --unshallow)", exitCode: 1 }; }
+  catch (e) { if (e.code !== "ENOENT") return { error: `cannot check history: ${e.code}`, exitCode: 1 }; }
+  const curLeads = readPlane(repo, ref, LEAD_PLANE), curDecisions = readPlane(repo, ref, DECISION_PLANE);
+  if (curLeads.unreadable || curDecisions.unreadable) return { error: "trusted planes unreadable", exitCode: 1 };
+  const decClaim = new Map(curDecisions.cards.map((c) => [c.card.cardId, c.card.claim]));
   const stillLead = new Set(curLeads.cards.map((c) => c.card.cardId));
   let log;
   try { log = gitRaw(repo, ["log", ref, "--reverse", "--diff-filter=A", "--name-only", "--format=%H", "--", `.logbook/${LEAD_PLANE}/`]); }
-  catch { return { error: "cannot read plane history" }; }
-  const prefix = `.logbook/${LEAD_PLANE}/`;
-  const firstAdd = new Map(); let cur = null;                            // cardId -> first commit that published it as a lead
+  catch { return { error: "cannot read plane history", exitCode: 1 }; }
+  const prefix = `.logbook/${LEAD_PLANE}/`, firstAdd = new Map(); let cur = null;
   for (const raw of log.split("\n")) {
     const t = raw.trim();
-    if (/^[0-9a-f]{40}$/.test(t)) { cur = t; continue; }
+    if (OID.test(t)) { cur = t; continue; }                              // 40- OR 64-char commit hash
     if (t.startsWith(prefix) && t.endsWith(".json")) {
       const id = t.slice(prefix.length, -5);
       if (HASH64.test(id) && cur && !firstAdd.has(id)) firstAdd.set(id, cur);
     }
   }
-  const ids = [...firstAdd.keys()], origById = new Map();
-  if (ids.length) {                                                       // batch-fetch each lead's original published content
+  if (firstAdd.size > OUTCOMES_MAX_LEADS) return { error: `too many leads in history (>${OUTCOMES_MAX_LEADS}) to measure`, exitCode: 1 };
+  const ids = [...firstAdd.keys()], origClaim = new Map(), machineIds = []; let historyIncomplete = false;
+  if (ids.length) {
     const specs = ids.map((id) => `${firstAdd.get(id)}:${prefix}${id}.json`);
     const r = gitBuf(repo, ["cat-file", "--batch"], { input: specs.join("\n") + "\n", maxBuffer: (1 << 20) + ids.length * (MAX_CARD_BYTES + 256) });
-    if (r.status === 0 && !r.error) {
-      const b = r.stdout; let pos = 0, idx = 0;
-      while (pos < b.length && idx < ids.length) {
-        const nl = b.indexOf(0x0a, pos); if (nl < 0) break;
-        const parts = b.slice(pos, nl).toString("latin1").split(" "); pos = nl + 1;
-        if (parts[1] !== "blob") { if (parts[1] === "missing") { idx++; continue; } break; }
-        const size = parseInt(parts[2], 10); if (!Number.isFinite(size)) break;
-        const text = decodeUtf8Strict(b.slice(pos, pos + size));
-        if (text !== null) origById.set(ids[idx], text);
-        pos += size + 1; idx++;
-      }
+    if (r.status !== 0 || r.error) return { error: "cannot read historical leads", exitCode: 1 };
+    const b = r.stdout; let pos = 0, idx = 0;
+    while (pos < b.length && idx < ids.length) {
+      const nl = b.indexOf(0x0a, pos); if (nl < 0) break;
+      const parts = b.slice(pos, nl).toString("latin1").split(" "); pos = nl + 1;
+      if (parts[1] !== "blob") { if (parts[1] === "missing") { historyIncomplete = true; idx++; continue; } return { error: "malformed lead history", exitCode: 1 }; }
+      const size = parseInt(parts[2], 10); if (!Number.isFinite(size)) return { error: "malformed lead history", exitCode: 1 };
+      const card = (() => { const x = decodeUtf8Strict(b.slice(pos, pos + size)); return x != null ? parseDecisionCard(x) : null; })();
+      if (card && card.sourceType === "machine_source") { origClaim.set(ids[idx], card.claim); machineIds.push(ids[idx]); } // count MACHINE leads only
+      else if (!card) historyIncomplete = true;                          // malformed historical card => unclassifiable, flagged
+      pos += size + 1; idx++;                                            // a non-machine card in leads/ is excluded (not a machine lead)
     }
   }
-  const funnel = { acceptedAsIs: [], edited: [], rejected: [], pending: [] };
-  for (const id of ids) {
-    if (stillLead.has(id)) { funnel.pending.push(id); continue; }
-    if (decById.has(id)) {
-      const orig = origById.get(id), decContent = serializeDecisionCard(decById.get(id));
-      const oc = orig != null && parseDecisionCard(orig) ? serializeDecisionCard(parseDecisionCard(orig)) : null;
-      (oc !== null && oc === decContent ? funnel.acceptedAsIs : funnel.edited).push(id);
-    } else funnel.rejected.push(id);
+  let asIs = 0, edited = 0, keptUnknown = 0, pending = 0, vanished = 0;
+  for (const id of machineIds) {
+    if (stillLead.has(id)) { pending++; continue; }
+    if (decClaim.has(id)) {
+      const orig = origClaim.get(id);
+      if (orig === undefined) keptUnknown++;                             // kept, but original claim unreadable => can't classify
+      else if (orig === decClaim.get(id)) asIs++; else edited++;         // compare the CLAIM specifically
+    } else vanished++;                                                    // NOT inferred as rejection: rejected OR retired, unverified
   }
-  const a = funnel.acceptedAsIs.length, e = funnel.edited.length, rj = funnel.rejected.length, reviewed = a + e + rj;
-  return { everPublished: firstAdd.size, reviewed, pending: funnel.pending.length, acceptedAsIs: a, edited: e, rejected: rj,
-    precision: reviewed ? (a + e) / reviewed : null, strictPrecision: reviewed ? a / reviewed : null, ids: funnel };
+  const kept = asIs + edited + keptUnknown, reviewed = kept + vanished;
+  return { published: machineIds.length, pending, kept, acceptedAsIs: asIs, edited, keptUnknown, vanished, reviewed,
+    keptRate: reviewed ? kept / reviewed : null, unchangedAcceptRate: kept ? asIs / kept : null,
+    historyIncomplete, exitCode: historyIncomplete ? 1 : 0 };
 }
-export function renderPrecision(res) {
-  if (res.error) return `logbook precision: unmeasurable — ${res.error}`;
+export function renderReviewOutcomes(res) {
+  if (res.error) return `logbook outcomes: unmeasurable — ${res.error} (exit nonzero, not "clean")`;
   const pct = (v) => v == null ? "n/a" : `${(v * 100).toFixed(0)}%`;
   const lines = [
-    "logbook precision — fate of policy-published (machine) leads",
-    `  published:      ${res.everPublished}`,
-    `  reviewed:       ${res.reviewed}   (pending: ${res.pending})`,
-    `  accepted as-is: ${res.acceptedAsIs}`,
-    `  edited:         ${res.edited}`,
-    `  rejected:       ${res.rejected}`,
+    "logbook review outcomes — fate of policy-published (machine) leads",
+    "(REVIEW OUTCOMES, not semantic claim precision — that needs an explicit correctness verdict)",
+    `  published:             ${res.published}`,
+    `  pending (unreviewed):  ${res.pending}`,
+    `  kept (in decisions):   ${res.kept}   [accepted-as-is ${res.acceptedAsIs}, edited ${res.edited}${res.keptUnknown ? `, unclassifiable ${res.keptUnknown}` : ""}]`,
+    `  vanished (rejected OR retired — UNVERIFIED): ${res.vanished}`,
     "",
-    `  claim precision (kept):        ${pct(res.precision)}`,
-    `  strict (accepted unedited):    ${pct(res.strictPrecision)}`,
+    `  kept rate (of reviewed):          ${pct(res.keptRate)}`,
+    `  unchanged-accept rate (of kept):  ${pct(res.unchangedAcceptRate)}`,
   ];
+  if (res.historyIncomplete) lines.push("", "  warning: some lead history was missing/malformed — outcomes are degraded (exit nonzero).");
   if (res.reviewed < 20) lines.push("", `  note: only ${res.reviewed} reviewed — too few to promote automation to authoritative; keep machine cards lower-authority until this grows.`);
   return lines.join("\n");
 }
@@ -3524,10 +3545,10 @@ function usage() {
                                   human-reviewed decision (unchanged = accepted-as-is,
                                   --claim = edited); commit .logbook/ to record it
     logbook reject-lead CARDID [path]
-                                  drop a machine lead (rejected); commit to record it
-    logbook precision [path]      measure the fate of machine leads across plane history
-                                  (accepted-as-is / edited / rejected / pending) — the
-                                  claim-precision that gates promoting automation authority
+                                  drop a machine lead (vanished); commit to record it
+    logbook outcomes [path]       REVIEW OUTCOMES of machine leads across plane history
+                                  (kept as-is / edited / pending / vanished) — NOT semantic
+                                  claim precision; exits nonzero when history is untrustworthy
     logbook pending [path]        draft annotations no human has accepted yet
                                   (they stay inert until a maintainer runs accept)
     logbook refine [path] [--limit N]
@@ -3565,7 +3586,7 @@ export function parseArgs(argv) {
     else if (a === "check") o.cmd = "check";
     else if (a === "pending") o.cmd = "pending";
     else if (a === "refine") o.cmd = "refine";
-    else if (a === "precision") o.cmd = "precision";
+    else if (a === "outcomes") o.cmd = "outcomes";
     else if (a === "accept-lead") o.cmd = "accept-lead";
     else if (a === "reject-lead") o.cmd = "reject-lead";
     else if (a === "--claim") { if (i + 1 >= argv.length) o._missing = "--claim"; else o.claim = argv[++i]; }
@@ -3751,8 +3772,10 @@ async function main() {
     return;
   }
 
-  if (o.cmd === "precision") {
-    console.log(renderPrecision(computePrecision(repo)));
+  if (o.cmd === "outcomes") {
+    const r = computeReviewOutcomes(repo);
+    console.log(renderReviewOutcomes(r));
+    process.exitCode = r.exitCode || (r.error ? 1 : 0);
     return;
   }
   if (o.cmd === "accept-lead" || o.cmd === "reject-lead") {

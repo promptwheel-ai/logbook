@@ -27,7 +27,7 @@ import {
   parseCards, spanGroundedStrict, groundStatus, loadCards, validCardRecord,
   decisionCardId, validDecisionCard, serializeDecisionCard, parseDecisionCard, DECISION_SCHEMA,
   checkDecisions, renderDecisionLeads, parsePolicy, publishPolicyLeads, withPublishLock, migrateLegacyToDrafts, readPlane,
-  acceptLead, rejectLead, computePrecision, renderPrecision,
+  acceptLead, rejectLead, computeReviewOutcomes, renderReviewOutcomes,
   projectLegacyAnnotation, projectLegacy, CARD_SCHEMA, canonicalCardLine,
 } from "../bin/logbook.mjs";
 
@@ -3790,40 +3790,61 @@ test("funnel: computePrecision classifies every machine lead by its fate + repor
   assert.equal(acceptLead(d, E.cardId, { editClaim: "the corrected human claim" }).disposition, "edited");
   assert.equal(rejectLead(d, R.cardId).disposition, "rejected");
   g("commit", "-qm", "human review dispositions");
-  const p = computePrecision(d);
-  assert.equal(p.everPublished, 4);
-  assert.equal(p.acceptedAsIs, 1); assert.equal(p.edited, 1); assert.equal(p.rejected, 1); assert.equal(p.pending, 1);
-  assert.equal(p.reviewed, 3);
-  assert.equal(p.precision, 2 / 3);         // kept (accepted + edited) / reviewed
-  assert.equal(p.strictPrecision, 1 / 3);   // accepted unedited / reviewed
+  const p = computeReviewOutcomes(d);
+  assert.equal(p.published, 4);
+  assert.equal(p.acceptedAsIs, 1); assert.equal(p.edited, 1); assert.equal(p.vanished, 1); assert.equal(p.pending, 1);
+  assert.equal(p.kept, 2); assert.equal(p.reviewed, 3);
+  assert.equal(p.keptRate, 2 / 3);              // kept (accepted or edited) / reviewed
+  assert.equal(p.unchangedAcceptRate, 1 / 2);   // accepted-as-is / kept — NOT called "precision"
   // the edited decision surfaced with the human's claim, same cardId handle
   const dec = readPlane(d, "HEAD", "decisions").cards.find((c) => c.card.cardId === E.cardId);
   assert.ok(dec); assert.equal(dec.card.claim, "the corrected human claim");
-  // the accepted-as-is decision is byte-identical to the original lead
   const decA = readPlane(d, "HEAD", "decisions").cards.find((c) => c.card.cardId === A.cardId);
   assert.equal(decA.card.claim, "accept me as-is");
-  assert.match(renderPrecision(p), /accepted as-is: 1/);
+  assert.match(renderReviewOutcomes(p), /not semantic claim precision/);
   rmSync(d, { recursive: true, force: true });
 });
 
-test("funnel: accept/reject refuse an unknown or non-committed lead; precision is null with no reviews", () => {
+test("funnel: accept/reject refuse unknown, non-committed, dirty, or non-machine leads; rates null with no reviews", () => {
   const { d, g, sha } = poolRepo("cfun2-");
   assert.match(acceptLead(d, "a".repeat(64)).error, /no committed lead/);
   assert.match(rejectLead(d, "z".repeat(64)).error, /invalid cardId/);   // not hex64
   const lead = mkDecision({ sha, evidenceFile: "src/db.js", span: "createPool", scopes: ["src/db.js"], by: "auto", claim: "pending forever" });
   writeCard(d, g, "leads", lead); g("commit", "-qm", "one lead, never reviewed");
-  const p = computePrecision(d);
-  assert.equal(p.everPublished, 1); assert.equal(p.pending, 1); assert.equal(p.reviewed, 0);
-  assert.equal(p.precision, null); assert.equal(p.strictPrecision, null);
-  assert.match(renderPrecision(p), /too few to promote automation/);
+  // a dirty worktree lead is refused, never silently discarded
+  writeFileSync(join(d, ".logbook", "leads", lead.cardId + ".json"), serializeDecisionCard(lead).replace("pending forever", "tampered"));
+  assert.match(acceptLead(d, lead.cardId).error, /local edits/);
+  g("checkout", "--", ".logbook");                                       // restore clean worktree
+  const p = computeReviewOutcomes(d);
+  assert.equal(p.published, 1); assert.equal(p.pending, 1); assert.equal(p.reviewed, 0);
+  assert.equal(p.keptRate, null); assert.equal(p.unchangedAcceptRate, null);
+  assert.match(renderReviewOutcomes(p), /too few to promote automation/);
   rmSync(d, { recursive: true, force: true });
 });
 
-test("funnel: a directly human-authored decision (never a lead) is NOT counted in machine precision", () => {
+test("funnel: a non-machine lead is refused; a directly human-authored decision is NOT counted", () => {
   const { d, g, sha } = poolRepo("cfun3-");
+  // a human_attestation card placed in leads/ cannot be dispositioned as a machine lead
+  const humanLead = mkDecision({ sha, sourceType: "human_attestation", span: null, side: null, evidenceFile: null, scopes: ["src/db.js"], claim: "not a machine lead" });
+  writeCard(d, g, "leads", humanLead); g("commit", "-qm", "human card in leads");
+  assert.match(acceptLead(d, humanLead.cardId).error, /not a machine lead/);
+  // a directly-authored human decision (never a lead) is excluded from machine outcomes
   writeCard(d, g, "decisions", mkDecision({ sha, evidenceFile: "src/db.js", span: "createPool", scopes: ["src/db.js"], claim: "human wrote this directly" }));
   g("commit", "-qm", "human decision, no lead");
-  const p = computePrecision(d);
-  assert.equal(p.everPublished, 0); assert.equal(p.reviewed, 0);  // precision is about the fate of MACHINE leads only
+  const p = computeReviewOutcomes(d);
+  assert.equal(p.published, 0); assert.equal(p.reviewed, 0);
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("closure-funnel: checkDecisions demotes a non-machine card in leads/ (policy leads must be machine-source)", () => {
+  const { d, g, sha } = policyRepo("cb2-", GOOD_TOML);
+  const humanLead = mkDecision({ sha, sourceType: "human_attestation", span: null, side: null, evidenceFile: null, scopes: ["src/db.js"], claim: "human card wrongly in leads" });
+  writeCard(d, g, "leads", humanLead); g("commit", "-qm", "human card in leads"); const base = g("rev-parse", "HEAD").trim();
+  writeFileSync(join(d, "src", "db.js"), "createPool({max:20})\n"); g("add", "-A"); g("commit", "-qm", "bump");
+  const res = checkDecisions(d, { base, head: g("rev-parse", "HEAD").trim() });
+  const lead = res.leads.find((l) => l.card.cardId === humanLead.cardId);
+  assert.ok(lead, "card should surface (scope matches the diff)");
+  assert.equal(lead.authoritative, false);
+  assert.ok(lead.reasons.some((r) => /machine-source/.test(r)));   // the non-machine leads card is not auto-grounded/authoritative
   rmSync(d, { recursive: true, force: true });
 });
