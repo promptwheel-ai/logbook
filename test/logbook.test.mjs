@@ -26,6 +26,7 @@ import {
   saveMachineCard, editCard, foldCards, cardIdFor, revHashFor,
   parseCards, spanGroundedStrict, groundStatus, loadCards, validCardRecord,
   decisionCardId, validDecisionCard, serializeDecisionCard, parseDecisionCard, DECISION_SCHEMA,
+  checkDecisions, renderDecisionLeads,
   projectLegacyAnnotation, projectLegacy, CARD_SCHEMA, canonicalCardLine,
 } from "../bin/logbook.mjs";
 
@@ -2999,4 +3000,75 @@ test("gitfiles: parseDecisionCard rejects non-canonical bytes (dup keys / reorde
   assert.ok(parseDecisionCard(canon));
   assert.equal(parseDecisionCard('{"claim":"decoy",' + canon.slice(1)), null); // duplicate/leading key
   assert.equal(parseDecisionCard("  " + canon), null);                       // surrounding whitespace
+});
+
+// ---------- git-files platform Stage 2: planes + trusted-base check ----------
+function writeCard(d, g, plane, card) {
+  const rel = `.logbook/${plane}/${card.cardId}.json`;
+  mkdirSync(join(d, ".logbook", plane), { recursive: true });
+  writeFileSync(join(d, rel), serializeDecisionCard(card));
+  g("add", rel);
+}
+function poolRepo(prefix) {
+  const { d, g } = tmpGitRepo(prefix);
+  g("init", "-q"); mkdirSync(join(d, "src"));
+  writeFileSync(join(d, "src", "db.js"), "raw\n"); g("add", "-A"); g("commit", "-qm", "init");
+  writeFileSync(join(d, "src", "db.js"), "createPool()\n"); g("add", "-A"); g("commit", "-qm", "pool");
+  return { d, g, sha: g("rev-parse", "HEAD").trim() };
+}
+
+test("gitfiles stage2: a human-reviewed decision surfaces from the trusted base, labeled + authoritative", () => {
+  const { d, g, sha } = poolRepo("logbook-dec-");
+  writeCard(d, g, "decisions", mkDecision({ sha, evidenceFile: "src/db.js", span: "createPool", scopes: ["src/db.js"] }));
+  g("commit", "-qm", "accept"); const base = g("rev-parse", "HEAD").trim();
+  writeFileSync(join(d, "src", "db.js"), "createPool({max:20})\n"); g("add", "-A"); g("commit", "-qm", "bump");
+  const res = checkDecisions(d, { base, head: g("rev-parse", "HEAD").trim() });
+  assert.equal(res.result, "leads"); assert.equal(res.leads.length, 1);
+  assert.equal(res.leads[0].tier, "human-reviewed"); assert.ok(res.leads[0].authoritative);
+  assert.match(renderDecisionLeads(res), /\[human-reviewed\]/);
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("gitfiles stage2: a policy-published lead is surfaced but labeled as a machine lead, not a human decision", () => {
+  const { d, g, sha } = poolRepo("logbook-lead-");
+  writeCard(d, g, "leads", mkDecision({ sha, evidenceFile: "src/db.js", span: "createPool", scopes: ["src/db.js"], by: "auto" }));
+  g("commit", "-qm", "policy publish"); const base = g("rev-parse", "HEAD").trim();
+  writeFileSync(join(d, "src", "db.js"), "createPool({max:20})\n"); g("add", "-A"); g("commit", "-qm", "bump");
+  const res = checkDecisions(d, { base, head: g("rev-parse", "HEAD").trim() });
+  assert.equal(res.leads[0].tier, "policy-published");
+  assert.match(renderDecisionLeads(res), /policy-published — machine lead, not a human decision/);
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("gitfiles stage2: a machine card whose evidence no longer grounds is DEMOTED (not authoritative)", () => {
+  const { d, g, sha } = poolRepo("logbook-demote-");
+  writeCard(d, g, "decisions", mkDecision({ sha, evidenceFile: "src/db.js", span: "EVIDENCE_THAT_NEVER_EXISTED", scopes: ["src/db.js"] }));
+  g("commit", "-qm", "accept"); const base = g("rev-parse", "HEAD").trim();
+  writeFileSync(join(d, "src", "db.js"), "x\n"); g("add", "-A"); g("commit", "-qm", "touch");
+  const res = checkDecisions(d, { base, head: g("rev-parse", "HEAD").trim() });
+  assert.equal(res.leads.length, 1); assert.equal(res.leads[0].authoritative, false);
+  assert.match(renderDecisionLeads(res), /evidence no longer verifiable.*NOT authoritative/s);
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("gitfiles stage2: trusted-base isolation — a card added on HEAD does not surface", () => {
+  const { d, g, sha } = poolRepo("logbook-trust-");
+  const base = g("rev-parse", "HEAD").trim();               // base has NO card
+  writeCard(d, g, "decisions", mkDecision({ sha, evidenceFile: "src/db.js", span: "createPool", scopes: ["src/db.js"] }));
+  writeFileSync(join(d, "src", "db.js"), "createPool({max:20})\n"); g("add", "-A"); g("commit", "-qm", "sneak card + change on head");
+  const res = checkDecisions(d, { base, head: g("rev-parse", "HEAD").trim() });
+  assert.equal(res.result, "not-configured");              // card on HEAD is not trusted; base defines authority
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("gitfiles stage2: a malformed card (filename != cardId) is unmeasurable, never silently trusted", () => {
+  const { d, g, sha } = poolRepo("logbook-mal-");
+  const card = mkDecision({ sha, evidenceFile: "src/db.js", span: "createPool", scopes: ["src/db.js"] });
+  mkdirSync(join(d, ".logbook", "decisions"), { recursive: true });
+  writeFileSync(join(d, ".logbook", "decisions", "WRONGNAME.json"), serializeDecisionCard(card)); // filename != cardId
+  g("add", "-A"); g("commit", "-qm", "malformed"); const base = g("rev-parse", "HEAD").trim();
+  writeFileSync(join(d, "src", "db.js"), "createPool({max:20})\n"); g("add", "-A"); g("commit", "-qm", "bump");
+  const res = checkDecisions(d, { base, head: g("rev-parse", "HEAD").trim() });
+  assert.equal(res.malformedCount, 1); assert.equal(res.exitCode, 1);
+  rmSync(d, { recursive: true, force: true });
 });

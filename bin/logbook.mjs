@@ -2013,6 +2013,76 @@ export function parseDecisionCard(text) {
   return c;
 }
 
+// ---- Stage 2: the three planes + trusted-base check --------------------------
+// Planes are directories under .logbook/. Tier = plane. Reads come ONLY from a
+// trusted ref (BASE for a range, HEAD locally) — a PR's own HEAD can never
+// approve its own decisions. Each file's basename MUST equal its cardId (the id
+// anchor); a mismatch or non-canonical/invalid card is MALFORMED (surfaced,
+// never silently trusted). Only machine cards are re-grounded; a failed
+// re-ground DEMOTES the lead (surfaced, but flagged not-authoritative).
+export const DECISION_PLANE = "decisions";   // human-reviewed
+export const LEAD_PLANE = "leads";           // policy-published (machine)
+function readPlane(repo, ref, plane) {
+  const out = { cards: [], malformed: [] };
+  let ls;
+  try { ls = git(repo, ["ls-tree", "-r", "--name-only", "-z", ref, "--", `.logbook/${plane}/`]); }
+  catch { return out; }                                                    // plane absent at ref => empty
+  for (const path of ls.split("\0").filter(Boolean)) {
+    if (!path.endsWith(".json")) continue;
+    let text; try { text = git(repo, ["show", `${ref}:${path}`]); } catch { out.malformed.push(path); continue; }
+    const card = parseDecisionCard(text);
+    if (!card || basename(path) !== card.cardId + ".json") { out.malformed.push(path); continue; } // filename==id anchor
+    out.cards.push({ path, card });
+  }
+  return out;
+}
+
+export function checkDecisions(repo, { base, head } = {}) {
+  const mode = base && head ? "range" : "local";
+  const trustRef = mode === "range" ? base : "HEAD";
+  const changed = collectChangedPaths(repo, { base, head });
+  if (changed.error) return { result: "unmeasurable", exitCode: 1, leads: [], malformedCount: 0, message: `unmeasurable: ${changed.error} (not "clean").` };
+  const decisions = readPlane(repo, trustRef, DECISION_PLANE);
+  const leads = readPlane(repo, trustRef, LEAD_PLANE);
+  const malformed = [...decisions.malformed, ...leads.malformed];
+  const out = [];
+  const consider = (entries, tier) => {
+    for (const { path, card } of entries) {
+      if (!card.scopes.some((s) => changed.paths.some((p) => scopeMatches(s, p)))) continue; // scope must touch the diff
+      const machine = card.sourceType === "machine_source";
+      const gs = machine ? groundStatus(repo, card.sha, card.span, card.side, card.evidenceFile) : "n/a";
+      out.push({ tier, card, path, groundStatus: gs, authoritative: !machine || gs === "grounded" });
+    }
+  };
+  consider(decisions.cards, "human-reviewed");
+  consider(leads.cards, "policy-published");
+  const accepted = decisions.cards.length + leads.cards.length;
+  const result = out.length ? "leads" : (accepted ? "no-leads" : "not-configured");
+  return { result, exitCode: malformed.length ? 1 : 0, mode, trustRef, leads: out,
+    malformed, malformedCount: malformed.length, acceptedCount: accepted, changedCount: changed.paths.length };
+}
+
+// Deterministic, sanitized rendering; every field is untrusted repo-controlled text.
+export function renderDecisionLeads(res) {
+  const s = (v, n) => sanitizeContextText(String(v ?? ""), n, { markdown: false });
+  if (res.result === "unmeasurable") return res.message || "unmeasurable";
+  const parts = [res.leads.length
+    ? `logbook check (${res.mode}): ${res.leads.length} decision lead${res.leads.length === 1 ? "" : "s"} touch this diff`
+    : `logbook check (${res.mode}): 0 decision leads touch this diff.`];
+  const rows = [...res.leads].sort((a, b) => (a.card.cardId < b.card.cardId ? -1 : 1)); // deterministic order
+  for (const l of rows) {
+    const tierTag = l.tier === "human-reviewed" ? "[human-reviewed]" : "[policy-published — machine lead, not a human decision]";
+    const demote = l.authoritative ? "" : `\n  ! evidence no longer verifiable (${l.groundStatus}) — NOT authoritative; re-review`;
+    parts.push(`\n${l.card.scopes.map((p) => s(p, 256)).join(", ")} ${tierTag}` +
+      `\n  Decision: ${s(l.card.claim, 512)}` +
+      (l.card.span ? `\n  Grounded in: "${s(l.card.span, 400)}" (${s(l.card.sha, 12)})` : "") +
+      `\n  by ${s(l.card.by, 128)} on ${s(l.card.at, 32)}${demote}`);
+  }
+  if (res.malformedCount) parts.push(`\nunmeasurable: ${res.malformedCount} malformed card(s) in the trusted planes (exit nonzero — not "clean").`);
+  if (res.leads.length) parts.push(`\nLead, not verdict: scope overlap proves relevance only. Verify the source and confirm the decision still applies.`);
+  return parts.join("");
+}
+
 export function parseCards(text) {
   const records = []; let malformed = false;
   for (const line of String(text || "").split("\n")) {
