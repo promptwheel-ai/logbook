@@ -2859,14 +2859,17 @@ export function runCheckDiff(repo, { base, head } = {}) {
   if (changed.error) return unmeasurable(changed.error);
   m.changedPathCount = changed.paths.length;
 
-  const acc = readRefFile(repo, trustRef, "annotation-reviews.jsonl");
+  // Read journals from the ALREADY-RESOLVED immutable trustCommit, never the symbolic
+  // trustRef — same pin as the ancestry check, so the ref cannot re-resolve (TOCTOU)
+  // between resolution and read.
+  const acc = readRefFile(repo, trustCommit, "annotation-reviews.jsonl");
   if (acc.unmeasurable) return unmeasurable(`the review journal at ${trustRef} is unreadable`); // unreadable trust state != absent
   if (acc.absent)
     return { exitCode: 0, result: "not-configured", leads: [], metrics: { ...m, result: "not-configured" },
       message: `no accepted decisions configured at ${trustRef} — no accepted-decision conclusion possible (this is not "clean").` };
   const parsed = parseReviews(acc.text);
   if (parsed.malformed) return unmeasurable(`the review journal at ${trustRef} is malformed`);
-  const annR = readRefFile(repo, trustRef, "annotations.jsonl");
+  const annR = readRefFile(repo, trustCommit, "annotations.jsonl");
   if (annR.unmeasurable) return unmeasurable(`annotations.jsonl at ${trustRef} is unreadable`);
   const annText = annR.absent ? null : annR.text;
   if (annText === null && parsed.ratifications.length) return unmeasurable(`reviews exist but annotations.jsonl is missing at ${trustRef}`);
