@@ -1,9 +1,14 @@
 # logbook
 
-[![ci](https://github.com/promptwheel-ai/logbook/actions/workflows/ci.yml/badge.svg)](https://github.com/promptwheel-ai/logbook/actions/workflows/ci.yml) [![npm](https://img.shields.io/npm/v/%40promptwheel%2Flogbook)](https://www.npmjs.com/package/@promptwheel/logbook)
+[![ci](https://github.com/promptwheel-ai/logbook/actions/workflows/ci.yml/badge.svg)](https://github.com/promptwheel-ai/logbook/actions/workflows/ci.yml) [![npm latest](https://img.shields.io/npm/v/%40promptwheel%2Flogbook?label=npm%20latest)](https://www.npmjs.com/package/@promptwheel/logbook) [![npm next](https://img.shields.io/npm/v/%40promptwheel%2Flogbook/next?label=npm%20next)](https://www.npmjs.com/package/@promptwheel/logbook)
 
-**Git history is large. Coding agents usually skip it, and then rediscover old
-mistakes.**
+> **0.9 instrumented alpha.** The deterministic history layer is ready for
+> use. The opt-in temporal decision layer has a hardened trust boundary, but
+> review adoption, downstream task utility, and token ROI are still being
+> measured. Version `0.9.0` is the release candidate for npm's `next` channel.
+
+**Git history is large. When coding agents do not inspect it, they can
+re-propose approaches a repository already rejected.**
 
 Logbook turns a repository's history into two complementary things:
 
@@ -14,9 +19,10 @@ Logbook turns a repository's history into two complementary things:
 
 Everything runs locally. The CLI has zero npm dependencies, reads raw Git
 objects for evidence checks, and never sends repository data anywhere.
+Node.js 18 or newer is required.
 
 ```bash
-npx -y @promptwheel/logbook init
+npx -y @promptwheel/logbook@0.9.0 init
 ```
 
 `init` analyzes the repo, writes the history artifacts, and installs a compact
@@ -30,30 +36,42 @@ workflow in `AGENTS.md`, `CLAUDE.md`, or `.cursorrules`.
   ✓ wrote JOURNEY.md     the repo's story
 ```
 
-## What it produces
+The examples below use `logbook` as the binary name. Run them through the exact
+package above, or install `@promptwheel/logbook@0.9.0` locally or globally.
+
+## What it stores
+
+`init` creates the deterministic history artifacts:
 
 | Path | Purpose |
 |---|---|
 | `LOGBOOK.md` | Bounded history brief for agents: hotspots, do-not-retry reverts, suppressions, weakened assertions, and fragile areas |
 | `events.jsonl` | Structured deterministic history events for tools and queries |
 | `JOURNEY.md` | Human-readable narrative of the repository's history |
+
+The optional decision workflow adds state only as cards are drafted or
+published. Cold start does not bulk-generate decisions or a review backlog.
+
+| Path | Purpose |
+|---|---|
 | `.logbook/drafts/` | Local, gitignored, inert decision proposals; never trusted or surfaced by `check` |
 | `.logbook/leads/` | Committed policy-published machine leads; lower authority and always labeled as such |
 | `.logbook/decisions/` | Committed decisions that have an exact matching human review record |
 | `.logbook/reviews/` | Committed reviewer provenance and byte bindings for promotions/rejections |
 
 One card per file makes the reviewed bytes visible in a normal Git diff and
-lets Git provide authority history, merge behavior, and rollback.
+lets Git provide review history, merge behavior, and rollback. A protected
+trusted ref supplies team authority.
 
 ## Quick start
 
 Analyze and query history:
 
 ```bash
-npx @promptwheel/logbook
-npx @promptwheel/logbook context --file src/cache.ts --revert
-npx @promptwheel/logbook audit
-npx @promptwheel/logbook doctor
+logbook
+logbook context --file src/cache.ts --revert
+logbook audit
+logbook doctor
 ```
 
 When an agent investigates a prior decision during real work, it can preserve
@@ -83,8 +101,9 @@ git commit .logbook/ -m "logbook: accept cache decision"
 ```
 
 `accept` is a compatibility alias for `accept-draft`. The full card ID and an
-explicit reviewer attribution are required. The commit or reviewed PR—not the
-`--by` string—is the authority boundary.
+explicit reviewer attribution are required. The trusted ref is the authority
+boundary. A protected, reviewed PR is the recommended team workflow; the
+`--by` string alone proves no identity.
 
 At diff time:
 
@@ -108,8 +127,8 @@ Logbook never converts model confidence into authority.
   repository-owned policy. It surfaces as a conspicuous lead, not as a human
   decision.
 - **Human-reviewed decision** — the card bytes have a matching committed review
-  record. It is authoritative only within its explicit path scopes and trusted
-  Git boundary.
+  record on the trusted ref. Logbook treats it as reviewed within its explicit
+  path scopes; review does not prove semantic truth or continued applicability.
 
 The same card ID stays the handle as a lead is accepted. A human can accept it
 unchanged, correct the claim while accepting, or reject it:
@@ -121,9 +140,11 @@ logbook reject-lead <full-card-id> --by matthew
 git commit .logbook/ -m "logbook: review machine leads"
 ```
 
-`logbook outcomes` reports the Git-observable funnel for machine leads: kept
-as-is, edited, pending, or vanished. It is not semantic claim precision and it
-refuses to report a clean result when the relevant history is unreadable.
+`logbook outcomes` reports the Git-observable funnel for machine leads:
+accepted as-is, accepted with edits, explicitly rejected, pending, or vanished
+without review. The last state is unmeasurable, not a rejection. The report is
+not semantic claim precision and refuses to report a clean result when the
+relevant history is unreadable.
 
 ## Automatic publication
 
@@ -143,6 +164,20 @@ max_total_cards = 500
 
 Then pass a bounded JSON array on stdin or with `--candidates`:
 
+```json
+[
+  {
+    "sha": "0123456789abcdef0123456789abcdef01234567",
+    "claim": "The bounded cache replaced unbounded retention after memory growth",
+    "span": "new LRUCache({ max: 500 })",
+    "side": "diff",
+    "evidenceFile": "src/cache.ts",
+    "scopes": ["src/cache.ts"],
+    "by": "codex"
+  }
+]
+```
+
 ```bash
 logbook publish --candidates candidates.json
 git add .logbook/leads/
@@ -154,11 +189,12 @@ uncommitted plane counts safely, so the command fails closed in that topology;
 run automatic publication from a single-worktree checkout or CI clone. The
 trusted-ref reader also rejects a merged lead plane above `max_total_cards`.
 
-Each candidate contains `sha`, `claim`, `span`, `side`, `evidenceFile` when the
-side is `diff`, and `scopes`. Publication independently reloads the committed
-policy, checks source ancestry, mechanically grounds the quote against raw Git
-objects, enforces allowed/protected scopes and quotas, and honors
-`.logbook/AUTOMATION_DISABLED` as an immediate kill switch.
+Logbook does not call a model to create candidates. An agent or external tool
+supplies `sha`, `claim`, `span`, `side`, `evidenceFile` when the side is `diff`,
+and `scopes`; `by` is optional attribution. Publication independently reloads
+the committed policy, checks source ancestry, mechanically grounds the quote
+against raw Git objects, enforces allowed/protected scopes and quotas, and
+honors `.logbook/AUTOMATION_DISABLED` as an immediate kill switch.
 
 Mechanical grounding proves only that the quote occurs in the named commit
 message, or was introduced/removed in the named changed file. It does **not** prove that the generated
@@ -166,7 +202,18 @@ interpretation is correct, that the evidence caused the change, or that the
 decision still applies. That is why automatic cards remain leads until a human
 reviews them.
 
-## Trust model
+## Why the trust model is strict
+
+Decision memory can steer future agents. If generated rationale is mistaken,
+repeated model agreement can make one correlated interpretation look like
+independent confirmation—a self-reinforcing hallucination with repository
+authority attached.
+
+Logbook therefore separates three claims: source bytes exist, a machine
+interpreted them, and a trusted ref reviewed the exact resulting card.
+Grounding establishes only the first. Review establishes that the repository's
+process accepted those bytes, not that the interpretation is eternally true.
+Repeated machine confirmations never promote authority.
 
 The trusted Git ref is the authority plane. In a team repository, use normal
 branch protection and code review for `.logbook/decisions/`,
@@ -179,9 +226,17 @@ and review bytes, checks path scopes and source ancestry, and re-grounds machine
 evidence. Missing or malformed trust data is *unmeasurable*, never silently
 reported as clean. Drafts cannot confer authority.
 
-This model protects against malformed repository input and accidental or
-unreviewed promotion. It does not make a hostile committer trustworthy; protect
-the branch that supplies authority.
+The model is designed and regression-tested to fail closed on malformed or
+unverifiable trust state, and to prevent drafts or leads from being displayed
+as human-reviewed without an exact matching review record. It does not make a
+hostile committer trustworthy; protect the branch that supplies authority.
+
+## Upgrading from 0.8
+
+On `init` or a normal refresh, legacy `annotations.jsonl` rows are imported as
+local, gitignored `legacy_unverified` drafts. No old acceptance or authority is
+transferred. Logbook reports every imported or skipped row; a person must review
+and promote any legacy draft that should become a decision in the new planes.
 
 ## Command reference
 
@@ -232,12 +287,18 @@ was 82× larger. See [context economics](docs/context-economics.md) and the
 
 ## Evidence status
 
-Logbook's deterministic history inventory is useful, but reviewed decision
-cards remain an instrumented alpha. Existing experiments do not establish the
-prevalence of decision conflicts, durable business value, or how often teams
-will review cards. The Git-observable funnel begins measuring review behavior;
-prevalence and downstream task impact require longitudinal usage and fresh
-benchmarks.
+The deterministic history inventory showed value on selected history-dense
+planning tasks. A later sealed held-out screen found no advantage over a strong
+raw-Git instruction because task-facing retrieval delivered none of the sealed
+lineage items. The new diff-time decision path addresses that delivery failure,
+but has not yet been tested on a fresh held-out sample.
+
+Reviewed decision cards therefore remain an instrumented alpha. Existing
+experiments do not establish ordinary-task prevalence, durable business value,
+or how often teams will review cards. `logbook outcomes` measures only the
+Git-observable review funnel. Review time, warning relevance, misleading claims,
+changed plans, avoided wrong work, and amortized token/time cost require a
+dogfood harness and human labels; nothing is inferred or sent as telemetry.
 
 Likewise, this release is not a complete accepted-decision lifecycle manager.
 It supports drafting, initial promotion, machine-lead correction/rejection,

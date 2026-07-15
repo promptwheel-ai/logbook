@@ -13,7 +13,7 @@ import {
   SUPPRESS_PAT, classifyFile, parseArgs, collectEvents, diffScan, hotspots, analyze,
   renderLogbookMd, renderJourneyMd, journeyBeats, almanacStats,
   loadEvents, kindAllowedInFile, historyInventory,
-  EXTRACTOR_VERSION, FORMAT_VERSION, CONTEXT_ORDER_VERSION,
+  PACKAGE_VERSION, NPX_COMMAND, EXTRACTOR_VERSION, FORMAT_VERSION, CONTEXT_ORDER_VERSION,
   ORDERED_CONTEXT_FORMAT_VERSION, ORDERED_CONTEXT_ORDER_VERSION,
   CONTEXT_PAGE_MAX_ITEMS, CONTEXT_PAGE_MAX_BYTES, CONTEXT_ITEM_MAX_BYTES,
   formatContextPage, formatOrderedContextPage, sanitizeContextText, queryEvents,
@@ -1544,6 +1544,11 @@ test("init wires the repo once, idempotently, into existing agent files", () => 
   assert.match(agents, /accept-draft CARD_ID --by WHO/);
   assert.match(agents, /Never run accept, accept-draft, accept-lead, or reject-lead/);
   assert.match(agents, /check --diff.*NEXT.*--cursor TOKEN.*END complete/s);
+  assert.equal(PACKAGE_VERSION, "0.9.0");
+  assert.equal(NPX_COMMAND, "npx -y @promptwheel/logbook@0.9.0");
+  assert.match(agents, /npx -y @promptwheel\/logbook@0\.9\.0 context/,
+    "generated workflow pins the package that authored it instead of npm latest");
+  assert.doesNotMatch(agents, /@promptwheel\/logbook context/);
   // Claude Code reads CLAUDE.md, not AGENTS.md — fresh repos get the import bridge
   assert.equal(readFileSync(join(d, "CLAUDE.md"), "utf8"), "@AGENTS.md\n", "bridge created");
   // second init → no duplicate block, bridge untouched (wired via import)
@@ -1738,6 +1743,21 @@ test("init migrates prior generated blocks; user-edited blocks stay", () => {
   assert.match(migratedOldLmh, /check --diff.*NEXT.*END complete/s,
     "normal refresh upgrades older exact LMH wiring to the plane preflight");
   rmSync(d4, { recursive: true, force: true });
+
+  const d5 = mkdtempSync(join(tmpdir(), "logbook-migrate-unpinned-plane-"));
+  const g5 = (...a) => execFileSync("git", ["-C", d5, ...a], { env: { ...process.env,
+    GIT_AUTHOR_NAME: "H", GIT_AUTHOR_EMAIL: "h@x.io", GIT_COMMITTER_NAME: "H", GIT_COMMITTER_EMAIL: "h@x.io" } });
+  g5("init", "-q"); writeFileSync(join(d5, "a.js"), "let x = 1;\n");
+  g5("add", "-A"); g5("commit", "-q", "-m", "base");
+  execFileSync(process.execPath, [CLI, "init", d5], { encoding: "utf8" });
+  const currentPinned = readFileSync(join(d5, "AGENTS.md"), "utf8");
+  writeFileSync(join(d5, "AGENTS.md"), currentPinned.replaceAll("@promptwheel/logbook@0.9.0", "@promptwheel/logbook"));
+  execFileSync(process.execPath, [CLI, d5], { encoding: "utf8" });
+  const repinned = readFileSync(join(d5, "AGENTS.md"), "utf8");
+  assert.match(repinned, /@promptwheel\/logbook@0\.9\.0 context/,
+    "normal refresh upgrades the first unpinned plane workflow to the exact release");
+  assert.doesNotMatch(repinned, /@promptwheel\/logbook context/);
+  rmSync(d5, { recursive: true, force: true });
 });
 
 test("audit on a suppression-free repo is clean, not an error", () => {

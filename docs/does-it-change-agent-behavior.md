@@ -45,7 +45,7 @@ the old failure mode with a test before refactoring.
 
 One trial, one scenario, planning-only. The scenario was chosen because it is
 the tool's core claim (do-not-retry), not at random. Reproduce it: run
-`npx @promptwheel/logbook` on any repo with a meaningful revert history (the
+`npx -y @promptwheel/logbook@0.9.0` on any repo with a meaningful revert history (the
 median in our random 400-repo sample had 10 reverts) and ask an agent to plan a
 change adjacent to a reverted one, with and without LOGBOOK.md in context.
 
@@ -126,9 +126,9 @@ that code.
 The shallow arm could not say any of that: the CVE revert wasn't in its
 10-revert sample, and per-file attribution didn't exist.
 
-## Verdict
+## Result of this selected trial
 
-Depth changes decisions — but only CURATED depth. What paid was (1)
+In this selected trial, curated depth changed the plan. What paid was (1)
 file-keyed revert history and (2) notable-event highlighting, not longer
 flat lists. The 800-token digest is the right default (context economics);
 the promising design example is per-file sections + a notable-events section

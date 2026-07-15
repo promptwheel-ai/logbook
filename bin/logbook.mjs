@@ -42,6 +42,14 @@ import {
 import { pathToFileURL } from "node:url";
 import { resolve, join, basename, dirname, relative, isAbsolute, sep } from "node:path";
 
+// Pin every generated npx instruction to the package version that authored it.
+// A preview published under npm's `next` tag must not wire future agents back
+// to an older `latest` release.
+export const PACKAGE_VERSION = JSON.parse(
+  readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+).version;
+export const NPX_COMMAND = `npx -y @promptwheel/logbook@${PACKAGE_VERSION}`;
+
 let managedTempId = 0;
 
 // Replace generator-managed files atomically and never follow a
@@ -3412,7 +3420,7 @@ function currentWiringProblem(text) {
   const value = String(text);
   if (!value.includes("## Repo memory")) return "has no Repo memory block";
   if (!/Read LOGBOOK\.md at the repo root completely before any history query/.test(value) ||
-      !value.includes("context --file path/to/file --revert") ||
+      !value.includes(`${NPX_COMMAND} context --file path/to/file --revert`) ||
       !/If output says NEXT[\s\S]*until END complete/.test(value) ||
       !/leads, not verdicts[\s\S]*raw Git evidence/.test(value) ||
       !value.includes("accept-draft CARD_ID --by WHO") ||
@@ -3458,7 +3466,7 @@ export function doctorRepo(repo) {
 
   if (missing.length) {
     add("fail", "artifacts", `missing ${missing.map((file) => sanitizeContextText(file, 128, { markdown: false })).join(", ")}`,
-      "run: npx -y @promptwheel/logbook init");
+      `run: ${NPX_COMMAND} init`);
   } else {
     try {
       const ledgerText = readFileSync(join(repo, "events.jsonl"), "utf8");
@@ -3493,16 +3501,16 @@ export function doctorRepo(repo) {
 
       if (!schemasCurrent)
         add("fail", "artifacts", "events.jsonl is empty, duplicated, invalid, or from another extractor",
-          "run: npx -y @promptwheel/logbook");
+          `run: ${NPX_COMMAND}`);
       else if (!sameRecord || !hashMatches || !countMatches)
         add("fail", "artifacts", "record metadata or ledger hash does not match the generated bundle",
-          "run: npx -y @promptwheel/logbook");
+          `run: ${NPX_COMMAND}`);
       else if (!bundleFresh)
         add("fail", "artifacts", "digest and journey stamps do not both match the current HEAD",
-          "run: npx -y @promptwheel/logbook");
+          `run: ${NPX_COMMAND}`);
       else if (record.scope === "default" && (!windowMatches || !capMatches))
         add("fail", "artifacts", "event order or window does not exactly match current Git history",
-          "run: npx -y @promptwheel/logbook");
+          `run: ${NPX_COMMAND}`);
       else if (record.scope === "era")
         add("warn", "artifacts", `${plural(events.length, "ledger event")} in an intentional era-scoped record${record.capped ? `; analysis capped at ${record.max}` : ""}`,
           record.capped
@@ -3517,13 +3525,13 @@ export function doctorRepo(repo) {
       events = null;
       ledgerUsable = false;
       add("fail", "artifacts", "generated artifacts cannot be parsed or verified",
-        "run: npx -y @promptwheel/logbook");
+        `run: ${NPX_COMMAND}`);
     }
   }
 
   const agentsPath = join(repo, "AGENTS.md");
   if (!existsSync(agentsPath)) {
-    add("fail", "agent wiring", "AGENTS.md is missing", "run: npx -y @promptwheel/logbook init");
+    add("fail", "agent wiring", "AGENTS.md is missing", `run: ${NPX_COMMAND} init`);
   } else {
     const problem = currentWiringProblem(readFileSync(agentsPath, "utf8"));
     if (problem) add("fail", "agent wiring", `AGENTS.md ${problem}`,
@@ -3541,7 +3549,7 @@ export function doctorRepo(repo) {
 
   const claudePath = join(repo, "CLAUDE.md");
   if (!existsSync(claudePath)) {
-    add("warn", "Claude wiring", "CLAUDE.md bridge is absent", "run: npx -y @promptwheel/logbook init");
+    add("warn", "Claude wiring", "CLAUDE.md bridge is absent", `run: ${NPX_COMMAND} init`);
   } else {
     const text = readFileSync(claudePath, "utf8");
     if (hasClaudeImport(text, "AGENTS.md"))
@@ -3637,7 +3645,10 @@ export function renderDoctor(name, report) {
   return L.join("\n");
 }
 
-const PLANE_REPO_MEMORY_BLOCK = `
+// Exact block emitted by the first 0.9 release candidate. Keep it only as a
+// migration source: its unversioned npx commands resolve npm `latest`, which
+// may be an older release while this package is staged under `next`.
+const UNPINNED_PLANE_REPO_MEMORY_BLOCK = `
 ## Repo memory
 Before planning or editing:
 1. Read LOGBOOK.md at the repo root completely before any history query.
@@ -3662,10 +3673,15 @@ Before finalizing work, run the decision preflight on the actual diff:
 npx -y @promptwheel/logbook check --diff
 If output says NEXT, repeat with --cursor TOKEN until END complete.
 `;
+const PLANE_REPO_MEMORY_BLOCK = UNPINNED_PLANE_REPO_MEMORY_BLOCK.replaceAll(
+  "npx -y @promptwheel/logbook",
+  NPX_COMMAND,
+);
 
 // Normal refreshes also upgrade exact, released LMH-era blocks. This is an
 // exact-byte migration only: a user-edited block is never rewritten.
 const NORMAL_REFRESH_OLD_BLOCKS = [
+  UNPINNED_PLANE_REPO_MEMORY_BLOCK,
   `
 ## Repo memory
 Before planning or editing:
@@ -3777,10 +3793,12 @@ function usage() {
                                   human-reviewed decision (unchanged = accepted-as-is,
                                   --claim = edited); commit .logbook/ to record it
     logbook reject-lead CARDID --by WHO [path]
-                                  drop a machine lead (vanished); commit to record it
+                                  explicitly reject and remove a machine lead;
+                                  commit the review record
     logbook outcomes [path]       REVIEW OUTCOMES of machine leads across plane history
-                                  (kept as-is / edited / pending / vanished) — NOT semantic
-                                  claim precision; exits nonzero when history is untrustworthy
+                                  (accepted as-is / edited / rejected / pending /
+                                  vanished unreviewed) — NOT semantic claim precision;
+                                  exits nonzero when history is untrustworthy
     logbook pending [path]        local draft decisions awaiting human acceptance
                                   (inert until accept-draft + a trusted commit)
     logbook refine [path] [--limit N]
@@ -3879,11 +3897,7 @@ export function parseArgs(argv) {
 async function main() {
   const o = parseArgs(process.argv.slice(2));
   if (o.cmd === "help") return usage();
-  if (o.cmd === "version") {
-    const { readFileSync } = await import("node:fs");
-    const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
-    return console.log(pkg.version);
-  }
+  if (o.cmd === "version") return console.log(PACKAGE_VERSION);
   if (o._missing) {
     console.error(`  ${o._missing} requires a value`);
     process.exit(1);

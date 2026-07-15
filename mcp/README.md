@@ -4,6 +4,10 @@
 git history as agent memory, for clients without a shell (Claude Desktop,
 Cursor, and any MCP client).
 
+> **0.5 instrumented alpha.** Install the exact preview version shown below;
+> unqualified npm commands continue to resolve the previous `latest` release
+> while `0.5.0` is staged through the `next` channel.
+
 ## Tools
 
 - **logbook_digest** — the history digest: hotspots, do-not-retry reverts,
@@ -30,7 +34,7 @@ Claude Desktop (JSON config):
 ```json
 {
   "mcpServers": {
-    "logbook": { "command": "npx", "args": ["-y", "@promptwheel/logbook-mcp"] }
+    "logbook": { "command": "npx", "args": ["-y", "@promptwheel/logbook-mcp@0.5.0"] }
   }
 }
 ```
@@ -40,10 +44,11 @@ Codex CLI (TOML — `~/.codex/config.toml`, or per-project `.codex/config.toml`)
 ```toml
 [mcp_servers.logbook]
 command = "npx"
-args = ["-y", "@promptwheel/logbook-mcp"]
+args = ["-y", "@promptwheel/logbook-mcp@0.5.0"]
 ```
 
-or the one-liner: `codex mcp add logbook -- npx -y @promptwheel/logbook-mcp`.
+or the one-liner:
+`codex mcp add logbook -- npx -y @promptwheel/logbook-mcp@0.5.0`.
 Exposing tools is not the same as using them — keep an AGENTS.md line telling
 the agent when to call logbook_digest.
 

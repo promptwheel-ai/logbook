@@ -3,7 +3,7 @@
 Measured across a random 400-repo sample of the top-2,500 GitHub repos
 (tokens ≈ chars/4; 20k-commit windows; sample data preserved).
 
-| source | median tokens | vs logbook |
+| source | median tokens | ratio of aggregate medians vs logbook |
 |---|---|---|
 | LOGBOOK.md (v0.2, incl. per-file history) | **1,019** | — |
 | `git log --oneline` | 16,133 | 16× |
@@ -11,7 +11,9 @@ Measured across a random 400-repo sample of the top-2,500 GitHub repos
 
 - **34% of repos' full git logs exceed a 150k-token context window entirely.**
 - 44% of repos' `--oneline` logs alone exceed 20k tokens.
-- Full-log/logbook ratio: p25 36× · median 104× · p75 216× · max 2,534×.
+- Per-repository full-log/logbook ratio distribution: p25 36× · median 104× ·
+  p75 216× · max 2,534×. This differs from the 82× ratio of the two aggregate
+  medians above.
 - A session that would otherwise ingest the full history avoids that context
   difference. Over 100 such sessions, the estimate is ~8M tokens.
 
