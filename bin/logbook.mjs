@@ -2045,71 +2045,96 @@ export const LEAD_PLANE = "leads";           // policy-published (machine)
 // entries stay in tree order; a .json entry gets text=undefined (=> caller treats it
 // as malformed) when it is a non-blob, missing, oversized (>MAX_CARD_BYTES), or
 // unreadable object. { unreadable, entries:[{path,oid}], textByOid:Map }.
-const PLANE_CHUNK_BYTES = 32 << 20;                                        // per cat-file --batch process, bounds memory + process count
+const PLANE_CHUNK_BYTES = 32 << 20;                                        // per cat-file --batch process
+const PLANE_AGGREGATE_BYTES = 256 << 20;                                   // whole-plane read cap; a larger plane is UNMEASURABLE (fail-closed), never partially trusted
+const UTF8_STRICT = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }); // reject invalid UTF-8 (no lossy U+FFFD); keep a BOM byte-faithful
+function decodeUtf8Strict(buf) { try { return UTF8_STRICT.decode(buf); } catch { return null; } }
+// Batched RAW read of a committed card plane, streamed so raw blobs are parsed and
+// freed per chunk (not all held at once). One `ls-tree -r -z` (mode+type+oid) + one
+// `cat-file --batch-check` (sizes) + size-bounded chunked `cat-file --batch`. Reads
+// each blob by its explicit tree OID, so replace-refs/grafts cannot rewrite content.
+// Returns { unreadable, entries:[{path, card|null}] } in tree order. card=null (=>
+// caller malformed) when the entry is NOT exactly .logbook/<plane>/<name>.json, not a
+// regular-file blob, missing, oversized (>MAX_CARD_BYTES), invalid UTF-8, or unparseable.
+// Fail-closed: any enumeration/batch failure, or a plane whose in-bounds bytes exceed
+// PLANE_AGGREGATE_BYTES, => { unreadable:true }.
 function readPlaneBlobs(repo, ref, plane) {
+  const dead = { unreadable: true, entries: [] };
+  const prefix = `.logbook/${plane}/`;
   let lsBuf;
-  try { lsBuf = gitBuf(repo, ["ls-tree", "-r", "-z", ref, "--", `.logbook/${plane}/`]); }
-  catch { return { unreadable: true, entries: [], textByOid: new Map() }; }
-  if (lsBuf.status !== 0 || lsBuf.error) return { unreadable: true, entries: [], textByOid: new Map() };
-  const entries = [];                                                      // tree order; oid=null for a non-blob .json entry (=> malformed)
-  for (const rec of lsBuf.stdout.toString("utf8").split("\0")) {
+  try { lsBuf = gitBuf(repo, ["ls-tree", "-r", "-z", ref, "--", prefix]); } catch { return dead; }
+  if (lsBuf.status !== 0 || lsBuf.error) return dead;
+  const raw = [];                                                          // { path, oid|null } ; oid=null => structurally invalid .json => malformed
+  for (const rec of lsBuf.stdout.toString("latin1").split("\0")) {         // latin1 = byte-faithful paths (no lossy U+FFFD)
     if (!rec) continue;
     const tab = rec.indexOf("\t");
     if (tab < 0) continue;
     const meta = rec.slice(0, tab).split(" ");                            // "<mode> <type> <oid>"
     const path = rec.slice(tab + 1);
     if (!path.endsWith(".json")) continue;                                // non-card files are ignored (never malformed)
-    entries.push({ path, oid: (meta[1] === "blob" && OID.test(meta[2] || "")) ? meta[2] : null });
+    const direct = path.startsWith(prefix) && !path.slice(prefix.length).includes("/"); // EXACTLY .logbook/<plane>/<name>.json (no nesting)
+    const regular = meta[0] === "100644" || meta[0] === "100755";         // reject symlink (120000) / gitlink (160000)
+    const okBlob = meta[1] === "blob" && OID.test(meta[2] || "");
+    raw.push({ path, oid: (direct && regular && okBlob) ? meta[2] : null });
   }
-  const uniq = [...new Set(entries.map((e) => e.oid).filter(Boolean))];
-  const textByOid = new Map();
-  if (!uniq.length) return { unreadable: false, entries, textByOid };
-  const bc = gitBuf(repo, ["cat-file", "--batch-check"], { input: uniq.join("\n") + "\n", maxBuffer: uniq.length * 256 + (1 << 20) });
-  if (bc.status !== 0 || bc.error) return { unreadable: true, entries: [], textByOid: new Map() };
-  const sizeByOid = new Map();
-  for (const line of bc.stdout.toString("latin1").split("\n")) {
-    if (!line) continue;
-    const p = line.split(" ");                                            // "<oid> blob <size>" | "<oid> missing"
-    sizeByOid.set(p[0], p[1] === "blob" ? parseInt(p[2], 10) : -1);       // non-blob/missing => -1 => left out of textByOid
-  }
-  let chunk = [], chunkBytes = 0;
-  const flush = () => {                                                    // read one bounded batch of blob contents
-    if (!chunk.length) return true;
-    const r = gitBuf(repo, ["cat-file", "--batch"], { input: chunk.join("\n") + "\n", maxBuffer: chunkBytes + chunk.length * 256 + (1 << 20) });
-    if (r.status !== 0 || r.error) return false;
-    const b = r.stdout; let pos = 0;
-    while (pos < b.length) {
-      const nl = b.indexOf(0x0a, pos);
-      if (nl < 0) break;
-      const parts = b.slice(pos, nl).toString("latin1").split(" ");
-      pos = nl + 1;
-      if (parts[1] !== "blob") { if (parts[1] === "missing") continue; return false; }
-      const size = parseInt(parts[2], 10);
-      if (!Number.isFinite(size)) return false;
-      textByOid.set(parts[0], b.slice(pos, pos + size).toString("utf8"));
-      pos += size + 1;                                                     // content + trailing LF
+  const uniq = [...new Set(raw.map((e) => e.oid).filter(Boolean))];
+  const cardByOid = new Map();
+  if (uniq.length) {
+    const bc = gitBuf(repo, ["cat-file", "--batch-check"], { input: uniq.join("\n") + "\n", maxBuffer: uniq.length * 256 + (1 << 20) });
+    if (bc.status !== 0 || bc.error) return dead;
+    const sizeByOid = new Map();
+    for (const line of bc.stdout.toString("latin1").split("\n")) {
+      if (!line) continue;
+      const p = line.split(" ");                                          // "<oid> blob <size>" | "<oid> missing"
+      sizeByOid.set(p[0], p[1] === "blob" ? parseInt(p[2], 10) : -1);
     }
-    chunk = []; chunkBytes = 0;
-    return true;
-  };
-  for (const oid of uniq) {
-    const size = sizeByOid.get(oid);
-    if (size === undefined || size < 0 || size > MAX_CARD_BYTES) continue; // missing / non-blob / oversized => malformed at the caller
-    if (chunkBytes + size > PLANE_CHUNK_BYTES && chunk.length && !flush()) return { unreadable: true, entries: [], textByOid: new Map() };
-    chunk.push(oid); chunkBytes += size;
+    const toRead = []; let agg = 0;
+    for (const oid of uniq) {
+      const sz = sizeByOid.get(oid);
+      if (sz === undefined || sz < 0 || sz > MAX_CARD_BYTES) continue;    // missing/non-blob/oversized => unparsed => malformed
+      agg += sz;
+      if (agg > PLANE_AGGREGATE_BYTES) return dead;                        // whole plane too large to hold safely => unmeasurable
+      toRead.push({ oid, sz });
+    }
+    let chunk = [], chunkBytes = 0;
+    const flush = () => {                                                  // read + parse one bounded batch, then free the raw bytes
+      if (!chunk.length) return true;
+      const r = gitBuf(repo, ["cat-file", "--batch"], { input: chunk.join("\n") + "\n", maxBuffer: chunkBytes + chunk.length * 256 + (1 << 20) });
+      if (r.status !== 0 || r.error) return false;
+      const b = r.stdout; let pos = 0;
+      while (pos < b.length) {
+        const nl = b.indexOf(0x0a, pos);
+        if (nl < 0) break;
+        const parts = b.slice(pos, nl).toString("latin1").split(" ");
+        pos = nl + 1;
+        if (parts[1] !== "blob") { if (parts[1] === "missing") continue; return false; }
+        const size = parseInt(parts[2], 10);
+        if (!Number.isFinite(size)) return false;
+        const text = decodeUtf8Strict(b.slice(pos, pos + size));          // invalid UTF-8 => null => malformed
+        cardByOid.set(parts[0], text === null ? null : parseDecisionCard(text));
+        pos += size + 1;                                                   // content + trailing LF
+      }
+      chunk = []; chunkBytes = 0;
+      return true;
+    };
+    for (const { oid, sz } of toRead) {
+      if (chunkBytes + sz > PLANE_CHUNK_BYTES && chunk.length && !flush()) return dead;
+      chunk.push(oid); chunkBytes += sz;
+    }
+    if (!flush()) return dead;
   }
-  if (!flush()) return { unreadable: true, entries: [], textByOid: new Map() };
-  return { unreadable: false, entries, textByOid };
+  const entries = raw.map((e) => ({ path: e.path, card: e.oid && cardByOid.has(e.oid) ? cardByOid.get(e.oid) : null }));
+  return { unreadable: false, entries };
 }
 export function readPlane(repo, ref, plane) {
   const out = { cards: [], malformed: [], unreadable: false };
   const pb = readPlaneBlobs(repo, ref, plane);
   if (pb.unreadable) { out.unreadable = true; return out; }                // cannot enumerate the trusted plane => unmeasurable, NOT "absent"
-  for (const { path, oid } of pb.entries) {
-    const text = oid && pb.textByOid.has(oid) ? pb.textByOid.get(oid) : undefined;
-    if (text === undefined) { out.malformed.push(path); continue; }        // non-blob / missing / oversized / unreadable
-    const card = parseDecisionCard(text);
+  const seen = new Set();
+  for (const { path, card } of pb.entries) {
     if (!card || basename(path) !== card.cardId + ".json") { out.malformed.push(path); continue; } // filename==id anchor
+    if (seen.has(card.cardId)) { out.malformed.push(path); continue; }     // duplicate cardId => malformed (ids must be unique)
+    seen.add(card.cardId);
     out.cards.push({ path, card });
   }
   return out;
@@ -2118,13 +2143,23 @@ export function readPlane(repo, ref, plane) {
 export function checkDecisions(repo, { base, head } = {}) {
   const mode = base && head ? "range" : "local";
   const trustRef = mode === "range" ? base : "HEAD";
-  const changed = collectChangedPaths(repo, { base, head });
-  if (changed.error) return { result: "unmeasurable", exitCode: 1, leads: [], malformedCount: 0, message: `unmeasurable: ${changed.error} (not "clean").` };
+  const unm = (why) => ({ result: "unmeasurable", exitCode: 1, leads: [], malformedCount: 0, message: `unmeasurable: ${why} (not "clean").` });
+  // Resolve base/head to immutable commit OIDs ONCE, then use those for BOTH the diff
+  // and the trust-plane reads: a ref that moves mid-check must not desync the diff from
+  // the trusted cards (which would inject a future/other-branch card).
   const commit = resolveTrustCommit(repo, trustRef);
-  if (!commit) return { result: "unmeasurable", exitCode: 1, leads: [], malformedCount: 0, message: `unmeasurable: cannot resolve trust ref ${trustRef} (not "clean").` };
-  const decisions = readPlane(repo, trustRef, DECISION_PLANE);
-  const leads = readPlane(repo, trustRef, LEAD_PLANE);
-  if (decisions.unreadable || leads.unreadable) return { result: "unmeasurable", exitCode: 1, leads: [], malformedCount: 0, message: `unmeasurable: cannot enumerate the trusted decision plane at ${trustRef} (not "clean").` };
+  if (!commit) return unm(`cannot resolve trust ref ${trustRef}`);
+  let diffBase = base, diffHead = head;
+  if (mode === "range") {
+    const hc = resolveTrustCommit(repo, head);
+    if (!hc) return unm(`cannot resolve head ref ${head}`);
+    diffBase = commit; diffHead = hc;                                      // commit === resolved base
+  }
+  const changed = collectChangedPaths(repo, { base: diffBase, head: diffHead });
+  if (changed.error) return unm(changed.error);
+  const decisions = readPlane(repo, commit, DECISION_PLANE);               // pinned to the immutable trust commit, not the symbolic ref
+  const leads = readPlane(repo, commit, LEAD_PLANE);
+  if (decisions.unreadable || leads.unreadable) return unm(`cannot enumerate the trusted decision plane at ${trustRef}`);
   const malformed = [...decisions.malformed, ...leads.malformed];
   const curPolicy = loadTrustedPolicy(repo, commit);   // for read-time re-validation of policy-published leads
   const out = [];
@@ -2372,13 +2407,11 @@ export function withPublishLock(repo, fn) {
 // on filenames or an empty set).
 function trustedPlaneState(repo, commit, plane) {
   const ids = new Set();
-  const pb = readPlaneBlobs(repo, commit, plane);                          // one ls-tree + batched cat-file, RAW, fail-closed
+  const pb = readPlaneBlobs(repo, commit, plane);                          // streamed, RAW, fail-closed
   if (pb.unreadable) return { ids, malformed: true };
-  for (const { path, oid } of pb.entries) {
-    const text = oid && pb.textByOid.has(oid) ? pb.textByOid.get(oid) : undefined;
-    if (text === undefined) return { ids, malformed: true };              // any non-blob / missing / oversized entry => whole plane unmeasurable
-    const card = parseDecisionCard(text);
-    if (!card || card.cardId + ".json" !== basename(path)) return { ids, malformed: true };
+  for (const { path, card } of pb.entries) {
+    if (!card || card.cardId + ".json" !== basename(path)) return { ids, malformed: true }; // any bad/oversized/misnamed entry => whole plane unmeasurable
+    if (ids.has(card.cardId)) return { ids, malformed: true };            // duplicate cardId => whole plane unmeasurable
     ids.add(card.cardId);
   }
   return { ids, malformed: false };

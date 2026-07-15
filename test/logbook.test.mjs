@@ -3676,3 +3676,57 @@ test("batched-read: readPlane is behaviorally IDENTICAL to a per-card reference 
   assert.deepEqual(got.cards.map((c) => c.card.cardId).sort(), [A.cardId, B.cardId].sort()); // only the two valid, correctly-named cards
   rmSync(d, { recursive: true, force: true });
 });
+
+// ---------- git-files batched-read closure (Codex: utf8 / mode+path / uniqueness / bound) --------
+test("closure4: a card with invalid UTF-8 (in a free-text field) is malformed, never lossily surfaced", () => {
+  const { d, g, sha } = poolRepo("cutf8-");
+  const card = mkDecision({ sha, evidenceFile: "src/db.js", span: "createPool", scopes: ["src/db.js"], claim: "the claim value here" });
+  const text = serializeDecisionCard(card);
+  const buf = Buffer.from(text, "utf8");
+  const at = text.indexOf("claim value");                      // corrupt one byte inside the free-text claim VALUE (U+FFFD is valid there, so the old lossy decode accepted+surfaced it)
+  assert.ok(at > 0); buf[at + 2] = 0xff;
+  mkdirSync(join(d, ".logbook", "decisions"), { recursive: true });
+  writeFileSync(join(d, ".logbook", "decisions", card.cardId + ".json"), buf);
+  g("add", "-A"); g("commit", "-qm", "utf8-corrupt card"); const base = g("rev-parse", "HEAD").trim();
+  writeFileSync(join(d, "src", "db.js"), "createPool({max:20})\n"); g("add", "-A"); g("commit", "-qm", "bump");
+  const res = checkDecisions(d, { base, head: g("rev-parse", "HEAD").trim() });
+  assert.equal(res.leads.length, 0);                           // must NOT surface (old lossily decoded 0xff->U+FFFD and accepted)
+  assert.ok(res.malformedCount >= 1); assert.equal(res.exitCode, 1);
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("closure4: a nested card (not exactly .logbook/<plane>/<id>.json) is malformed, never surfaces", () => {
+  const { d, g, sha } = poolRepo("cnest-");
+  const card = mkDecision({ sha, evidenceFile: "src/db.js", span: "createPool", scopes: ["src/db.js"] });
+  mkdirSync(join(d, ".logbook", "decisions", "sub"), { recursive: true });
+  writeFileSync(join(d, ".logbook", "decisions", "sub", card.cardId + ".json"), serializeDecisionCard(card)); // nested one level deep
+  g("add", "-A"); g("commit", "-qm", "nested card"); const base = g("rev-parse", "HEAD").trim();
+  writeFileSync(join(d, "src", "db.js"), "createPool({max:20})\n"); g("add", "-A"); g("commit", "-qm", "bump");
+  const res = checkDecisions(d, { base, head: g("rev-parse", "HEAD").trim() });
+  assert.equal(res.leads.length, 0);                           // nested basename bound authoritatively under the old reader
+  assert.ok(res.malformedCount >= 1); assert.equal(res.exitCode, 1);
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("closure4: a symlink-mode card is malformed, never surfaces (regular-file mode required)", () => {
+  const { d, g, sha } = poolRepo("csym-");
+  const card = mkDecision({ sha, evidenceFile: "src/db.js", span: "createPool", scopes: ["src/db.js"] });
+  mkdirSync(join(d, ".logbook", "decisions"), { recursive: true });
+  symlinkSync(serializeDecisionCard(card), join(d, ".logbook", "decisions", card.cardId + ".json")); // git stores the card JSON as the symlink target blob
+  g("add", "-A"); g("commit", "-qm", "symlink card"); const base = g("rev-parse", "HEAD").trim();
+  writeFileSync(join(d, "src", "db.js"), "createPool({max:20})\n"); g("add", "-A"); g("commit", "-qm", "bump");
+  const res = checkDecisions(d, { base, head: g("rev-parse", "HEAD").trim() });
+  assert.equal(res.leads.length, 0);                           // old read the link-target blob as card content and surfaced it
+  assert.ok(res.malformedCount >= 1); assert.equal(res.exitCode, 1);
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("closure4: checkDecisions resolves base/head refs once (branch names, not just SHAs)", () => {
+  const { d, g, sha } = poolRepo("cref-");
+  writeCard(d, g, "decisions", mkDecision({ sha, evidenceFile: "src/db.js", span: "createPool", scopes: ["src/db.js"] }));
+  g("commit", "-qm", "accept"); g("branch", "base-branch");
+  writeFileSync(join(d, "src", "db.js"), "createPool({max:20})\n"); g("add", "-A"); g("commit", "-qm", "bump"); g("branch", "head-branch");
+  const res = checkDecisions(d, { base: "base-branch", head: "head-branch" });   // symbolic refs resolve to immutable OIDs
+  assert.equal(res.result, "leads"); assert.equal(res.leads.length, 1); assert.ok(res.leads[0].authoritative);
+  rmSync(d, { recursive: true, force: true });
+});
