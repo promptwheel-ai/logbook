@@ -26,7 +26,7 @@ import {
   saveMachineCard, editCard, foldCards, cardIdFor, revHashFor,
   parseCards, spanGroundedStrict, groundStatus, loadCards, validCardRecord,
   decisionCardId, validDecisionCard, serializeDecisionCard, parseDecisionCard, DECISION_SCHEMA,
-  checkDecisions, renderDecisionLeads, parsePolicy, publishPolicyLeads, withPublishLock, migrateLegacyToDrafts,
+  checkDecisions, renderDecisionLeads, parsePolicy, publishPolicyLeads, withPublishLock, migrateLegacyToDrafts, readPlane,
   projectLegacyAnnotation, projectLegacy, CARD_SCHEMA, canonicalCardLine,
 } from "../bin/logbook.mjs";
 
@@ -3632,5 +3632,47 @@ test("batched-read: an OVERSIZED card blob (>MAX_CARD_BYTES) is malformed, never
   writeFileSync(join(d, "src", "db.js"), "createPool({max:20})\n"); g("add", "-A"); g("commit", "-qm", "bump");
   const res = checkDecisions(d, { base, head: g("rev-parse", "HEAD").trim() });
   assert.ok(res.malformedCount >= 1); assert.equal(res.exitCode, 1);         // oversized => malformed, not read/accepted
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("batched-read: readPlane is behaviorally IDENTICAL to a per-card reference over an adversarial plane", () => {
+  const { d, g, sha } = poolRepo("bdiff-");
+  // reference implementation: the pre-#1 per-card reader (ls-tree --name-only + git show per card)
+  const refReadPlane = (repo, ref, plane) => {
+    const out = { ids: [], malformed: [], unreadable: false };
+    let ls;
+    try { ls = execFileSync("git", ["-C", repo, "--no-replace-objects", "ls-tree", "-r", "--name-only", "-z", ref, "--", `.logbook/${plane}/`], { encoding: "utf8" }); }
+    catch { out.unreadable = true; return out; }
+    for (const path of ls.split("\0").filter(Boolean)) {
+      if (!path.endsWith(".json")) continue;
+      let text; try { text = execFileSync("git", ["-C", repo, "--no-replace-objects", "show", `${ref}:${path}`], { encoding: "utf8", maxBuffer: 1 << 30 }); } catch { out.malformed.push(path); continue; }
+      const card = parseDecisionCard(text);
+      if (!card || path.split("/").pop() !== card.cardId + ".json") { out.malformed.push(path); continue; }
+      out.ids.push(card.cardId);
+    }
+    return out;
+  };
+  const P = "decisions", dir = join(d, ".logbook", P); mkdirSync(dir, { recursive: true });
+  const write = (name, content) => writeFileSync(join(dir, name), content);
+  const A = mkDecision({ sha, span: "createPool", evidenceFile: "src/db.js", scopes: ["src/db.js"], claim: "alpha" });
+  const B = mkDecision({ sha, span: "createPool", evidenceFile: "src/db.js", scopes: ["src/db.js"], claim: "beta" });
+  const C = mkDecision({ sha, span: "createPool", evidenceFile: "src/db.js", scopes: ["src/db.js"], claim: "gamma" });
+  const D = mkDecision({ sha, span: "createPool", evidenceFile: "src/db.js", scopes: ["src/db.js"], claim: "delta" });
+  write(A.cardId + ".json", serializeDecisionCard(A));                 // valid
+  write(B.cardId + ".json", serializeDecisionCard(B));                 // valid
+  write("WRONGNAME.json", serializeDecisionCard(C));                   // filename != cardId => malformed
+  write("00ff.json", '{"not":"a card"}');                             // parses as JSON, not a card => malformed
+  write("notes.txt", "ignored");                                      // non-.json => ignored
+  write(mkDecision({ sha, claim: "x".repeat(70 * 1024) }).cardId + ".json", serializeDecisionCard(mkDecision({ sha, claim: "x".repeat(70 * 1024) }))); // oversized
+  write(D.cardId + ".json", serializeDecisionCard(D));                 // valid, but we delete its blob below
+  g("add", "-A"); g("commit", "-qm", "adversarial plane"); const ref = g("rev-parse", "HEAD").trim();
+  const dblob = g("rev-parse", `${ref}:.logbook/${P}/${D.cardId}.json`).trim();
+  rmSync(join(d, ".git", "objects", dblob.slice(0, 2), dblob.slice(2)));  // D's blob gone (subtree intact)
+  const got = readPlane(d, ref, P);
+  const ref2 = refReadPlane(d, ref, P);
+  assert.deepEqual(got.cards.map((c) => c.card.cardId).sort(), ref2.ids.sort(), "accepted cardIds must match the per-card reader");
+  assert.deepEqual(got.malformed.slice().sort(), ref2.malformed.slice().sort(), "malformed paths must match the per-card reader");
+  assert.equal(got.unreadable, ref2.unreadable);
+  assert.deepEqual(got.cards.map((c) => c.card.cardId).sort(), [A.cardId, B.cardId].sort()); // only the two valid, correctly-named cards
   rmSync(d, { recursive: true, force: true });
 });

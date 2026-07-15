@@ -2101,7 +2101,7 @@ function readPlaneBlobs(repo, ref, plane) {
   if (!flush()) return { unreadable: true, entries: [], textByOid: new Map() };
   return { unreadable: false, entries, textByOid };
 }
-function readPlane(repo, ref, plane) {
+export function readPlane(repo, ref, plane) {
   const out = { cards: [], malformed: [], unreadable: false };
   const pb = readPlaneBlobs(repo, ref, plane);
   if (pb.unreadable) { out.unreadable = true; return out; }                // cannot enumerate the trusted plane => unmeasurable, NOT "absent"
