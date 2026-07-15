@@ -3580,3 +3580,57 @@ test("closure3: runCheckDiff treats an UNREADABLE committed journal blob as unme
   assert.match(r.message, /unreadable/);
   rmSync(d, { recursive: true, force: true });
 });
+
+// ---------- git-files batched plane read (#1: one ls-tree + batched cat-file) --------
+test("batched-read: a multi-card plane reads every card and surfaces exactly the diff-matching one", () => {
+  const { d, g, sha } = poolRepo("bmulti-");
+  const match = mkDecision({ sha, evidenceFile: "src/db.js", span: "createPool", scopes: ["src/db.js"], claim: "the matching decision" });
+  writeCard(d, g, "decisions", match);
+  for (let i = 0; i < 63; i++) writeCard(d, g, "decisions", mkDecision({ sha, evidenceFile: "other/f.js", span: "x", scopes: ["other/"], claim: "filler " + i }));
+  g("commit", "-qm", "64 decisions"); const base = g("rev-parse", "HEAD").trim();
+  writeFileSync(join(d, "src", "db.js"), "createPool({max:20})\n"); g("add", "-A"); g("commit", "-qm", "bump");
+  const res = checkDecisions(d, { base, head: g("rev-parse", "HEAD").trim() });
+  assert.equal(res.acceptedCount, 64);                 // all 64 read via the batched path
+  assert.equal(res.leads.length, 1);                   // only the one touching the diff surfaces
+  assert.equal(res.leads[0].card.cardId, match.cardId);
+  assert.ok(res.leads[0].authoritative);
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("batched-read: a missing card BLOB (ls-tree ok, object gone) is malformed at read, not dropped", () => {
+  const { d, g, sha } = poolRepo("bmiss-");
+  const cards = [0, 1, 2].map((i) => mkDecision({ sha, evidenceFile: "src/db.js", span: "createPool", scopes: ["src/db.js"], claim: "decision " + i }));
+  for (const c of cards) writeCard(d, g, "decisions", c);
+  g("commit", "-qm", "3 decisions"); const base = g("rev-parse", "HEAD").trim();
+  writeFileSync(join(d, "src", "db.js"), "createPool({max:20})\n"); g("add", "-A"); g("commit", "-qm", "bump");
+  const blob = g("rev-parse", `${base}:.logbook/decisions/${cards[1].cardId}.json`).trim();
+  rmSync(join(d, ".git", "objects", blob.slice(0, 2), blob.slice(2)));       // one blob gone, subtree intact => ls-tree ok
+  const res = checkDecisions(d, { base, head: g("rev-parse", "HEAD").trim() });
+  assert.ok(res.malformedCount >= 1); assert.equal(res.exitCode, 1);
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("batched-read: publish quota read blocks on a missing committed lead BLOB (unmeasurable)", () => {
+  const { d, g, sha } = policyRepo("bpubmiss-", GOOD_TOML);
+  const lead = mkDecision({ sha, evidenceFile: "src/db.js", span: "createPool", scopes: ["src/db.js"], by: "auto" });
+  writeCard(d, g, "leads", lead); g("commit", "-qm", "one committed lead");
+  const commit = g("rev-parse", "HEAD").trim();
+  const blob = g("rev-parse", `${commit}:.logbook/leads/${lead.cardId}.json`).trim();
+  rmSync(join(d, ".git", "objects", blob.slice(0, 2), blob.slice(2)));
+  const r = publishPolicyLeads(d, [{ ...goodCand(sha), claim: "brand new" }], { trustRef: commit });
+  assert.equal(r.published, 0); assert.equal(r.incomplete, true); assert.equal(r.exitCode, 1);
+  assert.match(r.error, /malformed|unmeasurable/);
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("batched-read: an OVERSIZED card blob (>MAX_CARD_BYTES) is malformed, never read as a valid card", () => {
+  const { d, g, sha } = poolRepo("bbig-");
+  const big = mkDecision({ sha, evidenceFile: "src/db.js", span: "createPool", scopes: ["src/db.js"], claim: "x".repeat(70 * 1024) });
+  mkdirSync(join(d, ".logbook", "decisions"), { recursive: true });
+  writeFileSync(join(d, ".logbook", "decisions", big.cardId + ".json"), serializeDecisionCard(big)); // >64KiB, filename binds
+  g("add", "-A"); g("commit", "-qm", "oversized card"); const base = g("rev-parse", "HEAD").trim();
+  writeFileSync(join(d, "src", "db.js"), "createPool({max:20})\n"); g("add", "-A"); g("commit", "-qm", "bump");
+  const res = checkDecisions(d, { base, head: g("rev-parse", "HEAD").trim() });
+  assert.ok(res.malformedCount >= 1); assert.equal(res.exitCode, 1);         // oversized => malformed, not read/accepted
+  rmSync(d, { recursive: true, force: true });
+});
