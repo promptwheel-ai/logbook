@@ -24,7 +24,7 @@ import {
   saveRejection, saveVerification, spanGrounded, reviewKey,
   appendPrivateLine, renderLeads, writeCheckMetrics, pendingDrafts,
   saveMachineCard, editCard, foldCards, cardIdFor, revHashFor,
-  parseCards, spanGroundedStrict, loadCards, validCardRecord,
+  parseCards, spanGroundedStrict, groundStatus, loadCards, validCardRecord,
   projectLegacyAnnotation, projectLegacy, CARD_SCHEMA, canonicalCardLine,
 } from "../bin/logbook.mjs";
 
@@ -2599,16 +2599,17 @@ test("pivot: every concurrent writer succeeds; final revision is exactly N+1 (CA
   rmSync(r, { recursive: true, force: true });
 });
 
-test("audit: a legacy amendment migrates to a PENDING human_attestation draft (still unaccepted)", () => {
+test("audit: a legacy amendment migrates to an INERT legacy_unverified draft (not human_attestation, no authority)", () => {
   const { r, sha } = mkAcceptRepo();
   const anns = [{ sha, why: "the decision", by: "gpt", date: "2024-01-01" }];
   const acc = [{ type: "acceptance", sha, annotationSha256: canonicalAnnotationHash(anns[0]), paths: ["src/x.ts"], acceptedBy: "alice", acceptedAt: "2024-01-02", amendment: "also caused the customer-X incident" }];
   const { cards, cardReviews } = projectLegacy(anns, acc);
   assert.equal(cardReviews.length, 0);
-  const note = cards.find((c) => c.sourceType === "human_attestation");
-  assert.ok(note, "amendment did not become a human_attestation draft");
-  assert.equal(note.claim, "also caused the customer-X incident");
+  const note = cards.find((c) => c.claim === "also caused the customer-X incident");
+  assert.ok(note, "amendment was not preserved as a draft");
+  assert.equal(note.sourceType, "legacy_unverified");     // NOT mintable as human_attestation from unbound input
   assert.equal(note.span, null);
+  assert.ok(cards.every((c) => c.sourceType === "legacy_unverified")); // nothing minted as human_attestation
   rmSync(r, { recursive: true, force: true });
 });
 
@@ -2817,4 +2818,93 @@ test("pivot: Unicode / non-ASCII paths ground correctly via -z raw paths (quotep
   assert.equal(spanGroundedStrict(d, sha, "CAFE_CHANGED", "diff", p), true);
   assert.ok(saveMachineCard(d, d, { sha, claim: "unicode path", span: "CAFE_CHANGED", side: "diff", path: p, by: "x" }).card);
   rmSync(d, { recursive: true, force: true });
+});
+
+// ---------- Hardening pass regressions (Codex bounded-edge findings) ----------
+test("harden: grounding compares BYTES — an invalid 0xff byte does not become U+FFFD and ground phantom evidence", () => {
+  const { d, g } = tmpGitRepo("logbook-bytes-");
+  g("init", "-q");
+  writeFileSync(join(d, "raw.bin"), Buffer.from([0x4f, 0x4c, 0x44, 0x0a]));                 // "OLD\n"
+  g("add", "-A"); g("commit", "-qm", "base");
+  writeFileSync(join(d, "raw.bin"), Buffer.from([0x41, 0xff, 0x42, 0x0a]));                 // "A\xffB\n"
+  g("add", "-A"); g("commit", "-qm", "add invalid byte");
+  const sha = g("rev-parse", "HEAD").trim();
+  const FFFD = String.fromCharCode(0xFFFD);
+  assert.equal(spanGroundedStrict(d, sha, "A", "diff", "raw.bin"), true);                   // a real byte grounds
+  assert.equal(spanGroundedStrict(d, sha, "A" + FFFD + "B", "diff", "raw.bin"), false);     // the U+FFFD decode does NOT
+  assert.equal(spanGroundedStrict(d, sha, FFFD, "diff", "raw.bin"), false);
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("harden: unmeasurable is DISTINCT from not-grounded (merge => could-not-verify; normal => grounded/absent)", () => {
+  const { d, g, gq } = tmpGitRepo("logbook-unmeas-");
+  g("init", "-q"); mkdirSync(join(d, "src"));
+  writeFileSync(join(d, "src", "x.js"), "base\n"); g("add", "-A"); g("commit", "-qm", "base");
+  const main = g("branch", "--show-current").trim();
+  g("checkout", "-q", "-b", "feature"); writeFileSync(join(d, "src", "x.js"), "feat\n"); g("add", "-A"); g("commit", "-qm", "f");
+  g("checkout", "-q", main); writeFileSync(join(d, "src", "x.js"), "mainline\n"); g("add", "-A"); g("commit", "-qm", "m");
+  gq("merge", "feature"); writeFileSync(join(d, "src", "x.js"), "RESOLVED\n"); g("add", "-A"); g("commit", "--no-edit", "-q");
+  const M = g("rev-parse", "HEAD").trim();
+  assert.equal(groundStatus(d, M, "RESOLVED", "diff", "src/x.js"), "unmeasurable");         // merge => cannot verify
+  const res = saveMachineCard(d, d, { sha: M, claim: "c", span: "RESOLVED", side: "diff", path: "src/x.js", by: "x" });
+  assert.match(res.error, /could not verify/);
+  // a normal commit: grounded vs absent (both measurable)
+  const child = g("rev-parse", "HEAD").trim();
+  writeFileSync(join(d, "src", "x.js"), "AFTER_MERGE\n"); g("add", "-A"); g("commit", "-qm", "post");
+  const c2 = g("rev-parse", "HEAD").trim();
+  assert.equal(groundStatus(d, c2, "AFTER_MERGE", "diff", "src/x.js"), "grounded");
+  assert.equal(groundStatus(d, c2, "not_present_zzz", "diff", "src/x.js"), "absent");
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("harden: a line carried by an unpaired (low-similarity) rename abstains, but a genuinely new line grounds", () => {
+  const { d, g } = tmpGitRepo("logbook-carry-");
+  g("init", "-q"); mkdirSync(join(d, "src"));
+  writeFileSync(join(d, "src", "a.js"), "UNIQUE_CARRIED_LINE\n"); g("add", "-A"); g("commit", "-qm", "add a");
+  rmSync(join(d, "src", "a.js"));
+  writeFileSync(join(d, "src", "b.js"), "totally\ndifferent\nfile\nhere\nUNIQUE_CARRIED_LINE\nmore\nlines\nyet\nmore\n");
+  g("add", "-A"); g("commit", "-qm", "delete a, add mostly-new b");
+  const sha = g("rev-parse", "HEAD").trim();
+  assert.equal(spanGroundedStrict(d, sha, "UNIQUE_CARRIED_LINE", "diff", "src/b.js"), false); // carried from deleted a.js
+  assert.equal(spanGroundedStrict(d, sha, "totally", "diff", "src/b.js"), true);              // genuinely new
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("harden: root-commit grounding writes NO new loose object (hash-object --stdin, not mktree)", () => {
+  const { d, g } = tmpGitRepo("logbook-root-");
+  g("init", "-q"); writeFileSync(join(d, "f.js"), "ROOT_LINE\n"); g("add", "-A"); g("commit", "-qm", "root");
+  const root = g("rev-parse", "HEAD").trim();
+  const looseCount = () => parseInt(g("count-objects", "-v").match(/count: (\d+)/)[1], 10);
+  const before = looseCount();
+  assert.equal(spanGroundedStrict(d, root, "ROOT_LINE", "diff", "f.js"), true);              // root grounds vs empty tree
+  assert.equal(looseCount(), before, "grounding wrote a new loose object (mktree side effect)");
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("harden: a FIFO at decision-cards.jsonl is refused, not blocked on (O_NONBLOCK + regular-file check)", () => {
+  const { r } = mkAcceptRepo();
+  execFileSync("mkfifo", [join(r, "decision-cards.jsonl")]);
+  assert.throws(() => loadCards(r));                          // returns/throws promptly, does not hang
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("harden: an append refuses a hardlinked journal (nlink !== 1)", () => {
+  const { r } = mkAcceptRepo();
+  writeFileSync(join(r, "other.txt"), "");
+  execFileSync("ln", [join(r, "other.txt"), join(r, "decision-cards.jsonl")]); // hardlink
+  assert.throws(() => appendPrivateLine(join(r, "decision-cards.jsonl"), "x\n"), /non-private/);
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("harden: projectLegacy reports skipped/lossy rows instead of silently coercing", () => {
+  const { r, sha } = mkAcceptRepo();
+  const anns = [{ sha, why: "ok", by: "gpt", date: "2024-01-01" }, { sha: "zzz", why: "bad sha", by: "gpt", date: "2024-01-01" }];
+  const acc = [{ sha: "nothex", amendment: "note on a bad sha" }, { sha, amendment: "x".repeat(600) }];
+  const { cards, cardReviews, skipped } = projectLegacy(anns, acc);
+  assert.equal(cardReviews.length, 0);
+  assert.ok(skipped.some((s) => s.reason === "annotation-unmigratable"));  // the "zzz" sha annotation
+  assert.ok(skipped.some((s) => s.reason === "amendment-bad-sha"));        // the "nothex" amendment
+  assert.ok(skipped.some((s) => s.reason === "amendment-truncated"));      // the 600-char amendment
+  assert.ok(cards.some((c) => c.claim === "ok"));
+  rmSync(r, { recursive: true, force: true });
 });

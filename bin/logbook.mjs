@@ -18,7 +18,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import {
   writeFileSync, existsSync, realpathSync, readFileSync, mkdirSync, lstatSync,
   renameSync, unlinkSync, chmodSync, openSync, fstatSync, writeSync, closeSync,
-  rmSync, constants as FS,
+  rmSync, rmdirSync, constants as FS,
 } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { resolve, join, basename, dirname, relative, isAbsolute, sep } from "node:path";
@@ -1763,73 +1763,102 @@ export function revHashFor(rec) {
 // parent (shallow / graft) is unmeasurable and refused. `-z` carries
 // quoted / Unicode paths losslessly.
 const ZERO_OID = /^0+$/;
-function gitObj(repo, args, opts = {}) {
-  return spawnSync("git", ["-C", repo, "--no-replace-objects", ...args], { encoding: "utf8", maxBuffer: 1 << 30, ...opts });
+const MAX_GROUND_BYTES = 8 << 20;   // per-blob cap; a bigger blob is UNMEASURABLE, not silently grounded
+const MAX_DIFF_ENTRIES = 5000;      // a huge diff is UNMEASURABLE (can't afford the carry scan)
+// All git object reads: --no-replace-objects (no replace refs) and
+// GIT_NO_LAZY_FETCH=1 (a partial/blob:none clone must NOT silently fetch a
+// missing blob over the network — it must fail, i.e. be treated as unmeasurable).
+function gitBuf(repo, args, opts = {}) {
+  return spawnSync("git", ["-C", repo, "--no-replace-objects", ...args],
+    { maxBuffer: MAX_GROUND_BYTES + (1 << 20), env: { ...process.env, GIT_NO_LAZY_FETCH: "1" }, ...opts }); // Buffer stdout (no encoding)
 }
+function gitObj(repo, args, opts = {}) { return gitBuf(repo, args, { encoding: "utf8", ...opts }); }
+// Raw commit object as bytes. Requires structural validity: exactly ONE tree and
+// well-formed parent OIDs. message is kept as bytes (may be non-UTF-8).
 function catCommit(repo, sha) {
-  const r = gitObj(repo, ["cat-file", "commit", sha]);
-  if (r.status !== 0) return null;
-  const nl = r.stdout.indexOf("\n\n");
-  const header = nl >= 0 ? r.stdout.slice(0, nl) : r.stdout;
-  let tree = null; const parents = [];
+  const r = gitBuf(repo, ["cat-file", "commit", sha]);
+  if (r.status !== 0 || !r.stdout) return null;
+  const buf = r.stdout;
+  const sep = buf.indexOf("\n\n");
+  const header = (sep >= 0 ? buf.slice(0, sep) : buf).toString("latin1"); // header is ASCII
+  let trees = 0, tree = null; const parents = [];
   for (const line of header.split("\n")) {
-    if (line.startsWith("tree ")) tree = line.slice(5).trim();
+    if (line.startsWith("tree ")) { trees++; tree = line.slice(5).trim(); }
     else if (line.startsWith("parent ")) parents.push(line.slice(7).trim());
   }
-  return OID.test(tree || "") ? { tree, parents, message: nl >= 0 ? r.stdout.slice(nl + 2) : "" } : null;
+  if (trees !== 1 || !OID.test(tree || "") || !parents.every((p) => OID.test(p))) return null;
+  return { tree, parents, message: sep >= 0 ? buf.slice(sep + 2) : Buffer.alloc(0) };
 }
+// Blob bytes, or "" for an absent side; null == UNMEASURABLE (unreadable / oversized).
 function catBlob(repo, oid) {
-  if (!oid || ZERO_OID.test(oid)) return "";              // absent side (add/delete) => empty
-  const r = gitObj(repo, ["cat-file", "blob", oid]);
-  return r.status === 0 ? r.stdout : null;                // null => unreadable => caller refuses
+  if (!oid || ZERO_OID.test(oid)) return Buffer.alloc(0);
+  const r = gitBuf(repo, ["cat-file", "blob", oid]);
+  if (r.status !== 0 || r.error) return null;
+  return r.stdout.length > MAX_GROUND_BYTES ? null : r.stdout;
 }
+// Empty-tree OID WITHOUT writing an object (mktree writes to .git/objects).
 function emptyTree(repo) {
-  const r = gitObj(repo, ["mktree"], { input: "" });
+  const r = gitObj(repo, ["hash-object", "-t", "tree", "--stdin"], { input: "" });
   return r.status === 0 ? r.stdout.trim() : null;
 }
-// Raw diff between two explicit tree OIDs. Entries carry both blob OIDs; -z keeps
-// paths raw (unquoted); --find-renames pairs a rename so a moved file's unchanged
-// content is compared against its source, not treated as all-new.
+// Raw diff between two explicit tree OIDs. Paths kept as raw BYTES (Buffer) so
+// invalid UTF-8 / quoted / Unicode names are exact; --find-renames pairs a rename.
 function rawTreeDiff(repo, treeOld, treeNew) {
-  const r = gitObj(repo, ["diff-tree", "-r", "-z", "--raw", "--find-renames", "--no-textconv", treeOld, treeNew]);
-  if (r.status !== 0) return null;
-  const toks = r.stdout.split("\0");
+  const r = gitBuf(repo, ["diff-tree", "-r", "-z", "--raw", "--find-renames", "--no-textconv", treeOld, treeNew]);
+  if (r.status !== 0 || r.error) return null;
+  const buf = r.stdout, toks = []; let start = 0;
+  for (let i = 0; i < buf.length; i++) if (buf[i] === 0) { toks.push(buf.slice(start, i)); start = i + 1; }
+  if (start < buf.length) toks.push(buf.slice(start));
   const out = []; let i = 0;
   while (i < toks.length) {
-    const meta = toks[i++];
-    if (!meta || meta[0] !== ":") continue;               // ":oldmode newmode oldsha newsha status"
+    const meta = toks[i++].toString("latin1");            // ":oldmode newmode oldsha newsha status" is ASCII
+    if (!meta || meta[0] !== ":") continue;
     const p = meta.slice(1).split(" ");
     if (p.length < 5) continue;
-    const status = p[4], two = /^[RC]/.test(status);
-    const first = toks[i++], second = two ? toks[i++] : null; // R/C: src, dst
-    out.push({ status, oldSha: p[2], newSha: p[3], path: two ? second : first });
+    const two = /^[RC]/.test(p[4]);
+    const first = toks[i++], second = two ? toks[i++] : null;
+    out.push({ oldSha: p[2], newSha: p[3], pathBuf: two ? second : first }); // pathBuf: raw bytes
   }
   return out;
 }
-export function spanGroundedStrict(repo, sha, span, side, evidenceFile) {
-  if (typeof span !== "string" || !span.trim()) return false;
-  const norm = (s) => String(s).replace(/\r\n/g, "\n");
-  const needle = norm(span);
+// "grounded" | "absent" (verified not evidence) | "unmeasurable" (could not verify).
+// Byte comparison end-to-end: a validated single-line span (no CR/LF) is a byte
+// substring regardless of line endings, so no lossy UTF-8 decode is involved.
+export function groundStatus(repo, sha, span, side, evidenceFile) {
+  if (typeof span !== "string" || !span.trim()) return "absent";
+  const needle = Buffer.from(span, "utf8");
   const commit = catCommit(repo, sha);
-  if (!commit) return false;
-  if (side === "message") return norm(commit.message).includes(needle);
-  if (side !== "diff" || !evidenceFile) return false;
-  if (commit.parents.length > 1) return false;            // merge: refuse (no per-file attribution)
+  if (!commit) return "unmeasurable";
+  if (side === "message") return commit.message.includes(needle) ? "grounded" : "absent";
+  if (side !== "diff" || !evidenceFile) return "absent";
+  if (commit.parents.length > 1) return "unmeasurable";   // merge: no per-file attribution
   let treeOld;
-  if (commit.parents.length === 0) { treeOld = emptyTree(repo); if (!treeOld) return false; } // root: vs empty tree
-  else {
-    const parent = catCommit(repo, commit.parents[0]);
-    if (!parent) return false;                            // declared parent unavailable (shallow/graft) => unmeasurable
-    treeOld = parent.tree;
-  }
+  if (commit.parents.length === 0) { treeOld = emptyTree(repo); if (!treeOld) return "unmeasurable"; }
+  else { const parent = catCommit(repo, commit.parents[0]); if (!parent) return "unmeasurable"; treeOld = parent.tree; }
   const diff = rawTreeDiff(repo, treeOld, commit.tree);
-  if (!diff) return false;
-  const entry = diff.find((e) => e.path === evidenceFile); // exact raw path (Unicode/quoted safe via -z)
-  if (!entry) return false;
+  if (!diff) return "unmeasurable";
+  if (diff.length > MAX_DIFF_ENTRIES) return "unmeasurable";
+  const evBuf = Buffer.from(evidenceFile, "utf8");
+  const entry = diff.find((e) => e.pathBuf && e.pathBuf.equals(evBuf));
+  if (!entry) return "absent";
   const newBlob = catBlob(repo, entry.newSha), oldBlob = catBlob(repo, entry.oldSha);
-  if (newBlob == null || oldBlob == null) return false;   // unreadable blob => refuse
-  const inNew = norm(newBlob).includes(needle), inOld = norm(oldBlob).includes(needle);
-  return (inNew && !inOld) || (inOld && !inNew);          // introduced XOR removed; else abstain
+  if (newBlob == null || oldBlob == null) return "unmeasurable";
+  const inNew = newBlob.includes(needle), inOld = oldBlob.includes(needle);
+  const dir = inNew && !inOld ? "new" : (inOld && !inNew ? "old" : null);
+  if (!dir) return "absent";                              // present in both, or neither
+  // Guard against an UNPAIRED low-similarity rename: if the span is carried by
+  // the opposite side of ANY other changed file, it isn't uniquely this file's
+  // introduced/removed evidence — abstain (conservative).
+  for (const e of diff) {
+    if (e === entry) continue;
+    const opp = catBlob(repo, dir === "new" ? e.oldSha : e.newSha);
+    if (opp == null) return "unmeasurable";
+    if (opp.includes(needle)) return "absent";
+  }
+  return "grounded";
+}
+export function spanGroundedStrict(repo, sha, span, side, evidenceFile) {
+  return groundStatus(repo, sha, span, side, evidenceFile) === "grounded";
 }
 
 // One fail-closed schema check per record: allowed keys only, typed values,
@@ -1917,11 +1946,11 @@ export function foldCards(records) {
 // decision-cards.jsonl must not be followed to an arbitrary target.
 function readPrivateText(path) {
   let fd;
-  try { fd = openSync(path, FS.O_RDONLY | FS.O_NOFOLLOW); }
+  try { fd = openSync(path, FS.O_RDONLY | FS.O_NOFOLLOW | FS.O_NONBLOCK); } // O_NONBLOCK: a FIFO must not block the open
   catch (e) { if (e.code === "ENOENT") return null; throw e; }
   try {
     const st = fstatSync(fd);
-    if (!st.isFile()) throw new Error(`not a regular file: ${path}`);
+    if (!st.isFile() || st.nlink !== 1) throw new Error(`not a regular single-link file: ${path}`);
     return readFileSync(fd, "utf8");
   } finally { closeSync(fd); }
 }
@@ -1947,17 +1976,23 @@ export function loadCards(dir) {
 // fork is structurally impossible. Slow work (grounding) happens OUTSIDE.
 function withCardLock(dir, fn) {
   const lockDir = cardsPath(dir) + ".lock";
-  const deadline = Date.now() + 5000;
+  const start = process.hrtime.bigint();               // MONOTONIC — immune to wall-clock jumps
+  const budgetNs = 5_000_000_000n;
   for (;;) {
     try { mkdirSync(lockDir); break; }
     catch (e) {
       if (e.code !== "EEXIST") throw e;
-      if (Date.now() > deadline)
+      if (process.hrtime.bigint() - start > budgetNs)
         return { error: "decision-cards.jsonl.lock is held — retry; if no logbook process is running, a prior run crashed: remove decision-cards.jsonl.lock manually" };
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
     }
   }
-  try { return fn(); } finally { try { rmSync(lockDir, { recursive: true, force: true }); } catch { /* already gone */ } }
+  let out;
+  try { out = fn(); }
+  catch (e) { try { rmdirSync(lockDir); } catch { /* leave for manual removal */ } throw e; }
+  try { rmdirSync(lockDir); }                           // NON-recursive: an unexpectedly non-empty lock is surfaced, not force-wiped
+  catch { if (out && typeof out === "object" && out.error == null) out.cleanupWarning = "operation succeeded but lock cleanup failed — remove decision-cards.jsonl.lock manually"; }
+  return out;
 }
 
 // Write a NEW machine_source card (rev 1). Grounding (slow, git) is done OUTSIDE
@@ -1974,10 +2009,13 @@ export function saveMachineCard(repo, dir, { sha, claim, span, side, path, evide
   let ev = null;
   if (sd === "diff") { const ep = normEvPath(evidenceFile ?? path); if (ep.error) return { error: `--file ${ep.error}` }; ev = ep.value; }
   const sp = normText(span, MAX_SPAN); if (sp.error) return { error: `--span ${sp.error}` };
-  if (!spanGroundedStrict(repo, resolved, sp.value, sd, ev))
-    return { error: sd === "message"
-      ? `--span is not verbatim in the commit message at ${resolved.slice(0, 12)}`
-      : `--span is not introduced/removed evidence of ${ev} at ${resolved.slice(0, 12)}` };
+  const gs = groundStatus(repo, resolved, sp.value, sd, ev);
+  if (gs !== "grounded")
+    return { error: gs === "unmeasurable"
+      ? `could not verify --span at ${resolved.slice(0, 12)} (merge / missing parent / oversized / git error)`
+      : sd === "message"
+        ? `--span is not verbatim in the commit message at ${resolved.slice(0, 12)}`
+        : `--span is not introduced/removed evidence of ${ev} at ${resolved.slice(0, 12)}` };
   const rec = { schema: CARD_SCHEMA, cardId: "", rev: 1, revHash: "", sha: resolved,
     sourceType: "machine_source", claim: cl.value, side: sd, evidenceFile: ev, span: sp.value,
     by: au.value, at: today(), supersedes: null };
@@ -2014,8 +2052,9 @@ export function editCard(repo, dir, { cardId, claim, span, side, path, evidenceF
     if (sd !== "message" && sd !== "diff") return { error: "--side must be message | diff" };
     if (sd === "diff") { const ep = normEvPath(evidenceFile ?? path ?? base.evidenceFile); if (ep.error) return { error: `--file ${ep.error}` }; ev = ep.value; }
     const sp = normText(span != null ? span : base.span, MAX_SPAN); if (sp.error) return { error: `--span ${sp.error}` }; spVal = sp.value;
-    if (!spanGroundedStrict(repo, base.sha, spVal, sd, ev))       // base.sha is commit-invariant across revisions
-      return { error: `re-grounded --span is not introduced/removed evidence at ${base.sha.slice(0, 12)}` };
+    const gs = groundStatus(repo, base.sha, spVal, sd, ev);        // base.sha is commit-invariant across revisions
+    if (gs !== "grounded")
+      return { error: gs === "unmeasurable" ? `could not verify re-grounded --span at ${base.sha.slice(0, 12)}` : `re-grounded --span is not introduced/removed evidence at ${base.sha.slice(0, 12)}` };
   }
   // ---- fast critical section INSIDE the lock: reload, CAS, append ----
   return withCardLock(dir, () => {
@@ -2071,22 +2110,32 @@ export function projectLegacyAnnotation(ann) {
 // amendment (off-git context on an old acceptance) becomes a PENDING
 // human_attestation draft — also unaccepted. `cardReviews` is always empty.
 export function projectLegacy(annotations, legacyAcceptances) {
-  const cards = [], seen = new Set();
-  const add = (rec) => { if (rec && !seen.has(rec.cardId)) { cards.push(rec); seen.add(rec.cardId); } };
-  for (const ann of annotations || []) add(projectLegacyAnnotation(ann));
-  const clean = (v, max) => String(v ?? "").replace(new RegExp("[" + CTRL_SRC + "]", "g"), " ").slice(0, max).trim();
+  const cards = [], seen = new Set(), skipped = [];
+  const emit = (rec) => { if (!seen.has(rec.cardId)) { cards.push(rec); seen.add(rec.cardId); } };
+  const clean = (v, max) => { const s = String(v ?? "").replace(new RegExp("[" + CTRL_SRC + "]", "g"), " ").trim(); return { value: s.slice(0, max), lossy: s.length > max }; };
+  for (const ann of annotations || []) {
+    const rec = projectLegacyAnnotation(ann);
+    if (rec) emit(rec); else skipped.push({ reason: "annotation-unmigratable", sha: ann && ann.sha });
+  }
+  // A human amendment (off-git note on an old acceptance) is preserved as an INERT
+  // legacy_unverified draft — NOT human_attestation: that source type must not be
+  // mintable from arbitrary/unbound legacy input. It carries no authority; a human
+  // re-accepts. Lossy/dropped rows are REPORTED, never silently coerced.
   for (const acc of legacyAcceptances || []) {
-    if (!acc || typeof acc.amendment !== "string") continue;
-    const claim = clean(acc.amendment, MAX_CLAIM);
-    if (!claim || typeof acc.sha !== "string" || !OID.test(acc.sha)) continue;
+    if (!acc || typeof acc.amendment !== "string") continue;         // no amendment => nothing to preserve
+    if (typeof acc.sha !== "string" || !OID.test(acc.sha)) { skipped.push({ reason: "amendment-bad-sha" }); continue; }
+    const c = clean(acc.amendment, MAX_CLAIM);
+    if (!c.value) { skipped.push({ reason: "amendment-empty-after-clean", sha: acc.sha }); continue; }
+    if (c.lossy) skipped.push({ reason: "amendment-truncated", sha: acc.sha });
+    const by = clean(acc.acceptedBy, MAX_BY);
     const rec = { schema: CARD_SCHEMA, cardId: "", rev: 1, revHash: "", sha: acc.sha,
-      sourceType: "human_attestation", claim, side: null, evidenceFile: null, span: null,
-      by: clean(acc.acceptedBy, MAX_BY) || "unknown",
+      sourceType: "legacy_unverified", claim: c.value, side: null, evidenceFile: null, span: null,
+      by: by.value || "unknown",
       at: /^\d{4}-\d{2}-\d{2}$/.test(String(acc.acceptedAt || "")) ? acc.acceptedAt : "1970-01-01", supersedes: null };
     rec.cardId = cardIdFor(rec); rec.revHash = revHashFor(rec);
-    if (validCardRecord(rec)) add(rec);
+    if (validCardRecord(rec)) emit(rec); else skipped.push({ reason: "amendment-invalid", sha: acc.sha });
   }
-  return { cards, cardReviews: [] };   // ZERO authority migrated — re-acceptance required
+  return { cards, cardReviews: [], skipped };   // ZERO authority migrated; skipped/lossy rows reported
 }
 
 // Drafts awaiting a human: annotations with no CURRENT active acceptance of
@@ -2113,12 +2162,19 @@ export function readRefFile(repo, ref, filename) {
 // O_NOFOLLOW refuses a symlinked leaf at open time, and we fstat the FD we hold
 // (not the path) so the file cannot be swapped between check and write.
 export function appendPrivateLine(path, line) {
-  const fd = openSync(path, FS.O_WRONLY | FS.O_APPEND | FS.O_CREAT | FS.O_NOFOLLOW, 0o600);
+  // O_NONBLOCK so a FIFO planted at `path` cannot block the open indefinitely;
+  // then require a regular, single-link file (no hardlink aliasing).
+  const fd = openSync(path, FS.O_WRONLY | FS.O_APPEND | FS.O_CREAT | FS.O_NOFOLLOW | FS.O_NONBLOCK, 0o600);
   try {
     const st = fstatSync(fd);
-    if (!st.isFile() || st.nlink > 1)
+    if (!st.isFile() || st.nlink !== 1)
       throw new Error(`refusing append through non-private regular file: ${path}`);
-    writeSync(fd, line);
+    const buf = Buffer.from(line, "utf8");
+    for (let off = 0; off < buf.length;) {           // loop: a legal SHORT write must not leave a truncated line
+      const n = writeSync(fd, buf, off, buf.length - off);
+      if (!(n > 0)) throw new Error(`short write appending to ${path}`);
+      off += n;
+    }
   } finally { closeSync(fd); }
 }
 
