@@ -3557,3 +3557,26 @@ test("closure3: a kill switch that becomes UNMEASURABLE mid-run returns the part
   assert.match(r.error, /unmeasurable/);                                // explicit tri-state, not a bare boolean break
   rmSync(d, { recursive: true, force: true });
 });
+
+test("closure3: runCheckDiff treats an UNREADABLE committed journal blob as unmeasurable, not not-configured", () => {
+  const { d, g } = tmpGitRepo("cjblob-"); g("init", "-q");
+  writeFileSync(join(d, "seed.txt"), "s\n"); g("add", "-A"); g("commit", "-qm", "root");
+  const R = g("rev-parse", "HEAD").trim();
+  writeFileSync(join(d, "target.txt"), "v1\n");
+  const ann = { sha: R, why: "real accepted decision", by: "human", date: "2026-01-01" };
+  const acc = { type: "acceptance", sha: R, annotationSha256: canonicalAnnotationHash(ann), paths: ["target.txt"],
+    applicability: "active", acceptedBy: "human", acceptedAt: "2026-01-01" };
+  writeFileSync(join(d, "annotations.jsonl"), JSON.stringify(ann) + "\n");
+  writeFileSync(join(d, "annotation-reviews.jsonl"), JSON.stringify(acc) + "\n");
+  g("add", "-A"); g("commit", "-qm", "base + accepted decision");
+  const B = g("rev-parse", "HEAD").trim();
+  writeFileSync(join(d, "target.txt"), "v2\n"); g("add", "-A"); g("commit", "-qm", "head");
+  const H = g("rev-parse", "HEAD").trim();
+  assert.equal(runCheckDiff(d, { base: B, head: H }).result, "leads");          // healthy: the accepted decision surfaces
+  const blob = g("rev-parse", `${B}:annotation-reviews.jsonl`).trim();
+  rmSync(join(d, ".git", "objects", blob.slice(0, 2), blob.slice(2)));           // entry remains in the tree, blob unavailable
+  const r = runCheckDiff(d, { base: B, head: H });
+  assert.equal(r.result, "unmeasurable"); assert.equal(r.exitCode, 1);           // unreadable trust state != absent/clean
+  assert.match(r.message, /unreadable/);
+  rmSync(d, { recursive: true, force: true });
+});
