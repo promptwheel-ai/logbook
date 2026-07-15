@@ -1676,39 +1676,164 @@ export function verificationSummary(verifications, key) {
     checks: mine.length, lastChecked: mine.map((v) => v.at).sort().at(-1) || null };
 }
 
-// ---- Revision-bound decision cards (Stage 1: additive identity model) -------
+// ---- Revision-bound decision cards (Stage 1: identity + trust foundation) ---
 // Identity is CARD_ID (stable across edits), not the commit SHA — so multiple
 // cards can reference one commit and re-annotation cannot silently shift a
 // review onto a different draft. A human edit creates a new REVISION that
 // supersedes the prior one; reviews/observations later bind CARD_ID@REVHASH.
-const CARD_SOURCES = new Set(["machine_source", "human_attestation"]);
-export function cardIdFor(sha, claim, by) {
-  return sha256(`card\0${sha}\0${String(claim)}\0${String(by)}`);
+//
+// EVIDENCE (how a machine card is grounded: sha/side/evidenceFile/span) is kept
+// separate from APPLICABILITY (which paths a human decides the decision governs
+// — that lives on the acceptance in Stage 2, never on the card).
+export const CARD_SCHEMA = 1;
+const CARD_SOURCES = new Set(["machine_source", "human_attestation", "legacy_unverified"]);
+const OID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;                 // git object id: SHA-1 or SHA-256
+const CARD_KEYS = new Set(["schema", "cardId", "rev", "revHash", "sha", "sourceType",
+  "claim", "side", "evidenceFile", "span", "by", "at", "supersedes"]);
+const MAX_CLAIM = 400, MAX_SPAN = 600, MAX_BY = 128, MAX_EVPATH = 400;
+const CTRL = /[\u0000-\u0008\u000a-\u001f\u007f]/; // controls incl newline; tab allowed
+
+function okText(v, max) {
+  return typeof v === "string" && !CTRL.test(v) && v.trim().length > 0 && v.length <= max;
 }
+function okEvPath(v) {
+  return typeof v === "string" && !CTRL.test(v) && v.length > 0 && v.length <= MAX_EVPATH &&
+    !/[*?\[\]]/.test(v) && normalizeScope(v) === v; // literal, normalized, no glob
+}
+// Reject oversize/blank/control rather than truncate (truncation would desync
+// the stored value from the hashed identity). Returns {value} or {error}.
+function normText(v, max) {
+  if (typeof v !== "string") return { error: "is required" };
+  if (CTRL.test(v)) return { error: "may not contain control characters or newlines" };
+  if (!v.trim()) return { error: "may not be blank" };
+  if (v.length > max) return { error: `exceeds ${max} chars (rejected, not truncated)` };
+  return { value: v };
+}
+function normEvPath(v) {
+  if (typeof v !== "string" || !v.length) return { error: "is required (the exact changed file)" };
+  if (CTRL.test(v)) return { error: "may not contain control characters" };
+  if (v.length > MAX_EVPATH) return { error: `exceeds ${MAX_EVPATH} chars` };
+  if (/[*?\[\]]/.test(v)) return { error: "must be a literal path, not a glob/pathspec" };
+  const n = normalizeScope(v);
+  if (!n || n !== v) return { error: "must be a normalized relative path" };
+  return { value: n };
+}
+
+// Canonical identity: derived from the EXACT stored origin object (typed JSON,
+// not NUL-joined strings), so the id is reproducible from the stored bytes and
+// cannot collide by field reshuffling. Excludes rev/at/supersedes (an edit or a
+// re-write on another day is the SAME card). Evidence fields ARE part of identity
+// so "same claim, different evidence" is a distinct card, not a competing root.
+function cardOrigin(rec) {
+  return { schema: CARD_SCHEMA, sha: rec.sha, sourceType: rec.sourceType, claim: rec.claim,
+    side: rec.side ?? null, evidenceFile: rec.evidenceFile ?? null, span: rec.span ?? null, by: rec.by };
+}
+export function cardIdFor(rec) { return sha256("logbook.cardId.v1\n" + JSON.stringify(cardOrigin(rec))); }
+
+// Binds the ENTIRE record — content, provenance (sha/by/at), and lineage
+// (supersedes) — so none can change without invalidating the hash. This is what
+// an acceptance pins: accept binds revHash, so the exact reviewed card (which
+// commit it points at, who wrote it, when, its parent) is content-addressed.
 export function revHashFor(rec) {
-  return sha256(JSON.stringify({
-    cardId: rec.cardId, rev: rec.rev, sourceType: rec.sourceType,
-    claim: rec.claim, span: rec.span || "", side: rec.side || "",
-    paths: [...(rec.paths || [])].sort(),
+  return sha256("logbook.revHash.v1\n" + JSON.stringify({
+    schema: CARD_SCHEMA, cardId: rec.cardId, rev: rec.rev, sha: rec.sha, sourceType: rec.sourceType,
+    claim: rec.claim, side: rec.side ?? null, evidenceFile: rec.evidenceFile ?? null,
+    span: rec.span ?? null, by: rec.by, at: rec.at, supersedes: rec.supersedes ?? null,
   }));
 }
 
-// Machine spans must be verbatim in the NAMED side (message or diff), and a
-// diff span must belong to the NAMED changed path — not merely present anywhere
-// in `git show` (which could match an unrelated file or the commit message).
-export function spanGroundedStrict(repo, sha, span, side, path) {
-  if (span == null || span === "") return false; // machine_source requires a span
+// A machine span must be verbatim in the NAMED side, and a diff span must be
+// meaningful CHANGED-LINE content of the EXACT changed file — not merely present
+// somewhere in `git show` (which would let a hunk header `@@`, `diff --git`,
+// whitespace, or another file's text qualify). Pathspec is literal.
+export function spanGroundedStrict(repo, sha, span, side, evidenceFile) {
+  if (typeof span !== "string" || !span.trim()) return false;
   const norm = (s) => String(s).replace(/\r\n/g, "\n");
+  const needle = norm(span);
   if (side === "message") {
     const r = spawnSync("git", ["-C", repo, "show", "-s", "--format=%B", sha], { encoding: "utf8", maxBuffer: 1 << 30 });
-    return r.status === 0 && norm(r.stdout).includes(norm(span));
+    return r.status === 0 && norm(r.stdout).includes(needle);
   }
   if (side === "diff") {
-    if (!path) return false;
-    const r = spawnSync("git", ["-C", repo, "show", "--no-color", "--format=", sha, "--", path], { encoding: "utf8", maxBuffer: 1 << 30 });
-    return r.status === 0 && r.stdout.trim() !== "" && norm(r.stdout).includes(norm(span));
+    if (!evidenceFile) return false;
+    const files = changedFilesOf(repo, sha);
+    if (!files || !files.includes(evidenceFile)) return false;         // exact changed file only
+    const changed = changedLineTextOf(repo, sha, evidenceFile);
+    return changed != null && changed.length > 0 && norm(changed).includes(needle);
   }
   return false;
+}
+function changedFilesOf(repo, sha) {
+  const r = spawnSync("git", ["-C", repo, "show", "--name-only", "--format=", "--no-color", sha], { encoding: "utf8", maxBuffer: 1 << 30 });
+  if (r.status !== 0) return null;
+  return r.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
+}
+// Only the CONTENT of genuinely added/removed lines of `file`, extracted from
+// the SAME rename-aware full diff that produced the file list. A single-path
+// pathspec would defeat rename pairing and re-emit an entire moved file as
+// "added" — so a pure `git mv` (no hunk) grounds NOTHING, and a rename+modify
+// grounds only the truly changed lines. File-header markers (--- / +++) are
+// recognized only OUTSIDE a hunk body, so a removed/added line whose content
+// starts with --- / +++ is not mistaken for a header.
+function changedLineTextOf(repo, sha, file) {
+  const r = spawnSync("git", ["-C", repo, "show", "--no-color", "--format=", "--find-renames", sha], { encoding: "utf8", maxBuffer: 1 << 30 });
+  if (r.status !== 0) return null;
+  const out = [];
+  let inTarget = false, inHunk = false;
+  for (const l of r.stdout.split("\n")) {
+    if (l.startsWith("diff --git ")) { inTarget = false; inHunk = false; continue; }
+    if (!inHunk && l.startsWith("+++ ")) { inTarget = l.slice(4) === "b/" + file; continue; }
+    if (!inHunk && l.startsWith("--- ")) continue;
+    if (l.startsWith("@@")) { inHunk = true; continue; }
+    if (inHunk && inTarget && (l[0] === "+" || l[0] === "-")) out.push(l.slice(1));
+  }
+  return out.join("\n");
+}
+
+// One fail-closed schema check per record: allowed keys only, typed values,
+// source-specific invariants, lineage-field shape, root-identity anchoring, and
+// full-content self-consistency. Any violation => the whole line is malformed.
+export function validCardRecord(c) {
+  if (!c || typeof c !== "object" || Array.isArray(c)) return false;
+  for (const k of Object.keys(c)) if (!CARD_KEYS.has(k)) return false;   // no unbound extra fields
+  if (c.schema !== CARD_SCHEMA) return false;
+  // typeof guards BEFORE every regex .test — RegExp.test String-coerces, so an
+  // array/number would otherwise slip a non-string past OID/HASH64.
+  if (typeof c.cardId !== "string" || !HASH64.test(c.cardId)) return false;
+  if (typeof c.revHash !== "string" || !HASH64.test(c.revHash)) return false;
+  if (!Number.isInteger(c.rev) || c.rev < 1) return false;
+  if (typeof c.sha !== "string" || !OID.test(c.sha)) return false;
+  if (!CARD_SOURCES.has(c.sourceType)) return false;
+  if (!okText(c.claim, MAX_CLAIM) || !okText(c.by, MAX_BY)) return false;
+  if (typeof c.at !== "string" || CTRL.test(c.at) || !/^\d{4}-\d{2}-\d{2}$/.test(c.at)) return false;
+  if (c.rev === 1 ? c.supersedes != null : (typeof c.supersedes !== "string" || !HASH64.test(c.supersedes))) return false;
+  if (c.side !== null && c.side !== "message" && c.side !== "diff") return false;
+  if (c.evidenceFile !== null && !okEvPath(c.evidenceFile)) return false;
+  if (c.span !== null && !okText(c.span, MAX_SPAN)) return false;
+  if (c.sourceType === "machine_source") {
+    if (typeof c.span !== "string" || !c.span.trim()) return false;
+    if (c.side === "message") { if (c.evidenceFile !== null) return false; }
+    else if (c.side === "diff") { if (!okEvPath(c.evidenceFile)) return false; }
+    else return false;                                                  // machine needs a real side
+  } else if (c.sourceType === "human_attestation") {
+    if (c.span !== null || c.side !== null || c.evidenceFile !== null) return false;
+  } else {                                                              // legacy_unverified: unverified rationale
+    if (c.side !== null || c.evidenceFile !== null) return false;       // span may be present but ungrounded
+  }
+  if (c.rev === 1 && cardIdFor(c) !== c.cardId) return false;           // root identity anchored to its origin
+  if (revHashFor(c) !== c.revHash) return false;                        // full self-consistency
+  return true;
+}
+
+// Fixed field order for the on-disk line. Every writer emits exactly this, and
+// parseCards requires each line to be byte-identical to it — so duplicate JSON
+// keys, reordering, or injected whitespace (where the bytes a human reviews
+// could diverge from the value the tool trusts) are rejected as malformed.
+const CARD_ORDER = ["schema", "cardId", "rev", "revHash", "sha", "sourceType",
+  "claim", "side", "evidenceFile", "span", "by", "at", "supersedes"];
+export function canonicalCardLine(c) {
+  const o = {}; for (const k of CARD_ORDER) o[k] = c[k] === undefined ? null : c[k];
+  return JSON.stringify(o);
 }
 
 export function parseCards(text) {
@@ -1716,82 +1841,180 @@ export function parseCards(text) {
   for (const line of String(text || "").split("\n")) {
     if (!line.trim()) continue;
     let c; try { c = JSON.parse(line); } catch { malformed = true; continue; }
-    const ok = c && HASH64.test(c.cardId) && Number.isInteger(c.rev) && c.rev >= 1 &&
-      HASH64.test(c.revHash) && FULL_SHA.test(c.sha) && CARD_SOURCES.has(c.sourceType) &&
-      typeof c.claim === "string" && c.claim.trim() &&
-      Array.isArray(c.paths) && c.paths.every((p) => typeof p === "string" && normalizeScope(p) === p) &&
-      typeof c.by === "string" && typeof c.at === "string" &&
-      revHashFor(c) === c.revHash; // self-consistent hash
-    if (ok) records.push(c); else malformed = true;
+    if (!validCardRecord(c)) { malformed = true; continue; }
+    if (line.trim() !== canonicalCardLine(c)) { malformed = true; continue; } // non-canonical bytes (dup keys / reorder)
+    records.push(c);
   }
   return { records, malformed };
 }
 
-// Current state per card: the highest-rev record. Returns Map cardId -> record.
+// Resolve each card's CURRENT revision by validating a continuous single-parent
+// chain: rev 1 originates, and each rev N supersedes rev N-1's exact revHash. A
+// gap, duplicate rev (fork), or broken supersedes link makes that card's current
+// revision untrustworthy — it is excluded and `malformed` is set, so the caller
+// treats the state as unmeasurable rather than silently trusting the highest rev.
 export function foldCards(records) {
-  const cur = new Map();
-  for (const c of records) { const p = cur.get(c.cardId); if (!p || c.rev > p.rev) cur.set(c.cardId, c); }
-  return cur;
+  const byCard = new Map();
+  for (const c of records) { if (!byCard.has(c.cardId)) byCard.set(c.cardId, []); byCard.get(c.cardId).push(c); }
+  const current = new Map(); let malformed = false;
+  for (const [cardId, revs] of byCard) {
+    revs.sort((a, b) => a.rev - b.rev);
+    let chainOk = revs[0].rev === 1 && revs[0].supersedes == null;
+    for (let i = 1; chainOk && i < revs.length; i++) {
+      if (revs[i].rev !== revs[i - 1].rev + 1) chainOk = false;             // gap or duplicate rev
+      else if (revs[i].supersedes !== revs[i - 1].revHash) chainOk = false; // broken / forked lineage
+      else if (revs[i].sha !== revs[0].sha) chainOk = false;                // a card is bound to ONE commit
+    }
+    if (chainOk) current.set(cardId, revs[revs.length - 1]);
+    else malformed = true;
+  }
+  return { current, malformed };
 }
+
+// Read the journal refusing symlinks (O_NOFOLLOW) — a symlinked
+// decision-cards.jsonl must not be followed to an arbitrary target.
+function readPrivateText(path) {
+  let fd;
+  try { fd = openSync(path, FS.O_RDONLY | FS.O_NOFOLLOW); }
+  catch (e) { if (e.code === "ENOENT") return null; throw e; }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) throw new Error(`not a regular file: ${path}`);
+    return readFileSync(fd, "utf8");
+  } finally { closeSync(fd); }
+}
+function cardsPath(dir) { return join(realpathSync(dir), "decision-cards.jsonl"); }
 
 export function loadCardRecords(dir) {
-  const p = join(dir, "decision-cards.jsonl");
-  return existsSync(p) ? parseCards(readFileSync(p, "utf8")).records : [];
+  const t = readPrivateText(cardsPath(dir));
+  return t == null ? [] : parseCards(t).records;
 }
 
-// Write a NEW machine_source card (rev 1). span must be grounded in the named
-// side/path. cardId is derived from the originating assertion so identical
-// re-drafts are idempotent (same cardId + same revHash => no-op).
-export function saveMachineCard(repo, dir, { sha, claim, span, side, path, by }) {
-  const rev = spawnSync("git", ["-C", repo, "rev-parse", "--verify", "--quiet", `${sha}^{commit}`], { encoding: "utf8" });
-  const full = (rev.stdout || "").trim();
-  if (rev.status !== 0 || !FULL_SHA.test(full)) return { error: `commit not found or unreachable: ${sha}` };
-  if (!claim || !String(claim).trim()) return { error: "a card needs a claim" };
+// Read-path API: current revision per card + a single malformed signal (parse
+// OR broken lineage). Stage 2 surfaces (check/pending) treat malformed as
+// unmeasurable, never as "no cards / clean".
+export function loadCards(dir) {
+  const t = readPrivateText(cardsPath(dir));
+  if (t == null) return { current: new Map(), malformed: false, records: [] };
+  const { records, malformed } = parseCards(t);
+  const folded = foldCards(records);
+  return { current: folded.current, malformed: malformed || folded.malformed, records };
+}
+
+// Fail closed: never append against a corrupt journal (would trust surviving
+// records after tampering). Returns {error} if malformed.
+function appendCardRevision(dir, rec) {
+  const state = loadCards(dir);
+  if (state.malformed) return { error: "decision-cards.jsonl is malformed — refusing to append (fix or remove corrupt lines first)" };
+  return { state };
+}
+
+// Write a NEW machine_source card (rev 1), grounded in the exact changed-line
+// evidence of the named side/file. Identical re-drafts are idempotent; the same
+// claim with different evidence is a DISTINCT card (different id), not a fork.
+export function saveMachineCard(repo, dir, { sha, claim, span, side, path, evidenceFile, by }) {
+  const rp = spawnSync("git", ["-C", repo, "rev-parse", "--verify", "--quiet", `${sha}^{commit}`], { encoding: "utf8" });
+  const full = (rp.stdout || "").trim();
+  if (rp.status !== 0 || !OID.test(full)) return { error: `commit not found or unreachable: ${sha}` };
+  const cl = normText(claim, MAX_CLAIM); if (cl.error) return { error: `claim ${cl.error}` };
+  const au = normText(by || "agent", MAX_BY); if (au.error) return { error: `author ${au.error}` };
   const sd = side || "diff";
   if (sd !== "message" && sd !== "diff") return { error: "--side must be message | diff" };
-  const paths = sd === "diff" ? (path ? [normalizeScope(path)].filter(Boolean) : []) : [];
-  if (sd === "diff" && !paths.length) return { error: "a diff-grounded card needs --file <changed path>" };
-  const spanVal = span != null ? String(span).slice(0, 600) : null;
-  if (!spanGroundedStrict(repo, full, spanVal, sd, paths[0]))
-    return { error: `--span is not a verbatim substring of the ${sd}${sd === "diff" ? ` of ${paths[0]}` : ""} at ${full.slice(0, 12)}` };
-  if (!noNL(by)) return { error: "author may not contain newlines" };
-  const rec = { cardId: cardIdFor(full, claim, by || "agent"), rev: 1, revHash: "",
-    sha: full, sourceType: "machine_source", claim: String(claim).slice(0, 400),
-    paths, side: sd, span: spanVal, by: by || "agent", at: today(), supersedes: null };
-  rec.revHash = revHashFor(rec);
-  const existing = loadCardRecords(dir).find((c) => c.cardId === rec.cardId && c.revHash === rec.revHash);
-  if (existing) return { card: existing, idempotent: true };
-  appendPrivateLine(join(realpathSync(dir), "decision-cards.jsonl"), JSON.stringify(rec) + "\n");
+  let ev = null;
+  if (sd === "diff") { const ep = normEvPath(evidenceFile ?? path); if (ep.error) return { error: `--file ${ep.error}` }; ev = ep.value; }
+  const sp = normText(span, MAX_SPAN); if (sp.error) return { error: `--span ${sp.error}` };
+  if (!spanGroundedStrict(repo, full, sp.value, sd, ev))
+    return { error: `--span is not verbatim changed-line evidence in the ${sd}${sd === "diff" ? ` of ${ev}` : ""} at ${full.slice(0, 12)}` };
+  const rec = { schema: CARD_SCHEMA, cardId: "", rev: 1, revHash: "", sha: full,
+    sourceType: "machine_source", claim: cl.value, side: sd, evidenceFile: ev, span: sp.value,
+    by: au.value, at: today(), supersedes: null };
+  rec.cardId = cardIdFor(rec); rec.revHash = revHashFor(rec);
+  const guard = appendCardRevision(dir, rec); if (guard.error) return guard;
+  const sameId = guard.state.records.filter((c) => c.cardId === rec.cardId);
+  if (sameId.length) return { card: guard.state.current.get(rec.cardId) || sameId[0], idempotent: true };
+  appendPrivateLine(cardsPath(dir), canonicalCardLine(rec) + "\n");
   return { card: rec };
 }
 
-// Human edit -> new revision (N+1) superseding the current one. sourceType
-// human_attestation carries off-git context with NO span requirement; a human
-// may also re-ground a machine card. Never sidecar metadata — always a revision.
-export function editCard(repo, dir, { cardId, claim, span, side, path, by, sourceType }) {
-  const current = foldCards(loadCardRecords(dir)).get(cardId);
-  if (!current) return { error: `no card ${String(cardId).slice(0, 12)} to edit` };
+// Human edit -> new revision (N+1) superseding the current one. human_attestation
+// carries off-git context with NO span; machine_source re-grounds a real span.
+// Never sidecar metadata — always a revision. No-op edits collapse.
+export function editCard(repo, dir, { cardId, claim, span, side, path, evidenceFile, by, sourceType }) {
+  const guard = appendCardRevision(dir, {}); if (guard.error) return guard;
+  const current = guard.state.current.get(cardId);
+  if (!current) return { error: `no card ${String(cardId).slice(0, 12)} with a valid revision chain to edit` };
   const st = sourceType || "human_attestation";
-  if (!CARD_SOURCES.has(st)) return { error: "sourceType must be machine_source | human_attestation" };
-  if (!claim || !String(claim).trim()) return { error: "an edit needs a claim" };
-  if (!noNL(by)) return { error: "author may not contain newlines" };
-  let paths = current.paths, sd = current.side, spanVal = current.span;
+  if (st !== "human_attestation" && st !== "machine_source") return { error: "an edit is human_attestation or machine_source" };
+  const cl = normText(claim, MAX_CLAIM); if (cl.error) return { error: `claim ${cl.error}` };
+  const au = normText(by || "human", MAX_BY); if (au.error) return { error: `author ${au.error}` };
+  let sd = null, ev = null, spVal = null;
   if (st === "machine_source") {
     sd = side || current.side || "diff";
-    paths = sd === "diff" ? (path ? [normalizeScope(path)].filter(Boolean) : current.paths) : [];
-    spanVal = span != null ? String(span).slice(0, 600) : current.span;
-    if (!spanGroundedStrict(repo, current.sha, spanVal, sd, paths[0]))
-      return { error: `re-grounded --span is not verbatim in the ${sd} at ${current.sha.slice(0, 12)}` };
-  } else { // human_attestation: off-git, no span; keep or set paths
-    sd = null; spanVal = null;
-    if (path) paths = [normalizeScope(path)].filter(Boolean);
+    if (sd !== "message" && sd !== "diff") return { error: "--side must be message | diff" };
+    if (sd === "diff") { const ep = normEvPath(evidenceFile ?? path ?? current.evidenceFile); if (ep.error) return { error: `--file ${ep.error}` }; ev = ep.value; }
+    const sp = normText(span != null ? span : current.span, MAX_SPAN); if (sp.error) return { error: `--span ${sp.error}` }; spVal = sp.value;
+    if (!spanGroundedStrict(repo, current.sha, spVal, sd, ev))
+      return { error: `re-grounded --span is not verbatim changed-line evidence at ${current.sha.slice(0, 12)}` };
   }
-  const rec = { cardId, rev: current.rev + 1, revHash: "", sha: current.sha, sourceType: st,
-    claim: String(claim).slice(0, 400), paths, side: sd, span: spanVal, by: by || "human",
+  if (st === current.sourceType && cl.value === current.claim && (spVal || "") === (current.span || "") &&
+      (sd || "") === (current.side || "") && (ev || "") === (current.evidenceFile || ""))
+    return { card: current, idempotent: true };
+  const rec = { schema: CARD_SCHEMA, cardId, rev: current.rev + 1, revHash: "", sha: current.sha,
+    sourceType: st, claim: cl.value, side: sd, evidenceFile: ev, span: spVal, by: au.value,
     at: today(), supersedes: current.revHash };
   rec.revHash = revHashFor(rec);
-  appendPrivateLine(join(realpathSync(dir), "decision-cards.jsonl"), JSON.stringify(rec) + "\n");
+  appendPrivateLine(cardsPath(dir), canonicalCardLine(rec) + "\n");
   return { card: rec };
+}
+
+// ---- Legacy dual-read migration (defined + tested before Stage 2 rewiring) --
+// Pre-card annotations (annotations.jsonl: {sha, why, by, date, span?}) are
+// projected into legacy_unverified cards DETERMINISTICALLY, keyed by the raw
+// annotation origin. Inferred-git rationale is preserved verbatim and NEVER
+// relabeled machine_source/human_attestation (which would misattribute trust);
+// its span is carried but ungrounded (side/evidenceFile null). Control chars in
+// legacy text are collapsed to spaces (the only non-byte-exact step, so the row
+// can be a valid single-line card); the rationale, author, date, and any
+// accepted scope round-trip.
+export function projectLegacyAnnotation(ann) {
+  if (!ann || typeof ann.sha !== "string" || !OID.test(ann.sha)) return null;
+  // GLOBAL collapse — a non-global regex would leave a 2nd control char behind,
+  // so an annotation with CRLF or multiple controls would silently drop out of
+  // the migration instead of round-tripping.
+  const clean = (v, max) => String(v ?? "").replace(/[\u0000-\u0008\u000a-\u001f\u007f]/g, " ").slice(0, max).trim();
+  const claim = clean(ann.why, MAX_CLAIM);
+  if (!claim) return null;
+  const spanRaw = clean(ann.span, MAX_SPAN);
+  const rec = { schema: CARD_SCHEMA, cardId: "", rev: 1, revHash: "", sha: ann.sha,
+    sourceType: "legacy_unverified", claim, side: null, evidenceFile: null,
+    span: spanRaw || null, by: clean(ann.by, MAX_BY) || "unknown",
+    at: /^\d{4}-\d{2}-\d{2}$/.test(String(ann.date || "")) ? ann.date : "1970-01-01", supersedes: null };
+  rec.cardId = cardIdFor(rec); rec.revHash = revHashFor(rec);
+  return validCardRecord(rec) ? rec : null;
+}
+// Map legacy annotations + their acceptances into card records + card-scoped
+// acceptances. cardReviews retarget onto cardId@revHash; the human's accepted
+// paths become the APPLICABILITY scope (kept separate from card evidence).
+export function projectLegacy(annotations, legacyAcceptances) {
+  // Key by the annotation's canonical hash — the SAME byte-binding the native
+  // acceptance layer uses — so a re-annotated sha (its pinned hash no longer
+  // maps to any current annotation) invalidates a stale acceptance instead of
+  // letting it drift onto edited prose the human never saw.
+  const cards = [], byHash = new Map();
+  for (const ann of annotations || []) {
+    const rec = projectLegacyAnnotation(ann);
+    if (rec) { cards.push(rec); byHash.set(canonicalAnnotationHash(ann), rec); }
+  }
+  const cardReviews = [];
+  for (const acc of legacyAcceptances || []) {
+    const rec = acc && typeof acc.annotationSha256 === "string" ? byHash.get(acc.annotationSha256) : null;
+    if (!rec) continue; // stale / edited / unknown acceptance — drop, never fabricate (anti-drift)
+    cardReviews.push({ type: acc.type || "acceptance", cardId: rec.cardId, revHash: rec.revHash,
+      applicability: acc.applicability || "active", scopes: [...(acc.paths || [])].sort(),
+      by: acc.acceptedBy || acc.by || "unknown", at: acc.acceptedAt || acc.at || rec.at,
+      legacy: true, amendment: acc.amendment });
+  }
+  return { cards, cardReviews };
 }
 
 // Drafts awaiting a human: annotations with no CURRENT active acceptance of
@@ -2010,24 +2233,37 @@ export function renderLeads(name, mode, leads, unmeasurable = 0) {
 }
 
 const PROTECTED_ARTIFACTS = new Set([
-  "annotations.jsonl", "annotation-reviews.jsonl", "events.jsonl",
+  "annotations.jsonl", "annotation-reviews.jsonl", "decision-cards.jsonl", "events.jsonl",
   "LOGBOOK.md", "JOURNEY.md", "AGENTS.md", "CLAUDE.md", ".cursorrules",
 ]);
+// Case/Unicode-folded lookup: a case-insensitive FS (APFS/NTFS) maps
+// DECISION-CARDS.JSONL onto the real journal, so an exact-case check would miss it.
+const PROTECTED_LC = new Set([...PROTECTED_ARTIFACTS].map((n) => n.normalize("NFC").toLowerCase()));
+const isDotGitSeg = (seg) => seg.normalize("NFC").toLowerCase() === ".git";
 // opt-in, local, atomic, aggregate-only. Refuse a protected artifact / .git
 // path so --metrics-out cannot clobber a journal, and use an O_EXCL|O_NOFOLLOW
 // temp so a pre-planted symlink at the predictable temp name cannot redirect
 // the write. Throws on any failure so the caller can exit nonzero.
 export function writeCheckMetrics(target, metrics) {
   const t = resolve(target);
-  if (PROTECTED_ARTIFACTS.has(basename(t)) || t.split(sep).includes(".git"))
+  // Canonicalize the PARENT before the guard (like managedWriteFile): resolve()
+  // is purely lexical, so a symlinked directory component (e.g. gitdir -> .git)
+  // would smuggle the write into .git past a lexical `.git` test. O_NOFOLLOW only
+  // guards the final component, not intermediate dirs.
+  let parent;
+  try { parent = realpathSync(dirname(t)); }
+  catch { throw new Error(`refusing to write metrics: unresolved parent for ${target}`); }
+  const canonical = join(parent, basename(t));
+  if (PROTECTED_LC.has(basename(canonical).normalize("NFC").toLowerCase()) ||
+      canonical.split(sep).some(isDotGitSeg))
     throw new Error(`refusing to write metrics over a protected path: ${target}`);
   const data = JSON.stringify(metrics, null, 2) + "\n";
-  const tmp = `${t}.tmp.${process.pid}.${managedTempId++}`;
+  const tmp = `${canonical}.tmp.${process.pid}.${managedTempId++}`;
   let fd;
   try {
     fd = openSync(tmp, FS.O_WRONLY | FS.O_CREAT | FS.O_EXCL | FS.O_NOFOLLOW, 0o600);
     writeSync(fd, data); closeSync(fd); fd = undefined;
-    renameSync(tmp, t);
+    renameSync(tmp, canonical);
   } catch (e) {
     if (fd !== undefined) { try { closeSync(fd); } catch { /* ignore */ } }
     try { unlinkSync(tmp); } catch { /* ignore */ }
