@@ -26,7 +26,7 @@ import {
   saveMachineCard, editCard, foldCards, cardIdFor, revHashFor,
   parseCards, spanGroundedStrict, groundStatus, loadCards, validCardRecord,
   decisionCardId, validDecisionCard, serializeDecisionCard, parseDecisionCard, DECISION_SCHEMA,
-  checkDecisions, renderDecisionLeads, parsePolicy, publishPolicyLeads, migrateLegacyToDrafts,
+  checkDecisions, renderDecisionLeads, parsePolicy, publishPolicyLeads, withPublishLock, migrateLegacyToDrafts,
   projectLegacyAnnotation, projectLegacy, CARD_SCHEMA, canonicalCardLine,
 } from "../bin/logbook.mjs";
 
@@ -3290,6 +3290,7 @@ test("gate16: an unmeasurable candidate (merge commit) makes the run incomplete/
   writeFileSync(join(d, ".logbook", "policy.toml"), 'enabled = true\nallowed_scopes = ["src/"]\nmax_cards_per_run = 5\nmax_total_cards = 50\n'); g("add", "-A"); g("commit", "-qm", "policy");
   const r = publishPolicyLeads(d, [{ sha: merge, claim: "m", span: "RESOLVED_X", side: "diff", evidenceFile: "src/x.js", scopes: ["src/x.js"] }]);
   assert.equal(r.unmeasurable, 1); assert.equal(r.incomplete, true); assert.equal(r.published, 0);
+  assert.equal(r.exitCode, 1);                            // unmeasurable run is nonzero
   rmSync(d, { recursive: true, force: true });
 });
 
@@ -3325,5 +3326,114 @@ test("gate-raw2: a graft cannot make a non-ancestral source pass the ancestry ch
   const r = publishPolicyLeads(d, [{ sha: sideSha, claim: "side", span: "sideCreatePool", side: "diff", evidenceFile: "src/db.js", scopes: ["src/db.js"] }], { trustRef: head });
   assert.ok(r.skipped.some((s) => s.reason === "non-ancestral"));         // graft ignored -> still non-ancestral
   assert.equal(r.published, 0);
+  rmSync(d, { recursive: true, force: true });
+});
+
+// ---------- git-files Stage 3 CLOSURE: fail-closed trusted reads + result contract ----------
+
+test("closure: a malformed COMMITTED trusted lead makes publication unmeasurable (fail-closed, published=0)", () => {
+  const { d, g, sha } = policyRepo("cmal-", GOOD_TOML);
+  // a committed object under .logbook/leads that is NOT a parseable card -> trusted plane malformed
+  const fakeId = "a".repeat(64);
+  mkdirSync(join(d, ".logbook", "leads"), { recursive: true });
+  writeFileSync(join(d, ".logbook", "leads", fakeId + ".json"), "this is not a card\n");
+  g("add", "-A"); g("commit", "-qm", "corrupt committed lead");
+  const bad = g("rev-parse", "HEAD").trim();
+  g("rm", "-q", ".logbook/leads/" + fakeId + ".json"); g("commit", "-qm", "clean worktree"); // worktree clean; trusted ref still corrupt
+  const r = publishPolicyLeads(d, [goodCand(sha)], { trustRef: bad });
+  assert.equal(r.published, 0);                            // would have published 1 without the guard
+  assert.equal(r.incomplete, true);
+  assert.equal(r.exitCode, 1);
+  assert.match(r.error, /trusted lead/);
+  assert.equal(leadCount(d), 0);
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("closure: a committed lead whose filename != cardId is unmeasurable (filename binding, published=0)", () => {
+  const { d, g, sha } = policyRepo("cbind-", GOOD_TOML);
+  const card = mkDecision({ sha, evidenceFile: "src/db.js", span: "createPool", scopes: ["src/db.js"], by: "auto" });
+  mkdirSync(join(d, ".logbook", "leads"), { recursive: true });
+  writeFileSync(join(d, ".logbook", "leads", "WRONGNAME.json"), serializeDecisionCard(card)); // valid bytes, wrong name
+  g("add", "-A"); g("commit", "-qm", "misnamed committed lead");
+  const bad = g("rev-parse", "HEAD").trim();
+  g("rm", "-q", ".logbook/leads/WRONGNAME.json"); g("commit", "-qm", "clean worktree");
+  const r = publishPolicyLeads(d, [{ ...goodCand(sha), claim: "a different decision" }], { trustRef: bad });
+  assert.equal(r.published, 0); assert.equal(r.incomplete, true); assert.equal(r.exitCode, 1);
+  assert.match(r.error, /trusted lead/);
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("closure: a non-array candidates value is rejected (a Set of 1001 cannot bypass the count cap)", () => {
+  const { d, sha } = policyRepo("carr-", GOOD_TOML);
+  const set = new Set(Array.from({ length: 1001 }, (_, i) => ({ ...goodCand(sha), claim: "c" + i })));
+  const r = publishPolicyLeads(d, set);
+  assert.match(r.error, /must be an array/);
+  assert.equal(r.published, 0); assert.equal(r.exitCode, 1);
+  assert.equal(leadCount(d), 0);
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("closure: null / sparse / non-object candidate entries are skipped structurally, never throw", () => {
+  const { d, sha } = policyRepo("cnull-", GOOD_TOML);
+  const cands = [null, 42, "x", goodCand(sha)];
+  cands[6] = { ...goodCand(sha), claim: "second real decision" };     // leaves sparse holes at 4,5
+  cands.length = 7;
+  const r = publishPolicyLeads(d, cands);
+  assert.equal(r.published, 2);                                       // the two real cards
+  assert.ok(r.skipped.filter((s) => s.reason === "bad-candidate").length >= 3); // null, 42, "x", + holes
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("closure: an oversized candidate list is rejected before evaluation (bounded)", () => {
+  const { d, sha } = policyRepo("cbig-", GOOD_TOML);
+  const r = publishPolicyLeads(d, Array.from({ length: 1001 }, () => goodCand(sha)));
+  assert.match(r.error, /too many candidates/); assert.equal(r.exitCode, 1);
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("closure: a held publication lock TIMES OUT to structured counts + incomplete (never a bare error)", () => {
+  const { d, sha } = policyRepo("clock-", GOOD_TOML);
+  mkdirSync(join(d, ".git", "logbook-publish.lock"));                 // pre-held lock; acquire will time out (~5s budget)
+  const r = publishPolicyLeads(d, [goodCand(sha)]);
+  assert.equal(r.published, 0); assert.equal(r.incomplete, true); assert.equal(r.exitCode, 1);
+  assert.match(r.error, /lock/);
+  assert.ok(Array.isArray(r.skipped));                               // full structured shape, not just { error }
+  assert.equal(leadCount(d), 0);
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("closure: a lock-CLEANUP failure is surfaced as incomplete + nonzero (never silent success)", () => {
+  const { d, g } = tmpGitRepo("cclean-"); g("init", "-q");
+  const out = withPublishLock(d, () => {
+    writeFileSync(join(d, ".git", "logbook-publish.lock", "stuck"), "x"); // rmdir will fail ENOTEMPTY
+    return { published: 3, incomplete: false, exitCode: 0, skipped: [] };  // a would-be success
+  });
+  assert.equal(out.published, 3);                                    // counts preserved
+  assert.equal(out.incomplete, true);                                // but flagged incomplete...
+  assert.equal(out.exitCode, 1);                                     // ...and nonzero
+  assert.match(out.cleanupWarning, /lock not released/);
+  rmSync(join(d, ".git", "logbook-publish.lock"), { recursive: true, force: true });
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("closure: a kill switch engaged MID-RUN stops installs and reports an incomplete subset", () => {
+  const N = 80;
+  const { d, g, sha } = policyRepo("cmid-", 'enabled = true\nallowed_scopes = ["src/"]\nmax_cards_per_run = ' + N + '\nmax_total_cards = ' + N + '\n');
+  const leadsDir = join(d, ".logbook", "leads");
+  const killPath = join(d, ".logbook", "AUTOMATION_DISABLED");
+  // background watcher engages the local kill switch the instant the first card lands;
+  // the per-iteration recheck (each spawns a git cat-file) observes it well before card #80.
+  const watcher = join(d, "watch.mjs");
+  writeFileSync(watcher,
+    'import { readdirSync, writeFileSync } from "node:fs";\n' +
+    'const leads=' + JSON.stringify(leadsDir) + ', kill=' + JSON.stringify(killPath) + ';\n' +
+    'function spin(){ let n=0; try{ n=readdirSync(leads).filter(f=>f.endsWith(".json")).length; }catch{} if(n>=1){ writeFileSync(kill,""); process.exit(0);} setTimeout(spin,0);} spin();');
+  const child = spawn(process.execPath, [watcher], { stdio: "ignore" });
+  const cands = Array.from({ length: N }, (_, i) => ({ ...goodCand(sha), claim: "decision number " + i }));
+  const r = publishPolicyLeads(d, cands);
+  child.kill();
+  assert.equal(r.incomplete, true);
+  assert.ok(r.published >= 1 && r.published < N, "expected a partial subset, got " + r.published);
+  assert.equal(r.exitCode, 1);
   rmSync(d, { recursive: true, force: true });
 });

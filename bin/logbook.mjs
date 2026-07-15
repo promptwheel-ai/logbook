@@ -2267,25 +2267,48 @@ function installCard(dir, cardId, content) {
   return { installed: true };
 }
 // Non-stealable publication lock in git's COMMON dir (not the hostile .logbook).
-function withPublishLock(repo, fn) {
-  let common; try { common = gitRaw(repo, ["rev-parse", "--git-common-dir"]).trim(); } catch { return { error: "not a git repository" }; }
+// Returns { __lock:"timeout"|"error", error } if the lock is never acquired. On a
+// successful acquire, returns fn()'s result; if the lock cannot then be removed, the
+// result is flagged incomplete + nonzero + cleanupWarning (a leftover lock blocks the
+// next run — never report success while the lock is stuck).
+export function withPublishLock(repo, fn) {
+  let common; try { common = gitRaw(repo, ["rev-parse", "--git-common-dir"]).trim(); } catch { return { __lock: "error", error: "not a git repository" }; }
   const lockDir = join(isAbsolute(common) ? common : join(realpathSync(repo), common), "logbook-publish.lock");
   const start = process.hrtime.bigint(), budget = 5_000_000_000n;
   for (;;) {
     try { mkdirSync(lockDir); break; }
     catch (e) {
       if (e.code !== "EEXIST") throw e;
-      if (process.hrtime.bigint() - start > budget) return { error: "publication lock held — if no logbook process is running, remove logbook-publish.lock from the git common dir manually" };
+      if (process.hrtime.bigint() - start > budget) return { __lock: "timeout", error: "publication lock held — if no logbook process is running, remove logbook-publish.lock from the git common dir manually" };
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
     }
   }
-  try { return fn(); } finally { try { rmdirSync(lockDir); } catch { /* released */ } }
+  let out, cleanupFailed = false;
+  try { out = fn(); } finally { try { rmdirSync(lockDir); } catch { cleanupFailed = true; } }
+  if (cleanupFailed && out && typeof out === "object") {
+    out.incomplete = true;
+    out.cleanupWarning = "publication lock not released; remove logbook-publish.lock from the git common dir manually";
+    if ("exitCode" in out) out.exitCode = 1;
+  }
+  return out;
 }
-function planeIdsAtRef(repo, commit, plane) {
-  let out; try { out = gitRaw(repo, ["ls-tree", "-r", "--name-only", "-z", commit, "--", `.logbook/${plane}/`]); } catch { return new Set(); }
+// Trusted committed leads at `commit`: raw-read + canonically parse + filename-bind
+// EACH .json. Any enumeration failure, missing/unreadable object, malformed card,
+// or filename!=cardId => malformed (=> publication is UNMEASURABLE, never fail-open
+// on filenames or an empty set).
+function trustedPlaneState(repo, commit, plane) {
   const ids = new Set();
-  for (const p of out.split("\0").filter(Boolean)) { const b = basename(p); if (b.endsWith(".json")) ids.add(b.slice(0, -5)); }
-  return ids;
+  let out; try { out = gitRaw(repo, ["ls-tree", "-r", "--name-only", "-z", commit, "--", `.logbook/${plane}/`]); }
+  catch { return { ids, malformed: true }; }
+  for (const p of out.split("\0").filter(Boolean)) {
+    const b = basename(p);
+    if (!b.endsWith(".json")) continue;                 // non-card files (e.g. .gitignore) are ignored
+    let text; try { text = gitRaw(repo, ["show", `${commit}:${p}`]); } catch { return { ids, malformed: true }; }
+    const card = parseDecisionCard(text);
+    if (!card || card.cardId + ".json" !== b) return { ids, malformed: true };
+    ids.add(card.cardId);
+  }
+  return { ids, malformed: false };
 }
 // Worktree lead ids; malformed=true if ANY entry is unsafe/invalid (=> unmeasurable).
 function worktreePlaneState(dir) {
@@ -2313,17 +2336,20 @@ function buildAutoCard(cand) {
 // counts { published, idempotent, conflicts, unmeasurable, skipped[], incomplete }.
 export function publishPolicyLeads(repo, candidates, { trustRef = "HEAD" } = {}) {
   const counts = { published: 0, idempotent: 0, conflicts: 0, unmeasurable: 0, skipped: [], incomplete: false };
-  const done = (extra) => ({ ...counts, ...extra });
+  // every path returns counts + exitCode; nonzero when anything is unfinished.
+  const done = (extra = {}) => { const r = { ...counts, ...extra }; r.exitCode = (r.error || r.incomplete || r.unmeasurable > 0 || r.conflicts > 0) ? 1 : 0; return r; };
+  if (!Array.isArray(candidates)) return done({ error: "candidates must be an array" }); // a Set/iterable would bypass the .length cap
+  if (candidates.length > MAX_CANDIDATES) return done({ error: `too many candidates (>${MAX_CANDIDATES})` });
   const commit = resolveTrustCommit(repo, trustRef);
   if (!commit) return done({ error: `cannot resolve trust ref ${trustRef}` });
-  if ((candidates || []).length > MAX_CANDIDATES) return done({ error: `too many candidates (>${MAX_CANDIDATES})` });
   const pol = loadTrustedPolicy(repo, commit);
   if (pol.error) return done({ error: pol.error });
   const policy = pol.policy;
   if (killSwitchEngaged(repo, commit)) return done({ error: "automation disabled (kill switch)" });
   // ---- pure evaluation (no writes) ----
   const byId = new Map(), ordered = [];
-  for (const cand of candidates || []) {
+  for (const cand of candidates) {
+    if (!cand || typeof cand !== "object") { counts.skipped.push({ reason: "bad-candidate" }); continue; } // null / sparse / non-object
     const card = buildAutoCard(cand);
     const sc = canonicalizeScopes(card.scopes && card.scopes.length ? card.scopes : (card.evidenceFile ? [card.evidenceFile] : []));
     if (sc.error) { counts.skipped.push({ reason: "bad-scopes" }); continue; }
@@ -2345,15 +2371,17 @@ export function publishPolicyLeads(repo, candidates, { trustRef = "HEAD" } = {})
   for (const r of ordered) if (r.conflict) counts.conflicts++;
   const installable = ordered.filter((r) => !r.conflict);
   // ---- locked: revalidate, count union, install atomically ----
-  return withPublishLock(repo, () => {
+  const locked = withPublishLock(repo, () => {
     if (killSwitchEngaged(repo, commit)) return done({ error: "kill switch engaged before install", incomplete: true });
     const pol2 = loadTrustedPolicy(repo, commit);
     if (pol2.error || pol2.text !== pol.text) return done({ error: "policy changed mid-run", incomplete: true });
     const pin = pinPlaneDir(repo, LEAD_PLANE);
     if (pin.error) return done({ error: pin.error, incomplete: true });
+    const trusted = trustedPlaneState(repo, commit, LEAD_PLANE);                     // raw-read + parse + filename-bind every committed lead
+    if (trusted.malformed) return done({ error: "malformed/missing trusted lead — unmeasurable", incomplete: true });
     const wt = worktreePlaneState(pin.dir);
     if (wt.malformed) return done({ error: "malformed/unsafe worktree lead — unmeasurable", incomplete: true });
-    const union = new Set([...planeIdsAtRef(repo, commit, LEAD_PLANE), ...wt.ids]); // trusted-ref + worktree; a local delete can't restore quota
+    const union = new Set([...trusted.ids, ...wt.ids]);                              // trusted-ref + worktree; a local delete can't restore quota
     for (const { card, content } of installable) {
       if (killSwitchEngaged(repo, commit)) { counts.incomplete = true; break; }     // mid-run kill: stop, report subset
       if (counts.published >= policy.maxPerRun) { counts.skipped.push({ reason: "run-cap" }); continue; }
@@ -2366,6 +2394,9 @@ export function publishPolicyLeads(repo, candidates, { trustRef = "HEAD" } = {})
     }
     return done({});
   });
+  // lock never acquired (timeout / not-a-repo): structured counts, not a bare {error}.
+  if (locked && (locked.__lock === "timeout" || locked.__lock === "error")) return done({ error: locked.error, incomplete: true });
+  return locked; // withPublishLock already flags cleanup failure (incomplete + nonzero)
 }
 
 // ---- Stage 4a: legacy journal -> inert git-files DRAFTS ---------------------
