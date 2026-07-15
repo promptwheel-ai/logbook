@@ -18,7 +18,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import {
   writeFileSync, existsSync, realpathSync, readFileSync, mkdirSync, lstatSync,
   renameSync, unlinkSync, chmodSync, openSync, fstatSync, writeSync, closeSync,
-  constants as FS,
+  rmSync, constants as FS,
 } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { resolve, join, basename, dirname, relative, isAbsolute, sep } from "node:path";
@@ -1767,8 +1767,11 @@ export function spanGroundedStrict(repo, sha, span, side, evidenceFile) {
   }
   return false;
 }
+// Rename-aware, so the file list AGREES with changedLineTextOf's rename-aware
+// diff (a repo config of diff.renames=false must not make one honor renames and
+// the other not — that would let a rename source path masquerade as changed).
 function changedFilesOf(repo, sha) {
-  const r = spawnSync("git", ["-C", repo, "show", "--name-only", "--format=", "--no-color", sha], { encoding: "utf8", maxBuffer: 1 << 30 });
+  const r = spawnSync("git", ["-C", repo, "show", "--name-only", "--format=", "--no-color", "--find-renames", sha], { encoding: "utf8", maxBuffer: 1 << 30 });
   if (r.status !== 0) return null;
   return r.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
 }
@@ -1783,15 +1786,16 @@ function changedLineTextOf(repo, sha, file) {
   const r = spawnSync("git", ["-C", repo, "show", "--no-color", "--format=", "--find-renames", sha], { encoding: "utf8", maxBuffer: 1 << 30 });
   if (r.status !== 0) return null;
   const out = [];
-  let inTarget = false, inHunk = false, aMatch = false, bMatch = false;
+  let inTarget = false, inHunk = false, aMatch = false, bDevNull = false;
   for (const l of r.stdout.split("\n")) {
-    if (l.startsWith("diff --git ")) { inTarget = false; inHunk = false; aMatch = false; bMatch = false; continue; }
-    // A section is the target if EITHER side names the file: `+++ b/file` (added
-    // / modified) OR `--- a/file` (deleted — its `+++` is /dev/null). Markers are
-    // recognized only OUTSIDE a hunk, so a +/- content line starting with ---/+++
-    // is never mistaken for a header.
-    if (!inHunk && l.startsWith("--- ")) { aMatch = l.slice(4) === "a/" + file; inTarget = aMatch || bMatch; continue; }
-    if (!inHunk && l.startsWith("+++ ")) { bMatch = l.slice(4) === "b/" + file; inTarget = aMatch || bMatch; continue; }
+    if (l.startsWith("diff --git ")) { inTarget = false; inHunk = false; aMatch = false; bDevNull = false; continue; }
+    // Attribute a section's lines ONLY to the surviving path: the `+++ b/file`
+    // NEW side (add / modify), OR the `--- a/file` OLD side of a PURE DELETION
+    // (its `+++` is /dev/null). A rename SOURCE (`--- a/old`, `+++ b/new`) is NOT
+    // the target of `old`, so a renamed file's new content never grounds under
+    // its deleted old name. Markers recognized only outside a hunk body.
+    if (!inHunk && l.startsWith("--- ")) { aMatch = l.slice(4) === "a/" + file; continue; }
+    if (!inHunk && l.startsWith("+++ ")) { bDevNull = l.slice(4) === "/dev/null"; inTarget = l.slice(4) === "b/" + file || (aMatch && bDevNull); continue; }
     if (l.startsWith("@@")) { inHunk = true; continue; }
     if (inHunk && inTarget && (l[0] === "+" || l[0] === "-")) out.push(l.slice(1));
   }
@@ -1907,25 +1911,31 @@ export function loadCards(dir) {
 
 // Serialize load -> validate -> append so two processes cannot each read the
 // same current revision and append competing revisions (a fork that would brick
-// the journal). Advisory O_EXCL lock file, stale-stealable; the read happens
-// INSIDE the lock, so every writer chains onto the freshest revision. Returns
-// fn()'s result, or {error} if the lock cannot be acquired within the budget.
+// the journal). mkdir is the atomic mutex. An OWNER TOKEN lets a holder detect
+// if its lock was stolen — by a stale-steal race, or because its own in-lock
+// work outran the staleness window — and ABORT its append (via stillOwned())
+// rather than fork. A lock older than the window is assumed crashed and
+// stealable; foldCards is the fail-closed backstop for any residual race.
 function withCardLock(dir, fn) {
-  const lock = cardsPath(dir) + ".lock";
+  const lockDir = cardsPath(dir) + ".lock";
+  const ownerFile = join(lockDir, "owner");
+  const token = `${process.pid}.${Date.now()}.${cardLockCtr++}`;
   const deadline = Date.now() + 5000;
-  let held = false;
-  while (!held) {
-    try { closeSync(openSync(lock, FS.O_CREAT | FS.O_EXCL | FS.O_WRONLY | FS.O_NOFOLLOW, 0o600)); held = true; }
+  for (;;) {
+    try { mkdirSync(lockDir); break; }                                     // atomic acquire
     catch (e) {
       if (e.code !== "EEXIST") throw e;
-      try { const st = lstatSync(lock); if (Date.now() - st.mtimeMs > 10000) { unlinkSync(lock); continue; } }
-      catch { continue; }                                                  // lock vanished — retry immediately
-      if (Date.now() > deadline) return { error: "decision-cards.jsonl is locked by another process — retry" };
+      let st; try { st = lstatSync(lockDir); } catch { continue; }         // vanished — retry
+      if (Date.now() - st.mtimeMs > 30000) { try { rmSync(lockDir, { recursive: true, force: true }); } catch { /* raced */ } continue; }
+      if (Date.now() > deadline) return { error: "decision-cards.jsonl.lock is held (a crashed run may have left it — remove it to proceed)" };
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);   // 20ms backoff
     }
   }
-  try { return fn(); } finally { try { unlinkSync(lock); } catch { /* already released */ } }
+  const stillOwned = () => { try { return readFileSync(ownerFile, "utf8") === token; } catch { return false; } };
+  try { writeFileSync(ownerFile, token); return fn(stillOwned); }
+  finally { try { if (stillOwned()) rmSync(lockDir, { recursive: true, force: true }); } catch { /* already released / stolen */ } }
 }
+let cardLockCtr = 0;
 
 // Write a NEW machine_source card (rev 1), grounded in the exact changed-line
 // evidence of the named side/file. Identical re-drafts are idempotent; the same
@@ -1947,11 +1957,12 @@ export function saveMachineCard(repo, dir, { sha, claim, span, side, path, evide
     sourceType: "machine_source", claim: cl.value, side: sd, evidenceFile: ev, span: sp.value,
     by: au.value, at: today(), supersedes: null };
   rec.cardId = cardIdFor(rec); rec.revHash = revHashFor(rec);
-  return withCardLock(dir, () => {
+  return withCardLock(dir, (stillOwned) => {
     const state = loadCards(dir);
     if (state.malformed) return { error: "decision-cards.jsonl is malformed — refusing to append (fix or remove corrupt lines first)" };
     const sameId = state.records.filter((c) => c.cardId === rec.cardId);
     if (sameId.length) return { card: state.current.get(rec.cardId) || sameId[0], idempotent: true }; // byte-identical origin only
+    if (!stillOwned()) return { error: "lost the card lock to a concurrent writer — retry" };
     appendPrivateLine(cardsPath(dir), canonicalCardLine(rec) + "\n");
     return { card: rec };
   });
@@ -1967,7 +1978,7 @@ export function editCard(repo, dir, { cardId, claim, span, side, path, evidenceF
   const au = normText(by || "human", MAX_BY); if (au.error) return { error: `author ${au.error}` };
   const st = sourceType || "human_attestation";
   if (st !== "human_attestation" && st !== "machine_source") return { error: "an edit is human_attestation or machine_source" };
-  return withCardLock(dir, () => {
+  return withCardLock(dir, (stillOwned) => {
     const state = loadCards(dir);
     if (state.malformed) return { error: "decision-cards.jsonl is malformed — refusing to append (fix or remove corrupt lines first)" };
     const current = state.current.get(cardId);
@@ -1991,6 +2002,7 @@ export function editCard(repo, dir, { cardId, claim, span, side, path, evidenceF
       sourceType: st, claim: cl.value, side: sd, evidenceFile: ev, span: spVal, by: au.value,
       at: today(), supersedes: current.revHash };
     rec.revHash = revHashFor(rec);
+    if (!stillOwned()) return { error: "lost the card lock to a concurrent writer — retry" };
     appendPrivateLine(cardsPath(dir), canonicalCardLine(rec) + "\n");
     return { card: rec };
   });
@@ -2029,26 +2041,40 @@ export function projectLegacy(annotations, legacyAcceptances) {
   // acceptance layer uses — so a re-annotated sha (its pinned hash no longer
   // maps to any current annotation) invalidates a stale acceptance instead of
   // letting it drift onto edited prose the human never saw.
-  const cards = [], byHash = new Map(), seen = new Set();
+  const cards = [], byHash = new Map(), survivor = new Map();
   for (const ann of annotations || []) {
     const rec = projectLegacyAnnotation(ann);
     if (!rec) continue;
-    if (!seen.has(rec.cardId)) { cards.push(rec); seen.add(rec.cardId); } // dedup identical roots (no fork)
-    byHash.set(canonicalAnnotationHash(ann), rec);                        // identical dupes map to the same card
+    let emitted = survivor.get(rec.cardId);
+    if (!emitted) { cards.push(rec); survivor.set(rec.cardId, rec); emitted = rec; } // dedup identical roots (no fork)
+    byHash.set(canonicalAnnotationHash(ann), emitted);                    // always the EMITTED card, never a dropped dup
   }
   const cardReviews = [];
+  let malformed = false;
   for (const acc of legacyAcceptances || []) {
-    if (!acc || typeof acc.annotationSha256 !== "string" || !HASH64.test(acc.annotationSha256)) continue; // strict review shape
-    if (typeof acc.sha !== "string" || !OID.test(acc.sha)) continue;
+    // Validate the legacy acceptance with parity to parseReviews: a corrupt
+    // legacy review journal must surface malformed (unmeasurable), never migrate
+    // as a partial-clean active review.
+    if (!acc || typeof acc !== "object" ||
+        typeof acc.annotationSha256 !== "string" || !HASH64.test(acc.annotationSha256) ||
+        typeof acc.sha !== "string" || !OID.test(acc.sha) ||
+        !Array.isArray(acc.paths) || acc.paths.length === 0 ||
+        !acc.paths.every((p) => typeof p === "string" && normalizeScope(p) === p) ||
+        (acc.acceptedBy != null && typeof acc.acceptedBy !== "string") ||
+        (acc.acceptedAt != null && typeof acc.acceptedAt !== "string") ||
+        (acc.amendment != null && typeof acc.amendment !== "string") ||
+        (acc.applicability != null && !["active", "uncertain", "retired"].includes(acc.applicability))) {
+      malformed = true; continue;
+    }
     const rec = byHash.get(acc.annotationSha256);
-    if (!rec || rec.sha !== acc.sha) continue; // no annotation match, OR the acceptance sha ≠ the annotation's commit (cross-commit retarget) — drop, never fabricate
+    if (!rec || rec.sha !== acc.sha) continue; // no annotation match, OR acceptance sha ≠ the annotation's commit (cross-commit) — drop, never fabricate
     cardReviews.push({ type: acc.type || "acceptance", cardId: rec.cardId, revHash: rec.revHash,
-      applicability: ["active", "uncertain", "retired"].includes(acc.applicability) ? acc.applicability : "active",
-      scopes: [...(acc.paths || [])].sort(),
-      by: acc.acceptedBy || acc.by || "unknown", at: acc.acceptedAt || acc.at || rec.at,
-      legacy: true, amendment: acc.amendment });
+      applicability: acc.applicability || "active",
+      scopes: [...new Set(acc.paths)].sort(),
+      by: acc.acceptedBy || "unknown", at: acc.acceptedAt || rec.at,
+      legacy: true, amendment: acc.amendment ?? null });
   }
-  return { cards, cardReviews };
+  return { cards, cardReviews, malformed };
 }
 
 // Drafts awaiting a human: annotations with no CURRENT active acceptance of

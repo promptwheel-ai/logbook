@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
   mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync,
-  symlinkSync, readdirSync, chmodSync, statSync,
+  symlinkSync, readdirSync, chmodSync, statSync, utimesSync,
 } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -2648,5 +2648,68 @@ test("audit: a card line with surrounding whitespace is rejected (exact-canonica
   assert.equal(parseCards(canon).records.length, 1);
   assert.equal(parseCards("  " + canon).malformed, true);
   assert.equal(parseCards(canon + "  ").malformed, true);
+  rmSync(r, { recursive: true, force: true });
+});
+
+// ---------- Stage 1 hardening round 4: fixes for the round-3 audit findings ---
+test("audit: rename source path cannot ground the new file's lines, even with diff.renames=false", () => {
+  const d = mkdtempSync(join(tmpdir(), "logbook-rn2-"));
+  const env = { GIT_AUTHOR_NAME: "T", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "T", GIT_COMMITTER_EMAIL: "t@t" };
+  const g = (...a) => execFileSync("git", ["-C", d, ...a], { env, encoding: "utf8" });
+  g("init", "-q"); g("config", "diff.renames", "false"); mkdirSync(join(d, "src"));
+  writeFileSync(join(d, "src", "payments.js"), "export const KEY = 1;\nl2\nl3\nl4\n"); g("add", "-A"); g("commit", "-qm", "add");
+  g("mv", "src/payments.js", "src/payments_v2.js");
+  writeFileSync(join(d, "src", "payments_v2.js"), "export const KEY = 1;\nl2\nl3\nl4\nADDED\n"); g("add", "-A"); g("commit", "-qm", "rename+modify");
+  const sha = g("rev-parse", "HEAD").trim();
+  // OLD (deleted) path must NOT ground — it does not exist in HEAD
+  assert.equal(spanGroundedStrict(d, sha, "ADDED", "diff", "src/payments.js"), false);
+  assert.ok(saveMachineCard(d, d, { sha, claim: "c", span: "ADDED", side: "diff", path: "src/payments.js", by: "x" }).error);
+  // NEW path grounds only the genuinely added line
+  assert.equal(spanGroundedStrict(d, sha, "ADDED", "diff", "src/payments_v2.js"), true);
+  assert.equal(spanGroundedStrict(d, sha, "l2", "diff", "src/payments_v2.js"), false);
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("audit: a pre-aged (crashed-holder) lock is stolen safely — concurrent editors never fork the journal", async () => {
+  const { r, sha } = mkAcceptRepo();
+  const m = saveMachineCard(r, r, { sha, claim: "base", span: "v2", side: "diff", path: "src/cache.ts", by: "codex" });
+  const lockDir = join(r, "decision-cards.jsonl.lock");
+  mkdirSync(lockDir); writeFileSync(join(lockDir, "owner"), "dead.holder");
+  const old = Date.now() / 1000 - 40; utimesSync(lockDir, old, old); // 40s old => stale (>30s window)
+  const worker = join(r, "w.mjs");
+  writeFileSync(worker, `import { editCard } from ${JSON.stringify(CLI)};\nconst [,, d, c, i] = process.argv;\neditCard(d, d, { cardId: c, claim: "e" + i, by: "p" + i });\n`);
+  await Promise.all(Array.from({ length: 8 }, (_, i) => new Promise((res) =>
+    spawn(process.execPath, [worker, r, m.card.cardId, String(i)], { stdio: "ignore" }).on("exit", () => res()))));
+  const st = loadCards(r);
+  assert.equal(st.malformed, false, "concurrent editors forked the journal after stealing a stale lock");
+  assert.ok(st.current.get(m.card.cardId).rev > 1, "no edit landed after the stale lock was stolen");
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("audit: a malformed legacy acceptance surfaces malformed and is not emitted as a review", () => {
+  const { r, sha } = mkAcceptRepo();
+  const ann = { sha, why: "decision", by: "gpt", date: "2024-01-01" };
+  const h = canonicalAnnotationHash(ann);
+  const bad = [{ type: "acceptance", sha, annotationSha256: h, paths: ["../../etc/passwd", "src/**/*.ts", 42], acceptedBy: { evil: 1 }, acceptedAt: "2024-01-02" }];
+  const res = projectLegacy([ann], bad);
+  assert.equal(res.malformed, true);
+  assert.equal(res.cardReviews.length, 0);
+  const bad2 = [{ type: "acceptance", sha, annotationSha256: h, paths: "src/x", acceptedBy: "a", acceptedAt: "b" }]; // paths must be an array
+  assert.equal(projectLegacy([ann], bad2).malformed, true);
+  const good = [{ type: "acceptance", sha, annotationSha256: h, paths: ["src/x.ts"], acceptedBy: "a", acceptedAt: "b" }];
+  assert.equal(projectLegacy([ann], good).malformed, false);
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("audit: dedup keeps cardReview revHash consistent — an acceptance never binds a non-emitted revision", () => {
+  const { r, sha } = mkAcceptRepo();
+  const a1 = { sha, why: "same claim", by: "gpt", date: "2024-01-01" };
+  const a2 = { sha, why: "same claim", by: "gpt", date: "2024-09-09" }; // identical but for date => same cardId, different revHash
+  const acc = [{ type: "acceptance", sha, annotationSha256: canonicalAnnotationHash(a2), paths: ["src/x.ts"], acceptedBy: "a", acceptedAt: "2024-01-02" }];
+  const { cards, cardReviews } = projectLegacy([a1, a2], acc);
+  assert.equal(cards.length, 1);
+  assert.equal(cardReviews.length, 1);
+  const revHashes = new Set(cards.map((c) => c.revHash));
+  assert.ok(revHashes.has(cardReviews[0].revHash), "review bound to a revHash absent from the emitted cards");
   rmSync(r, { recursive: true, force: true });
 });
