@@ -3535,3 +3535,25 @@ test("closure2: runCheckDiff (live check --diff) ignores a refs/replace-injected
   assert.equal(after.exitCode, 0);
   rmSync(d, { recursive: true, force: true });
 });
+
+test("closure3: a kill switch that becomes UNMEASURABLE mid-run returns the partial subset WITH an explicit unmeasurable error", () => {
+  const N = 80;
+  const { d, g, sha } = policyRepo("cmidu-", 'enabled = true\nallowed_scopes = ["src/"]\nmax_cards_per_run = ' + N + '\nmax_total_cards = ' + N + '\n');
+  const dotlog = join(d, ".logbook");
+  const leadsDir = join(dotlog, "leads");
+  // background watcher: once the first card lands, drop SEARCH (x) on .logbook so the
+  // per-install recheck's local lstat throws EACCES => killSwitchEngaged => "unmeasurable".
+  const watcher = join(d, "watch.mjs");
+  writeFileSync(watcher,
+    'import { readdirSync, chmodSync } from "node:fs";\n' +
+    'const leads=' + JSON.stringify(leadsDir) + ', dotlog=' + JSON.stringify(dotlog) + ';\n' +
+    'function spin(){ let n=0; try{ n=readdirSync(leads).filter(f=>f.endsWith(".json")).length; }catch{} if(n>=1){ chmodSync(dotlog,0o600); process.exit(0);} setTimeout(spin,0);} spin();');
+  const child = spawn(process.execPath, [watcher], { stdio: "ignore" });
+  const cands = Array.from({ length: N }, (_, i) => ({ ...goodCand(sha), claim: "decision number " + i }));
+  let r; try { r = publishPolicyLeads(d, cands); } finally { try { chmodSync(dotlog, 0o755); } catch {} child.kill(); }
+  assert.equal(r.incomplete, true);
+  assert.equal(r.exitCode, 1);
+  assert.ok(r.published >= 1 && r.published < N, "expected a partial subset, got " + r.published);
+  assert.match(r.error, /unmeasurable/);                                // explicit tri-state, not a bare boolean break
+  rmSync(d, { recursive: true, force: true });
+});

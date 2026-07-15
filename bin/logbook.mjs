@@ -2402,7 +2402,7 @@ export function publishPolicyLeads(repo, candidates, { trustRef = "HEAD" } = {})
     if (wt.malformed) return done({ error: "malformed/unsafe worktree lead — unmeasurable", incomplete: true });
     const union = new Set([...trusted.ids, ...wt.ids]);                              // trusted-ref + worktree; a local delete can't restore quota
     for (const { card, content } of installable) {
-      if (killSwitchEngaged(repo, commit)) { counts.incomplete = true; break; }     // mid-run kill: stop, report subset
+      { const ks = killSwitchEngaged(repo, commit); if (ks) return done({ error: ks === "unmeasurable" ? "kill switch state unmeasurable" : "kill switch engaged during install", incomplete: true }); } // mid-run: stop, report the partial subset with an explicit reason
       if (counts.published >= policy.maxPerRun) { counts.skipped.push({ reason: "run-cap" }); continue; }
       if (!union.has(card.cardId) && union.size >= policy.maxTotal) { counts.skipped.push({ reason: "total-cap" }); continue; }
       const res = installCard(pin.dir, card.cardId, content);
