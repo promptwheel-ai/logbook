@@ -25,6 +25,7 @@ import {
   appendPrivateLine, renderLeads, writeCheckMetrics, pendingDrafts,
   saveMachineCard, editCard, foldCards, cardIdFor, revHashFor,
   parseCards, spanGroundedStrict, groundStatus, loadCards, validCardRecord,
+  decisionCardId, validDecisionCard, serializeDecisionCard, parseDecisionCard, DECISION_SCHEMA,
   projectLegacyAnnotation, projectLegacy, CARD_SCHEMA, canonicalCardLine,
 } from "../bin/logbook.mjs";
 
@@ -2949,4 +2950,53 @@ test("harden2: projectLegacy REPORTS every transformation (control-clean, coerce
   const dup = [{ sha, why: "same", by: "x", date: "2024-01-01" }, { sha, why: "same", by: "x", date: "2024-01-01" }];
   assert.ok(projectLegacy(dup, []).skipped.some((s) => s.reason === "normalized-collision"));
   rmSync(r, { recursive: true, force: true });
+});
+
+// ---------- git-files platform Stage 1: decision-card model ----------
+function mkDecision(o = {}) {
+  const c = { schema: DECISION_SCHEMA, cardId: "", sha: "a".repeat(40), sourceType: "machine_source",
+    claim: "pooling added under load", side: "diff", evidenceFile: "src/db.js", span: "createPool",
+    scopes: ["src/db.js"], by: "codex", at: "2026-07-14", ...o };
+  c.cardId = decisionCardId(c);
+  return c;
+}
+
+test("gitfiles: a valid machine decision card round-trips; scopes are separate from evidence", () => {
+  const c = mkDecision();
+  assert.ok(validDecisionCard(c));
+  assert.equal(c.cardId, decisionCardId(c));
+  assert.equal(parseDecisionCard(serializeDecisionCard(c)).cardId, c.cardId); // canonical round-trip
+});
+
+test("gitfiles: human_attestation and legacy_unverified shapes validate; machine invariants enforced", () => {
+  const human = mkDecision({ sourceType: "human_attestation", side: null, evidenceFile: null, span: null });
+  assert.ok(validDecisionCard(human));
+  const legacy = mkDecision({ sourceType: "legacy_unverified", side: null, evidenceFile: null, span: "webpack4" });
+  assert.ok(validDecisionCard(legacy));
+  assert.ok(!validDecisionCard(mkDecision({ span: null })));                 // machine without span
+  assert.ok(!validDecisionCard(mkDecision({ sourceType: "human_attestation", side: null, evidenceFile: null }))); // human WITH span
+});
+
+test("gitfiles: bad scopes / extra keys / bad date are rejected", () => {
+  assert.ok(!validDecisionCard(mkDecision({ scopes: [] })));                 // empty
+  assert.ok(!validDecisionCard(mkDecision({ scopes: ["src/**/*.ts"] })));    // glob
+  assert.ok(!validDecisionCard(mkDecision({ scopes: ["../../etc/passwd"] })));// traversal (not normalized)
+  assert.ok(!validDecisionCard({ ...mkDecision(), injected: 1 }));           // extra key
+  assert.ok(!validDecisionCard(mkDecision({ at: "not-a-date" })));           // bad date
+});
+
+test("gitfiles: cardId is a STABLE handle across scope/date edits (git tracks the revision)", () => {
+  const c = mkDecision();
+  const edited = { ...c, scopes: ["src/db.js", "src/pool.js"], at: "2026-09-01" };
+  assert.equal(decisionCardId(edited), c.cardId);                            // scopes + at excluded from identity
+  // editing the CLAIM is a different decision => different id (a new card)
+  assert.notEqual(decisionCardId({ ...c, claim: "different claim" }), c.cardId);
+});
+
+test("gitfiles: parseDecisionCard rejects non-canonical bytes (dup keys / reordered)", () => {
+  const c = mkDecision();
+  const canon = serializeDecisionCard(c);
+  assert.ok(parseDecisionCard(canon));
+  assert.equal(parseDecisionCard('{"claim":"decoy",' + canon.slice(1)), null); // duplicate/leading key
+  assert.equal(parseDecisionCard("  " + canon), null);                       // surrounding whitespace
 });

@@ -1950,6 +1950,69 @@ export function canonicalCardLine(c) {
   return JSON.stringify(o);
 }
 
+// ================= GIT-FILES decision platform (Stage 1: card model) =========
+// One committed file per decision. Authority tier = the PLANE (directory):
+// .logbook/decisions/ = human-reviewed; .logbook/leads/ = policy-published
+// (machine). Git provides what the journal hand-rolled — blob hash = content
+// integrity, history = revision chain, merge = concurrency — so NO revHash /
+// supersedes / lock / CAS here. PORTED forward: canonical schema validation,
+// grounding, scope matching, provenance, trusted-base reads. `cardId` is a
+// STABLE HANDLE (= filename) assigned at draft; edits keep the file and git
+// history is the revision chain. `scopes` = applicability (human-chosen paths),
+// kept separate from evidence (sha/side/evidenceFile/span).
+export const DECISION_SCHEMA = 1;
+const DECISION_KEYS = new Set(["schema", "cardId", "sha", "sourceType", "claim", "side", "evidenceFile", "span", "scopes", "by", "at"]);
+const DECISION_ORDER = ["schema", "cardId", "sha", "sourceType", "claim", "side", "evidenceFile", "span", "scopes", "by", "at"];
+function decisionOrigin(rec) {
+  return { schema: DECISION_SCHEMA, sha: rec.sha, sourceType: rec.sourceType, claim: rec.claim,
+    side: rec.side ?? null, evidenceFile: rec.evidenceFile ?? null, span: rec.span ?? null, by: rec.by };
+}
+export function decisionCardId(rec) { return sha256("logbook.decision.v1\n" + JSON.stringify(decisionOrigin(rec))); }
+function okScope(v) {
+  return typeof v === "string" && wellFormed(v) && !CTRL.test(v) && v.length > 0 && v.length <= MAX_EVPATH &&
+    !/[*?\[\]]/.test(v) && normalizeScope(v) === v;   // literal, normalized dir-or-file scope (no glob)
+}
+// Structural validity only — NOT content-anchored (cardId is a stable handle;
+// git blob integrity replaces a content hash). Grounding is re-checked at read.
+export function validDecisionCard(c) {
+  if (!c || typeof c !== "object" || Array.isArray(c)) return false;
+  for (const k of Object.keys(c)) if (!DECISION_KEYS.has(k)) return false;   // no unbound extra fields
+  if (c.schema !== DECISION_SCHEMA) return false;
+  if (typeof c.cardId !== "string" || !HASH64.test(c.cardId)) return false;
+  if (typeof c.sha !== "string" || !OID.test(c.sha)) return false;
+  if (!CARD_SOURCES.has(c.sourceType)) return false;
+  if (!okText(c.claim, MAX_CLAIM) || !okText(c.by, MAX_BY)) return false;
+  if (typeof c.at !== "string" || CTRL.test(c.at) || !/^\d{4}-\d{2}-\d{2}$/.test(c.at)) return false;
+  if (!Array.isArray(c.scopes) || c.scopes.length === 0 || !c.scopes.every(okScope)) return false;
+  if (c.side !== null && c.side !== "message" && c.side !== "diff") return false;
+  if (c.evidenceFile !== null && !okEvPath(c.evidenceFile)) return false;
+  if (c.span !== null && !okText(c.span, MAX_SPAN)) return false;
+  if (c.sourceType === "machine_source") {
+    if (typeof c.span !== "string" || !c.span.trim()) return false;
+    if (c.side === "message") { if (c.evidenceFile !== null) return false; }
+    else if (c.side === "diff") { if (!okEvPath(c.evidenceFile)) return false; }
+    else return false;                                                     // machine needs a real side
+  } else if (c.sourceType === "human_attestation") {
+    if (c.span !== null || c.side !== null || c.evidenceFile !== null) return false;
+  } else {                                                                 // legacy_unverified
+    if (c.side !== null || c.evidenceFile !== null) return false;          // span may be present but ungrounded
+  }
+  return true;
+}
+// Deterministic + readable serialization (fixed key order, pretty-printed so the
+// accept commit is a legible diff). Identical card => identical bytes => one blob.
+export function serializeDecisionCard(c) {
+  const o = {}; for (const k of DECISION_ORDER) o[k] = c[k] === undefined ? null : c[k];
+  return JSON.stringify(o, null, 2) + "\n";
+}
+// Round-trip check used at read time: bytes parse, are canonical, and valid.
+export function parseDecisionCard(text) {
+  let c; try { c = JSON.parse(text); } catch { return null; }
+  if (!validDecisionCard(c)) return null;
+  if (serializeDecisionCard(c) !== text) return null;                      // non-canonical bytes rejected (dup keys / reorder / whitespace)
+  return c;
+}
+
 export function parseCards(text) {
   const records = []; let malformed = false;
   for (const line of String(text || "").split("\n")) {
