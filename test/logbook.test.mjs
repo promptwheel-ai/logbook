@@ -3730,3 +3730,50 @@ test("closure4: checkDecisions resolves base/head refs once (branch names, not j
   assert.equal(res.result, "leads"); assert.equal(res.leads.length, 1); assert.ok(res.leads[0].authoritative);
   rmSync(d, { recursive: true, force: true });
 });
+
+// ---------- git-files closure5 (Codex: wrong-type roots + local-mode pinning + XOR) --------
+test("closure5: a wrong-type plane root (.logbook/<plane> is a blob) is unmeasurable, never not-configured/clean", () => {
+  const { d, g } = tmpGitRepo("cwt1-"); g("init", "-q");
+  mkdirSync(join(d, ".logbook"), { recursive: true });
+  writeFileSync(join(d, ".logbook", "decisions"), "i am a blob, not a directory\n"); // .logbook/decisions is a BLOB
+  writeFileSync(join(d, "f.txt"), "x\n"); g("add", "-A"); g("commit", "-qm", "blob-plane");
+  const base = g("rev-parse", "HEAD").trim();
+  writeFileSync(join(d, "f.txt"), "y\n"); g("add", "-A"); g("commit", "-qm", "bump");
+  const res = checkDecisions(d, { base, head: g("rev-parse", "HEAD").trim() });
+  assert.equal(res.result, "unmeasurable"); assert.equal(res.exitCode, 1);
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("closure5: a directory-shaped <cardId>.json (a tree, not a blob) is malformed, never surfaces", () => {
+  const { d, g } = tmpGitRepo("cwt2-"); g("init", "-q");
+  const fakeId = "a".repeat(64);
+  mkdirSync(join(d, ".logbook", "decisions", fakeId + ".json"), { recursive: true }); // a TREE named like a card
+  writeFileSync(join(d, ".logbook", "decisions", fakeId + ".json", "inner"), "x\n");
+  writeFileSync(join(d, "f.txt"), "x\n"); g("add", "-A"); g("commit", "-qm", "json-tree");
+  const base = g("rev-parse", "HEAD").trim();
+  writeFileSync(join(d, "f.txt"), "y\n"); g("add", "-A"); g("commit", "-qm", "bump");
+  const res = checkDecisions(d, { base, head: g("rev-parse", "HEAD").trim() });
+  assert.equal(res.leads.length, 0); assert.ok(res.malformedCount >= 1); assert.equal(res.exitCode, 1); // not exit 0
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("closure5: a half-range (base without head, or head without base) is rejected, not silently local", () => {
+  const { d, g, sha } = poolRepo("cxor-");
+  const base = g("rev-parse", "HEAD").trim();
+  assert.equal(checkDecisions(d, { base }).result, "unmeasurable");
+  assert.equal(checkDecisions(d, { base }).exitCode, 1);
+  assert.equal(checkDecisions(d, { head: base }).result, "unmeasurable");
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("closure5: local mode diffs the worktree against the pinned HEAD OID (tracked + untracked), raw", () => {
+  const { d, g, sha } = poolRepo("cloc-");
+  writeCard(d, g, "decisions", mkDecision({ sha, evidenceFile: "src/db.js", span: "createPool", scopes: ["src/db.js"] }));
+  g("commit", "-qm", "accept at HEAD");
+  writeFileSync(join(d, "src", "db.js"), "createPool({max:20})\n");   // UNCOMMITTED tracked change touching the decision's scope
+  writeFileSync(join(d, "untracked.txt"), "new\n");                   // untracked file
+  const res = checkDecisions(d, {});                                  // local mode
+  assert.equal(res.result, "leads"); assert.equal(res.leads.length, 1); // the decision surfaces against the working-tree change
+  assert.ok(res.changedCount >= 2);                                   // both the tracked change and the untracked file are counted
+  rmSync(d, { recursive: true, force: true });
+});

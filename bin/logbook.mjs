@@ -2046,7 +2046,7 @@ export const LEAD_PLANE = "leads";           // policy-published (machine)
 // as malformed) when it is a non-blob, missing, oversized (>MAX_CARD_BYTES), or
 // unreadable object. { unreadable, entries:[{path,oid}], textByOid:Map }.
 const PLANE_CHUNK_BYTES = 32 << 20;                                        // per cat-file --batch process
-const PLANE_AGGREGATE_BYTES = 256 << 20;                                   // whole-plane read cap; a larger plane is UNMEASURABLE (fail-closed), never partially trusted
+const PLANE_AGGREGATE_BYTES = 128 << 20;                                   // whole-plane read cap; a larger plane is UNMEASURABLE (fail-closed), never partially trusted
 const UTF8_STRICT = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }); // reject invalid UTF-8 (no lossy U+FFFD); keep a BOM byte-faithful
 function decodeUtf8Strict(buf) { try { return UTF8_STRICT.decode(buf); } catch { return null; } }
 // Batched RAW read of a committed card plane, streamed so raw blobs are parsed and
@@ -2061,21 +2061,43 @@ function decodeUtf8Strict(buf) { try { return UTF8_STRICT.decode(buf); } catch {
 function readPlaneBlobs(repo, ref, plane) {
   const dead = { unreadable: true, entries: [] };
   const prefix = `.logbook/${plane}/`;
+  // Object type of a path at ref (non-recursive), or "absent"/"error".
+  const typeOf = (path) => {
+    let r; try { r = gitBuf(repo, ["ls-tree", "-z", ref, "--", path]); } catch { return "error"; }
+    if (r.status !== 0 || r.error) return "error";
+    const rec = r.stdout.toString("latin1").split("\0").find(Boolean);
+    if (!rec) return "absent";
+    const tab = rec.indexOf("\t");
+    return tab < 0 ? "error" : rec.slice(0, tab).split(" ")[1];
+  };
+  // .logbook and the plane root must be TREES if present. A wrong-type object (a blob
+  // named .logbook or .logbook/<plane>) makes `ls-tree -r <plane>/` emit no leaf, which
+  // must be UNMEASURABLE, never "absent/clean".
+  const dl = typeOf(".logbook");
+  if (dl === "error") return dead;
+  if (dl === "absent") return { unreadable: false, entries: [] };         // no .logbook => plane genuinely absent
+  if (dl !== "tree") return dead;
+  const pt = typeOf(`.logbook/${plane}`);
+  if (pt === "error") return dead;
+  if (pt === "absent") return { unreadable: false, entries: [] };         // plane genuinely absent
+  if (pt !== "tree") return dead;
+  // List DIRECT children (non-recursive) so a directory-shaped <id>.json or a nested
+  // subdir cannot slip past `-r` flattening.
   let lsBuf;
-  try { lsBuf = gitBuf(repo, ["ls-tree", "-r", "-z", ref, "--", prefix]); } catch { return dead; }
+  try { lsBuf = gitBuf(repo, ["ls-tree", "-z", ref, "--", prefix]); } catch { return dead; }
   if (lsBuf.status !== 0 || lsBuf.error) return dead;
-  const raw = [];                                                          // { path, oid|null } ; oid=null => structurally invalid .json => malformed
+  const raw = [];                                                          // { path, oid|null } ; oid=null => structurally invalid entry => malformed
   for (const rec of lsBuf.stdout.toString("latin1").split("\0")) {         // latin1 = byte-faithful paths (no lossy U+FFFD)
     if (!rec) continue;
     const tab = rec.indexOf("\t");
     if (tab < 0) continue;
     const meta = rec.slice(0, tab).split(" ");                            // "<mode> <type> <oid>"
     const path = rec.slice(tab + 1);
-    if (!path.endsWith(".json")) continue;                                // non-card files are ignored (never malformed)
-    const direct = path.startsWith(prefix) && !path.slice(prefix.length).includes("/"); // EXACTLY .logbook/<plane>/<name>.json (no nesting)
+    if (meta[1] === "tree") { raw.push({ path, oid: null }); continue; }  // any subdir => malformed (nested card OR directory-shaped .json)
+    if (!path.endsWith(".json")) continue;                                // non-card file => ignored (never malformed)
     const regular = meta[0] === "100644" || meta[0] === "100755";         // reject symlink (120000) / gitlink (160000)
     const okBlob = meta[1] === "blob" && OID.test(meta[2] || "");
-    raw.push({ path, oid: (direct && regular && okBlob) ? meta[2] : null });
+    raw.push({ path, oid: (regular && okBlob) ? meta[2] : null });
   }
   const uniq = [...new Set(raw.map((e) => e.oid).filter(Boolean))];
   const cardByOid = new Map();
@@ -2141,21 +2163,23 @@ export function readPlane(repo, ref, plane) {
 }
 
 export function checkDecisions(repo, { base, head } = {}) {
+  const unm = (why) => ({ result: "unmeasurable", exitCode: 1, leads: [], malformedCount: 0, message: `unmeasurable: ${why} (not "clean").` });
+  if ((base && !head) || (!base && head)) return unm("range mode requires BOTH base and head"); // reject XOR: a half-range must not silently fall back to local
   const mode = base && head ? "range" : "local";
   const trustRef = mode === "range" ? base : "HEAD";
-  const unm = (why) => ({ result: "unmeasurable", exitCode: 1, leads: [], malformedCount: 0, message: `unmeasurable: ${why} (not "clean").` });
   // Resolve base/head to immutable commit OIDs ONCE, then use those for BOTH the diff
   // and the trust-plane reads: a ref that moves mid-check must not desync the diff from
   // the trusted cards (which would inject a future/other-branch card).
   const commit = resolveTrustCommit(repo, trustRef);
   if (!commit) return unm(`cannot resolve trust ref ${trustRef}`);
-  let diffBase = base, diffHead = head;
+  let changed;
   if (mode === "range") {
     const hc = resolveTrustCommit(repo, head);
     if (!hc) return unm(`cannot resolve head ref ${head}`);
-    diffBase = commit; diffHead = hc;                                      // commit === resolved base
+    changed = collectChangedPaths(repo, { base: commit, head: hc });       // pinned OIDs (commit === resolved base)
+  } else {
+    changed = collectLocalChanges(repo, commit);                           // RAW diff vs the captured commit OID + untracked; never mutable/replaced HEAD
   }
-  const changed = collectChangedPaths(repo, { base: diffBase, head: diffHead });
   if (changed.error) return unm(changed.error);
   const decisions = readPlane(repo, commit, DECISION_PLANE);               // pinned to the immutable trust commit, not the symbolic ref
   const leads = readPlane(repo, commit, LEAD_PLANE);
@@ -2904,6 +2928,25 @@ export function saveVerification(repo, dir, { sha, by, verdict, note }) {
 
 // Changed paths: local (tracked-vs-HEAD + untracked non-ignored) or a
 // rename-aware range (both sides of a rename retained).
+// Local (uncommitted) changes vs an IMMUTABLE captured commit OID, RAW (no replace/graft):
+// tracked changes via `diff <commit>` (worktree vs that exact tree) + untracked files
+// listed separately (diff never shows them). Never compares against the mutable HEAD ref.
+function collectLocalChanges(repo, commit) {
+  const paths = new Set();
+  const d = rawGitStatus(repo, ["diff", "--name-status", "-z", "--no-textconv", commit]);
+  if (d.status !== 0) return { error: `cannot diff the worktree against ${commit}` };
+  const parts = d.stdout.split("\0");
+  for (let i = 0; i < parts.length;) {
+    const status = parts[i];
+    if (!status) { i++; continue; }
+    if (status[0] === "R" || status[0] === "C") { if (parts[i + 1]) paths.add(parts[i + 1]); if (parts[i + 2]) paths.add(parts[i + 2]); i += 3; }
+    else { if (parts[i + 1]) paths.add(parts[i + 1]); i += 2; }
+  }
+  const u = rawGitStatus(repo, ["ls-files", "--others", "--exclude-standard", "-z"]);
+  if (u.status !== 0) return { error: "cannot list untracked files" };
+  for (const p of u.stdout.split("\0")) if (p) paths.add(p);
+  return { mode: "local", paths: [...paths] };
+}
 export function collectChangedPaths(repo, { base, head }) {
   const paths = new Set();
   if (base && head) {
