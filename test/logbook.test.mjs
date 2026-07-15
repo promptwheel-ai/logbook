@@ -26,7 +26,7 @@ import {
   saveMachineCard, editCard, foldCards, cardIdFor, revHashFor,
   parseCards, spanGroundedStrict, groundStatus, loadCards, validCardRecord,
   decisionCardId, validDecisionCard, serializeDecisionCard, parseDecisionCard, DECISION_SCHEMA,
-  checkDecisions, renderDecisionLeads, parsePolicy, loadPolicy, autopublish, migrateLegacyToDrafts,
+  checkDecisions, renderDecisionLeads, parsePolicy, publishPolicyLeads, migrateLegacyToDrafts,
   projectLegacyAnnotation, projectLegacy, CARD_SCHEMA, canonicalCardLine,
 } from "../bin/logbook.mjs";
 
@@ -3048,7 +3048,7 @@ test("gitfiles stage2: a machine card whose evidence no longer grounds is DEMOTE
   const res = checkDecisions(d, { base, head: g("rev-parse", "HEAD").trim() });
   assert.equal(res.leads.length, 1); assert.equal(res.leads[0].authoritative, false);
   assert.equal(res.exitCode, 1);                           // a demoted (unverifiable) lead is unmeasurable, never clean
-  assert.match(renderDecisionLeads(res), /evidence no longer verifiable.*NOT authoritative/s);
+  assert.match(renderDecisionLeads(res), /NOT authoritative.*evidence absent/s);
   rmSync(d, { recursive: true, force: true });
 });
 
@@ -3071,65 +3071,6 @@ test("gitfiles stage2: a malformed card (filename != cardId) is unmeasurable, ne
   writeFileSync(join(d, "src", "db.js"), "createPool({max:20})\n"); g("add", "-A"); g("commit", "-qm", "bump");
   const res = checkDecisions(d, { base, head: g("rev-parse", "HEAD").trim() });
   assert.equal(res.malformedCount, 1); assert.equal(res.exitCode, 1);
-  rmSync(d, { recursive: true, force: true });
-});
-
-// ---------- git-files platform Stage 3: automatic mode (policy leads) ----------
-test("gitfiles stage3: parsePolicy is strict (unknown key / glob scope / bad enabled rejected)", () => {
-  assert.ok(parsePolicy('enabled = true\nallowed_scopes = ["src/"]\nmax_cards_per_run = 5\n').policy);
-  assert.ok(parsePolicy("mystery = 1\n").error);
-  assert.ok(parsePolicy('allowed_scopes = ["src/**"]\n').error);         // glob
-  assert.ok(parsePolicy("enabled = yes\n").error);
-  const p = parsePolicy('enabled = true\nallowed_scopes = ["src/", "lib/"]\nprotected_paths = ["src/auth/"]\nmax_total_cards = 200\n').policy;
-  assert.deepEqual(p.allowedScopes, ["src/", "lib/"]); assert.equal(p.maxTotal, 200);
-});
-
-test("gitfiles stage3: loadPolicy reads the COMMITTED policy (opt-in, caps required, immediate kill switch)", () => {
-  const { d, g } = tmpGitRepo("logbook-pol-");
-  g("init", "-q"); writeFileSync(join(d, "x"), "1"); g("add", "-A"); g("commit", "-qm", "init");
-  assert.match(loadPolicy(d).error, /opt-in/);                            // no committed policy
-  mkdirSync(join(d, ".logbook"), { recursive: true });
-  const goodToml = 'enabled = true\nallowed_scopes = ["src/"]\nmax_cards_per_run = 5\nmax_total_cards = 50\n';
-  // caps required: a committed policy WITHOUT caps is refused
-  writeFileSync(join(d, ".logbook", "policy.toml"), 'enabled = true\nallowed_scopes = ["src/"]\n'); g("add", "-A"); g("commit", "-qm", "no caps");
-  assert.match(loadPolicy(d).error, /POSITIVE max_cards_per_run/);
-  writeFileSync(join(d, ".logbook", "policy.toml"), goodToml); g("add", "-A"); g("commit", "-qm", "policy");
-  assert.ok(loadPolicy(d).policy);
-  // an UNCOMMITTED working-tree edit that adds a scope does NOT loosen the committed policy
-  writeFileSync(join(d, ".logbook", "policy.toml"), goodToml + 'protected_paths = []\n'); // uncommitted, extra scope would-be
-  assert.deepEqual(loadPolicy(d).policy.allowedScopes, ["src/"]);         // still the committed narrow set
-  writeFileSync(join(d, ".logbook", "AUTOMATION_DISABLED"), "");
-  assert.match(loadPolicy(d).error, /kill switch/);                       // working-tree, immediate
-  rmSync(d, { recursive: true, force: true });
-});
-
-test("gitfiles stage3: autopublish writes grounded+allowed candidates to LEADS only, never decisions", () => {
-  const { d, sha } = poolRepo("logbook-auto-");
-  const policy = { enabled: true, allowedScopes: ["src/"], protectedPaths: ["src/auth/"], maxPerRun: 10, maxTotal: 100 };
-  const r = autopublish(d, [
-    { sha, claim: "pool grounded", span: "createPool", side: "diff", evidenceFile: "src/db.js", scopes: ["src/db.js"] },
-    { sha, claim: "not grounded", span: "DOES_NOT_EXIST", side: "diff", evidenceFile: "src/db.js", scopes: ["src/db.js"] },
-    { sha, claim: "protected", span: "createPool", side: "diff", evidenceFile: "src/db.js", scopes: ["src/auth/keys.js"] },
-    { sha, claim: "outside allowed", span: "createPool", side: "diff", evidenceFile: "src/db.js", scopes: ["lib/x.js"] },
-  ], policy);
-  assert.equal(r.published.length, 1); assert.equal(r.published[0].claim, "pool grounded");
-  assert.ok(r.skipped.some((s) => s.reason === "not-grounded"));
-  assert.ok(r.skipped.some((s) => s.reason === "protected-path"));
-  assert.ok(r.skipped.some((s) => s.reason === "scope-not-allowed"));
-  assert.ok(existsSync(join(d, ".logbook", "leads", r.published[0].cardId + ".json")));
-  assert.ok(!existsSync(join(d, ".logbook", "decisions")));               // NEVER writes human-reviewed
-  rmSync(d, { recursive: true, force: true });
-});
-
-test("gitfiles stage3: autopublish enforces the per-run cap", () => {
-  const { d, sha } = poolRepo("logbook-cap-");
-  const policy = { enabled: true, allowedScopes: ["src/"], protectedPaths: [], maxPerRun: 1, maxTotal: 100 };
-  const r = autopublish(d, [
-    { sha, claim: "a", span: "createPool", side: "diff", evidenceFile: "src/db.js", scopes: ["src/db.js"] },
-    { sha, claim: "b", span: "raw", side: "diff", evidenceFile: "src/db.js", scopes: ["src/db.js"] }, // "raw" removed in the pool commit => grounded (removed)
-  ], policy);
-  assert.equal(r.published.length, 1);
-  assert.ok(r.skipped.some((s) => s.reason === "run-cap"));
   rmSync(d, { recursive: true, force: true });
 });
 
@@ -3163,45 +3104,191 @@ test("gitfiles stage4a: migration reports skipped rows (bad sha / empty why), ne
   rmSync(d, { recursive: true, force: true });
 });
 
-// ---------- git-files stage 3 SECURITY fixes (Codex focused repros) ----------
-test("gitfiles stage3 fix: a broad scope covering a protected subtree is refused (overlap, not just under)", () => {
-  const { d, sha } = poolRepo("logbook-broad-");
-  const policy = { enabled: true, allowedScopes: ["src/"], protectedPaths: ["src/auth/"], maxPerRun: 10, maxTotal: 100 };
-  const r = autopublish(d, [{ sha, claim: "broad", span: "createPool", side: "diff", evidenceFile: "src/db.js", scopes: ["src/"] }], policy);
-  assert.equal(r.published.length, 0);                          // "src/" governs the protected src/auth/ subtree
-  assert.ok(r.skipped.some((s) => s.reason === "protected-path"));
+// ---------- git-files Stage 3 GATE: unbypassable publication (16 required) ----
+const GOOD_TOML = 'enabled = true\nallowed_scopes = ["src/"]\nprotected_paths = ["src/auth/"]\nmax_cards_per_run = 5\nmax_total_cards = 50\n';
+function policyRepo(prefix, toml) {
+  const { d, g, sha } = poolRepo(prefix);
+  mkdirSync(join(d, ".logbook"), { recursive: true });
+  if (toml) { writeFileSync(join(d, ".logbook", "policy.toml"), toml); g("add", "-A"); g("commit", "-qm", "policy"); }
+  return { d, g, sha, commit: g("rev-parse", "HEAD").trim() };
+}
+const goodCand = (sha) => ({ sha, claim: "pool added under load", span: "createPool", side: "diff", evidenceFile: "src/db.js", scopes: ["src/db.js"] });
+const leadCount = (d) => { try { return readdirSync(join(d, ".logbook", "leads")).filter((f) => f.endsWith(".json")).length; } catch { return 0; } };
+
+test("gate1: no committed policy => cannot publish; the API accepts no injected policy", () => {
+  const { d, sha } = policyRepo("g1-", null);
+  assert.match(publishPolicyLeads(d, [goodCand(sha)]).error, /opt-in/);
+  assert.match(publishPolicyLeads(d, [goodCand(sha)], { trustRef: "HEAD", policy: { enabled: true, allowedScopes: ["src/"], maxPerRun: 9, maxTotal: 9 } }).error, /opt-in/);
+  assert.equal(leadCount(d), 0);
   rmSync(d, { recursive: true, force: true });
 });
 
-test("gitfiles stage3 fix: an UNMEASURABLE grounding (merge commit) is skipped distinctly, not as 'not-grounded'", () => {
-  const { d, g, gq } = tmpGitRepo("logbook-unmeas-");
-  g("init", "-q"); mkdirSync(join(d, "src"));
-  writeFileSync(join(d, "src", "x.js"), "base\n"); writeFileSync(join(d, "src", "y.js"), "base\n"); g("add", "-A"); g("commit", "-qm", "base");
-  const main = g("branch", "--show-current").trim();
-  g("checkout", "-q", "-b", "feat"); writeFileSync(join(d, "src", "x.js"), "feat\n"); writeFileSync(join(d, "src", "y.js"), "feat\n"); g("add", "-A"); g("commit", "-qm", "f");
-  g("checkout", "-q", main); writeFileSync(join(d, "src", "x.js"), "mainx\n"); writeFileSync(join(d, "src", "y.js"), "mainy\n"); g("add", "-A"); g("commit", "-qm", "m");
-  gq("merge", "feat"); writeFileSync(join(d, "src", "x.js"), "RESOLVED_X\n"); writeFileSync(join(d, "src", "y.js"), "RESOLVED_Y\n"); g("add", "-A"); g("commit", "--no-edit", "-q");
-  const merge = g("rev-parse", "HEAD").trim();
-  const policy = { enabled: true, allowedScopes: ["src/"], protectedPaths: [], maxPerRun: 10, maxTotal: 100 };
-  const r = autopublish(d, [{ sha: merge, claim: "m", span: "RESOLVED_X", side: "diff", evidenceFile: "src/x.js", scopes: ["src/x.js"] }], policy);
-  assert.equal(r.published.length, 0);
-  assert.ok(r.skipped.some((s) => s.reason === "unmeasurable"));  // merge => could-not-verify, not absent
+test("gate2: enabled=false cannot publish", () => {
+  const { d, sha } = policyRepo("g2-", 'enabled = false\nallowed_scopes = ["src/"]\nmax_cards_per_run = 5\nmax_total_cards = 50\n');
+  assert.ok(publishPolicyLeads(d, [goodCand(sha)]).error);
+  assert.equal(leadCount(d), 0);
   rmSync(d, { recursive: true, force: true });
 });
 
-test("gitfiles stage3 fix: a planted symlink at a lead path is refused (O_NOFOLLOW); target untouched", () => {
-  const { d, sha } = poolRepo("logbook-symw-");
-  const policy = { enabled: true, allowedScopes: ["src/"], protectedPaths: [], maxPerRun: 10, maxTotal: 100 };
-  const cand = { sha, claim: "pool", span: "createPool", side: "diff", evidenceFile: "src/db.js", scopes: ["src/db.js"] };
-  const probe = { schema: DECISION_SCHEMA, cardId: "", sha, sourceType: "machine_source", claim: cand.claim,
-    side: "diff", evidenceFile: "src/db.js", span: "createPool", scopes: ["src/db.js"], by: "auto-policy", at: "x" };
-  const id = decisionCardId(probe);                              // cardId excludes at/scopes/by-default => stable
-  const outside = join(d, "SECRET.txt"); writeFileSync(outside, "SECRET");
+test("gate3: kill switches — committed, local, and dangling symlink all disable publication", () => {
+  const a = policyRepo("g3a-", GOOD_TOML);
+  writeFileSync(join(a.d, ".logbook", "AUTOMATION_DISABLED"), ""); a.g("add", "-A"); a.g("commit", "-qm", "kill");
+  assert.match(publishPolicyLeads(a.d, [goodCand(a.sha)], { trustRef: a.g("rev-parse", "HEAD").trim() }).error, /kill/);
+  rmSync(a.d, { recursive: true, force: true });
+  const b = policyRepo("g3b-", GOOD_TOML);
+  writeFileSync(join(b.d, ".logbook", "AUTOMATION_DISABLED"), "");
+  assert.match(publishPolicyLeads(b.d, [goodCand(b.sha)]).error, /kill/);
+  rmSync(b.d, { recursive: true, force: true });
+  const c = policyRepo("g3c-", GOOD_TOML);
+  symlinkSync(join(c.d, "nonexistent"), join(c.d, ".logbook", "AUTOMATION_DISABLED"));  // dangling
+  assert.match(publishPolicyLeads(c.d, [goodCand(c.sha)]).error, /kill/);
+  rmSync(c.d, { recursive: true, force: true });
+});
+
+test("gate4: strict policy parse — duplicate keys and unsafe/overflow/out-of-range caps", () => {
+  assert.match(parsePolicy("enabled = true\nenabled = true\n").error, /duplicate/);
+  assert.match(parsePolicy('allowed_scopes = ["src/", "src/"]\n').error, /duplicate/);
+  assert.match(parsePolicy("max_cards_per_run = 0\n").error, /\[1, 100\]/);
+  assert.match(parsePolicy("max_cards_per_run = -1\n").error, /integer/);
+  assert.match(parsePolicy("max_cards_per_run = 101\n").error, /\[1, 100\]/);
+  assert.match(parsePolicy("max_total_cards = 20000\n").error, /\[1, 10000\]/);
+  assert.match(parsePolicy("max_total_cards = 99999999999999999999\n").error, /safe integer|\[1, 10000\]/);
+});
+
+test("gate5: a .logbook that is a symlink is rejected (plane pin)", () => {
+  const { d, sha } = policyRepo("g5-", GOOD_TOML);
+  const outside = mkdtempSync(join(tmpdir(), "outside-"));
+  rmSync(join(d, ".logbook"), { recursive: true, force: true });   // worktree only — policy stays committed
+  symlinkSync(outside, join(d, ".logbook"));
+  const r = publishPolicyLeads(d, [goodCand(sha)]);
+  assert.ok(r.error && /\.logbook is not a real directory/.test(r.error));
+  rmSync(d, { recursive: true, force: true }); rmSync(outside, { recursive: true, force: true });
+});
+
+test("gate6: .logbook/leads symlinked to decisions is rejected (no lead->decisions promotion)", () => {
+  const { d, sha } = policyRepo("g6-", GOOD_TOML);
+  mkdirSync(join(d, ".logbook", "decisions"), { recursive: true });
+  symlinkSync(join(d, ".logbook", "decisions"), join(d, ".logbook", "leads"));
+  const r = publishPolicyLeads(d, [goodCand(sha)]);
+  assert.ok(r.error && /leads is not a real directory/.test(r.error));
+  assert.equal(readdirSync(join(d, ".logbook", "decisions")).filter((f) => f.endsWith(".json")).length, 0);
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("gate7: an unsafe plane entry (symlink / hardlink lead) makes publication unmeasurable; target untouched", () => {
+  const { d, sha } = policyRepo("g7-", GOOD_TOML);
+  const id = decisionCardId({ schema: DECISION_SCHEMA, sha, sourceType: "machine_source", claim: goodCand(sha).claim, side: "diff", evidenceFile: "src/db.js", span: "createPool", by: "auto-policy" });
   mkdirSync(join(d, ".logbook", "leads"), { recursive: true });
-  symlinkSync(outside, join(d, ".logbook", "leads", id + ".json"));
-  const r = autopublish(d, [cand], policy);
-  assert.equal(r.published.length, 0);
-  assert.ok(r.skipped.some((s) => s.reason === "unsafe-target"));
-  assert.equal(readFileSync(outside, "utf8"), "SECRET");         // symlink target NOT overwritten
+  writeFileSync(join(d, "SECRET"), "S");
+  symlinkSync(join(d, "SECRET"), join(d, ".logbook", "leads", id + ".json"));
+  let r = publishPolicyLeads(d, [goodCand(sha)]);
+  assert.match(r.error, /malformed|unsafe/); assert.equal(r.published, 0);
+  assert.equal(readFileSync(join(d, "SECRET"), "utf8"), "S");           // symlink target NOT overwritten
+  rmSync(join(d, ".logbook", "leads", id + ".json"));
+  execFileSync("ln", [join(d, "SECRET"), join(d, ".logbook", "leads", id + ".json")]); // hardlink
+  r = publishPolicyLeads(d, [goodCand(sha)]);
+  assert.match(r.error, /malformed|unsafe/); assert.equal(r.published, 0);
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("gate8: protected or unauthorized evidenceFile is refused", () => {
+  const { d, sha } = policyRepo("g8-", GOOD_TOML);
+  assert.ok(publishPolicyLeads(d, [{ sha, claim: "x", span: "createPool", side: "diff", evidenceFile: "src/auth/keys.js", scopes: ["src/db.js"] }]).skipped.some((s) => s.reason === "protected-evidence"));
+  assert.ok(publishPolicyLeads(d, [{ sha, claim: "x", span: "createPool", side: "diff", evidenceFile: "lib/x.js", scopes: ["src/db.js"] }]).skipped.some((s) => s.reason === "evidence-not-allowed"));
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("gate9: a non-ancestral source is refused at publish AND non-authoritative at read", () => {
+  const { d, g, sha } = policyRepo("g9-", GOOD_TOML);
+  const main = g("branch", "--show-current").trim();
+  g("checkout", "-q", "-b", "side"); writeFileSync(join(d, "src", "db.js"), "sideCreatePool()\n"); g("add", "-A"); g("commit", "-qm", "side");
+  const sideSha = g("rev-parse", "HEAD").trim(); g("checkout", "-q", main);
+  assert.ok(publishPolicyLeads(d, [{ sha: sideSha, claim: "side", span: "sideCreatePool", side: "diff", evidenceFile: "src/db.js", scopes: ["src/db.js"] }]).skipped.some((s) => s.reason === "non-ancestral"));
+  const card = { schema: DECISION_SCHEMA, cardId: "", sha: sideSha, sourceType: "machine_source", claim: "side", side: "diff", evidenceFile: "src/db.js", span: "sideCreatePool", scopes: ["src/db.js"], by: "x", at: "2026-07-15" };
+  card.cardId = decisionCardId(card);
+  mkdirSync(join(d, ".logbook", "leads"), { recursive: true });
+  writeFileSync(join(d, ".logbook", "leads", card.cardId + ".json"), serializeDecisionCard(card));
+  g("add", "-A"); g("commit", "-qm", "lead"); const base = g("rev-parse", "HEAD").trim();
+  writeFileSync(join(d, "src", "db.js"), "x\n"); g("add", "-A"); g("commit", "-qm", "touch");
+  const chk = checkDecisions(d, { base, head: g("rev-parse", "HEAD").trim() });
+  const lead = chk.leads.find((l) => l.card.cardId === card.cardId);
+  assert.ok(lead && !lead.authoritative && lead.reasons.some((x) => /non-ancestral/.test(x)));
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("gate10: narrowing the policy demotes an existing policy-published lead at read", () => {
+  const { d, g, sha } = policyRepo("g10-", GOOD_TOML);
+  assert.equal(publishPolicyLeads(d, [goodCand(sha)]).published, 1);
+  g("add", "-A"); g("commit", "-qm", "publish");
+  writeFileSync(join(d, ".logbook", "policy.toml"), 'enabled = true\nallowed_scopes = ["src/other/"]\nmax_cards_per_run = 5\nmax_total_cards = 50\n'); g("add", "-A"); g("commit", "-qm", "narrow");
+  const base = g("rev-parse", "HEAD").trim();
+  writeFileSync(join(d, "src", "db.js"), "x\n"); g("add", "-A"); g("commit", "-qm", "touch");
+  const chk = checkDecisions(d, { base, head: g("rev-parse", "HEAD").trim() });
+  const lead = chk.leads.find((l) => l.tier === "policy-published");
+  assert.ok(lead && !lead.authoritative && lead.reasons.some((x) => /policy/.test(x)));
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("gate11: same-id identical retry is idempotent (no quota); different bytes is a conflict", () => {
+  const { d, sha } = policyRepo("g11-", GOOD_TOML);
+  assert.equal(publishPolicyLeads(d, [goodCand(sha)]).published, 1);
+  const r2 = publishPolicyLeads(d, [goodCand(sha)]);
+  assert.equal(r2.published, 0); assert.equal(r2.idempotent, 1);
+  const r3 = publishPolicyLeads(d, [{ ...goodCand(sha), scopes: ["src/db.js", "src/pool.js"] }]); // same id, diff bytes
+  assert.equal(r3.conflicts, 1); assert.equal(r3.published, 0);
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("gate12: a conflicting publish never corrupts the existing card; no temp leftovers", () => {
+  const { d, sha } = policyRepo("g12-", GOOD_TOML);
+  publishPolicyLeads(d, [goodCand(sha)]);
+  const f = readdirSync(join(d, ".logbook", "leads")).find((x) => x.endsWith(".json"));
+  const before = readFileSync(join(d, ".logbook", "leads", f), "utf8");
+  publishPolicyLeads(d, [{ ...goodCand(sha), scopes: ["src/db.js", "src/x.js"] }]);
+  assert.equal(readFileSync(join(d, ".logbook", "leads", f), "utf8"), before);
+  assert.equal(readdirSync(join(d, ".logbook", "leads")).filter((x) => x.startsWith(".tmp.")).length, 0);
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("gate13: concurrent publish with max_total_cards=1 yields exactly one new card", async () => {
+  const { d, sha } = policyRepo("g13-", 'enabled = true\nallowed_scopes = ["src/"]\nmax_cards_per_run = 5\nmax_total_cards = 1\n');
+  const worker = join(d, "pub.mjs");
+  writeFileSync(worker, `import { publishPolicyLeads } from ${JSON.stringify(CLI)};\nconst [,, dir, i] = process.argv;\npublishPolicyLeads(dir, [{ sha: ${JSON.stringify(sha)}, claim: "c" + i, span: "createPool", side: "diff", evidenceFile: "src/db.js", scopes: ["src/db.js"] }]);\n`);
+  await Promise.all([0, 1, 2, 3, 4, 5].map((i) => new Promise((res) => spawn(process.execPath, [worker, d, String(i)], { stdio: "ignore" }).on("exit", () => res()))));
+  assert.equal(leadCount(d), 1, "expected exactly one card under max_total=1");
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("gate14: deleting a trusted (committed) card locally does not restore quota", () => {
+  const { d, g, sha } = policyRepo("g14-", 'enabled = true\nallowed_scopes = ["src/"]\nmax_cards_per_run = 5\nmax_total_cards = 1\n');
+  assert.equal(publishPolicyLeads(d, [goodCand(sha)]).published, 1);
+  g("add", "-A"); g("commit", "-qm", "publish");
+  rmSync(join(d, ".logbook", "leads", readdirSync(join(d, ".logbook", "leads")).find((x) => x.endsWith(".json"))));
+  const r = publishPolicyLeads(d, [{ ...goodCand(sha), claim: "another decision" }]);
+  assert.equal(r.published, 0); assert.ok(r.skipped.some((s) => s.reason === "total-cap"));
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("gate15: candidate-count and scope-count bounds are enforced", () => {
+  const { d, sha } = policyRepo("g15-", GOOD_TOML);
+  assert.match(publishPolicyLeads(d, Array.from({ length: 1001 }, () => goodCand(sha))).error, /too many candidates/);
+  const r = publishPolicyLeads(d, [{ ...goodCand(sha), scopes: Array.from({ length: 65 }, (_, i) => "src/f" + i + ".js") }]);
+  assert.ok(r.skipped.some((s) => s.reason === "bad-scopes"));
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("gate16: an unmeasurable candidate (merge commit) makes the run incomplete/nonzero", () => {
+  const { d, g, gq } = tmpGitRepo("g16-");
+  g("init", "-q"); mkdirSync(join(d, "src"));
+  writeFileSync(join(d, "src", "x.js"), "base\n"); g("add", "-A"); g("commit", "-qm", "base");
+  const main = g("branch", "--show-current").trim();
+  g("checkout", "-q", "-b", "feat"); writeFileSync(join(d, "src", "x.js"), "feat\n"); g("add", "-A"); g("commit", "-qm", "f");
+  g("checkout", "-q", main); writeFileSync(join(d, "src", "x.js"), "main\n"); g("add", "-A"); g("commit", "-qm", "m");
+  gq("merge", "feat"); writeFileSync(join(d, "src", "x.js"), "RESOLVED_X\n"); g("add", "-A"); g("commit", "--no-edit", "-q");
+  const merge = g("rev-parse", "HEAD").trim();
+  mkdirSync(join(d, ".logbook"), { recursive: true });
+  writeFileSync(join(d, ".logbook", "policy.toml"), 'enabled = true\nallowed_scopes = ["src/"]\nmax_cards_per_run = 5\nmax_total_cards = 50\n'); g("add", "-A"); g("commit", "-qm", "policy");
+  const r = publishPolicyLeads(d, [{ sha: merge, claim: "m", span: "RESOLVED_X", side: "diff", evidenceFile: "src/x.js", scopes: ["src/x.js"] }]);
+  assert.equal(r.unmeasurable, 1); assert.equal(r.incomplete, true); assert.equal(r.published, 0);
   rmSync(d, { recursive: true, force: true });
 });

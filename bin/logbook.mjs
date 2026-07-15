@@ -18,7 +18,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import {
   writeFileSync, existsSync, realpathSync, readFileSync, mkdirSync, lstatSync, readdirSync,
   renameSync, unlinkSync, chmodSync, openSync, fstatSync, writeSync, closeSync,
-  rmSync, rmdirSync, constants as FS,
+  rmSync, rmdirSync, linkSync, constants as FS,
 } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { resolve, join, basename, dirname, relative, isAbsolute, sep } from "node:path";
@@ -2042,16 +2042,32 @@ export function checkDecisions(repo, { base, head } = {}) {
   const trustRef = mode === "range" ? base : "HEAD";
   const changed = collectChangedPaths(repo, { base, head });
   if (changed.error) return { result: "unmeasurable", exitCode: 1, leads: [], malformedCount: 0, message: `unmeasurable: ${changed.error} (not "clean").` };
+  const commit = resolveTrustCommit(repo, trustRef);
+  if (!commit) return { result: "unmeasurable", exitCode: 1, leads: [], malformedCount: 0, message: `unmeasurable: cannot resolve trust ref ${trustRef} (not "clean").` };
   const decisions = readPlane(repo, trustRef, DECISION_PLANE);
   const leads = readPlane(repo, trustRef, LEAD_PLANE);
   const malformed = [...decisions.malformed, ...leads.malformed];
+  const curPolicy = loadTrustedPolicy(repo, commit);   // for read-time re-validation of policy-published leads
   const out = [];
+  // Read-time revalidation (do NOT infer authority from placement alone): the
+  // source must be ancestral to the trust ref, machine evidence must still ground,
+  // and a policy-published lead must still satisfy the CURRENT trusted policy.
   const consider = (entries, tier) => {
     for (const { path, card } of entries) {
       if (!card.scopes.some((s) => changed.paths.some((p) => scopeMatches(s, p)))) continue; // scope must touch the diff
+      const reasons = [];
+      if (!isAncestor(repo, card.sha, commit)) reasons.push("non-ancestral source");
       const machine = card.sourceType === "machine_source";
-      const gs = machine ? groundStatus(repo, card.sha, card.span, card.side, card.evidenceFile) : "n/a";
-      out.push({ tier, card, path, groundStatus: gs, authoritative: !machine || gs === "grounded" });
+      const gs = machine ? groundStatus(repo, card.sha, card.span, card.side, card.evidenceFile) : "grounded";
+      if (machine && gs !== "grounded") reasons.push(`evidence ${gs}`);
+      if (tier === "policy-published") {
+        if (curPolicy.error) reasons.push("policy absent/disabled");
+        else {
+          const az = authorizeScopesEvidence(card, curPolicy.policy);
+          if (az.reason) reasons.push(`policy: ${az.reason}`);
+        }
+      }
+      out.push({ tier, card, path, groundStatus: gs, authoritative: reasons.length === 0, reasons });
     }
   };
   consider(decisions.cards, "human-reviewed");
@@ -2076,7 +2092,7 @@ export function renderDecisionLeads(res) {
   const rows = [...res.leads].sort((a, b) => (a.card.cardId < b.card.cardId ? -1 : 1)); // deterministic order
   for (const l of rows) {
     const tierTag = l.tier === "human-reviewed" ? "[human-reviewed]" : "[policy-published — machine lead, not a human decision]";
-    const demote = l.authoritative ? "" : `\n  ! evidence no longer verifiable (${l.groundStatus}) — NOT authoritative; re-review`;
+    const demote = l.authoritative ? "" : `\n  ! NOT authoritative (${s((l.reasons || []).join("; "), 200)}) — re-review`;
     parts.push(`\n${l.card.scopes.map((p) => s(p, 256)).join(", ")} ${tierTag}` +
       `\n  Decision: ${s(l.card.claim, 512)}` +
       (l.card.span ? `\n  Grounded in: "${s(l.card.span, 400)}" (${s(l.card.sha, 12)})` : "") +
@@ -2088,11 +2104,13 @@ export function renderDecisionLeads(res) {
 }
 
 // ---- Stage 3: automatic mode (opt-in policy-published LEADS) -----------------
-// AUTONOMOUS mode publishes machine LEADS only (never human-reviewed decisions),
-// gated by an EXPLICIT, repo-owner-authored .logbook/policy.toml. It requires
-// mechanical grounding, confines cards to allowed scopes, excludes protected
-// paths, enforces run/total caps, and honours an immediate kill switch. There is
-// NO confidence-based promotion and NO blocking — leads surface as leads.
+// AUTONOMOUS mode publishes machine LEADS only (never human-reviewed decisions).
+// The ONLY authorization-capable, writing API is publishPolicyLeads — it does NOT
+// accept a caller-supplied policy: it resolves the trust ref to an immutable
+// commit, loads+validates the COMMITTED policy, checks the kill switch, evaluates
+// candidates, then (under a lock in git's common dir) revalidates and installs
+// atomically. Bounded everywhere; grounding unchanged.
+const HARD_MAX_PER_RUN = 100, HARD_MAX_TOTAL = 10000, MAX_CANDIDATES = 1000, MAX_SCOPES = 64, MAX_CARD_BYTES = 64 * 1024;
 function parseTomlStringArray(val) {
   if (val[0] !== "[" || val[val.length - 1] !== "]") return { error: "not an array" };
   const inner = val.slice(1, -1).trim();
@@ -2105,87 +2123,235 @@ function parseTomlStringArray(val) {
   }
   return { value: out };
 }
-// Minimal FLAT toml (no tables): enabled, allowed_scopes, protected_paths,
-// max_cards_per_run, max_total_cards. Strict — unknown keys / malformed lines error.
+function parseBoundedInt(val, lo, hi) {
+  if (!/^\d+$/.test(val)) return { error: "must be a plain non-negative integer" };
+  const n = Number(val);
+  if (!Number.isSafeInteger(n)) return { error: "not a safe integer" };
+  if (n < lo || n > hi) return { error: `must be in [${lo}, ${hi}]` };
+  return { value: n };
+}
+function canonicalizeScopes(arr) {
+  if (!Array.isArray(arr)) return { error: "not an array" };
+  if (arr.length > MAX_SCOPES) return { error: `too many scopes (>${MAX_SCOPES})` };
+  if (!arr.every(okScope)) return { error: "invalid scope (glob / traversal / non-normalized)" };
+  const set = new Set(arr);
+  if (set.size !== arr.length) return { error: "duplicate scope entry" };
+  return { value: [...set].sort() };                        // canonical: deduped + sorted
+}
+// STRICT flat toml: duplicate keys, unsafe/overflow/zero/negative/out-of-range
+// ints, and duplicate/noncanonical scopes are all rejected. enabled/scopes/caps
+// are REQUIRED (undefined until set).
 export function parsePolicy(text) {
-  const p = { enabled: false, allowedScopes: [], protectedPaths: [], maxPerRun: 0, maxTotal: 0 };
+  const p = { enabled: undefined, allowedScopes: undefined, protectedPaths: [], maxPerRun: undefined, maxTotal: undefined };
+  const seen = new Set();
   for (const raw of String(text || "").split("\n")) {
     const line = raw.replace(/#.*$/, "").trim();
     if (!line) continue;
     const m = line.match(/^([a-z_]+)\s*=\s*(.+)$/);
     if (!m) return { error: `malformed line: ${raw.slice(0, 60)}` };
     const key = m[1], val = m[2].trim();
+    if (seen.has(key)) return { error: `duplicate key: ${key}` };   // strict — no duplicate keys
+    seen.add(key);
     if (key === "enabled") { if (val !== "true" && val !== "false") return { error: "enabled must be true|false" }; p.enabled = val === "true"; }
-    else if (key === "max_cards_per_run" || key === "max_total_cards") {
-      if (!/^\d+$/.test(val)) return { error: `${key} must be a non-negative integer` };
-      if (key === "max_cards_per_run") p.maxPerRun = parseInt(val, 10); else p.maxTotal = parseInt(val, 10);
-    } else if (key === "allowed_scopes" || key === "protected_paths") {
+    else if (key === "max_cards_per_run") { const n = parseBoundedInt(val, 1, HARD_MAX_PER_RUN); if (n.error) return { error: `max_cards_per_run ${n.error}` }; p.maxPerRun = n.value; }
+    else if (key === "max_total_cards") { const n = parseBoundedInt(val, 1, HARD_MAX_TOTAL); if (n.error) return { error: `max_total_cards ${n.error}` }; p.maxTotal = n.value; }
+    else if (key === "allowed_scopes" || key === "protected_paths") {
       const arr = parseTomlStringArray(val); if (arr.error) return { error: `${key}: ${arr.error}` };
-      if (!arr.value.every(okScope)) return { error: `${key} contains an invalid scope (glob / traversal / non-normalized)` };
-      if (key === "allowed_scopes") p.allowedScopes = arr.value; else p.protectedPaths = arr.value;
+      const c = canonicalizeScopes(arr.value); if (c.error) return { error: `${key}: ${c.error}` };
+      if (key === "allowed_scopes") p.allowedScopes = c.value; else p.protectedPaths = c.value;
     } else return { error: `unknown policy key: ${key}` };
   }
   return { policy: p };
 }
-// Write a card file refusing a symlink (O_NOFOLLOW) — a planted symlink at the
-// path must not be followed to overwrite its target. Regular file only.
-function writeCardFileSafe(path, content) {
-  const fd = openSync(path, FS.O_WRONLY | FS.O_CREAT | FS.O_TRUNC | FS.O_NOFOLLOW | FS.O_NONBLOCK, 0o644);
-  try {
-    const st = fstatSync(fd);
-    if (!st.isFile()) throw new Error(`not a regular file: ${path}`);
-    const buf = Buffer.from(content, "utf8");
-    for (let off = 0; off < buf.length;) { const n = writeSync(fd, buf, off, buf.length - off); if (!(n > 0)) throw new Error("short write"); off += n; }
-  } finally { closeSync(fd); }
-}
 // Two scopes OVERLAP if either governs the other (a broad `src/` card covers a
-// protected `src/auth/` subtree, and vice-versa) — used for the protected check.
+// protected `src/auth/` subtree, and vice-versa).
 function scopesOverlap(a, b) { return scopeMatches(a, b) || scopeMatches(b, a); }
-
-// Opt-in + kill switch. The POLICY is read from the COMMITTED, reviewed version
-// at `ref` — an uncommitted working-tree edit cannot loosen it (loosening needs a
-// reviewed commit). The KILL SWITCH is working-tree (immediate; stops without a
-// commit). Requires positive caps — no unbounded publishing.
-export function loadPolicy(repo, ref = "HEAD") {
-  if (existsSync(join(repo, ".logbook", "AUTOMATION_DISABLED")))
-    return { error: "kill switch engaged: .logbook/AUTOMATION_DISABLED present" };
-  let text; try { text = git(repo, ["show", `${ref}:.logbook/policy.toml`]); }
-  catch { return { error: `automation not configured (committed .logbook/policy.toml absent at ${ref}) — autonomous mode is opt-in` }; }
+function resolveTrustCommit(repo, ref) {
+  const r = spawnSync("git", ["-C", repo, "--no-replace-objects", "rev-parse", "--verify", "--quiet", `${ref}^{commit}`], { encoding: "utf8" });
+  const oid = (r.stdout || "").trim();
+  return r.status === 0 && OID.test(oid) ? oid : null;
+}
+// Load + fully validate the COMMITTED policy at an immutable commit.
+function loadTrustedPolicy(repo, commit) {
+  let text; try { text = git(repo, ["show", `${commit}:.logbook/policy.toml`]); }
+  catch { return { error: `no committed .logbook/policy.toml at ${commit.slice(0, 12)} — autonomous mode is opt-in` }; }
   const parsed = parsePolicy(text);
   if (parsed.error) return { error: `policy.toml: ${parsed.error}` };
   const p = parsed.policy;
-  if (!p.enabled) return { error: "automation disabled in policy.toml (enabled = false)" };
-  if (!p.allowedScopes.length) return { error: "policy.toml has no allowed_scopes — nothing may be auto-published" };
-  if (!(p.maxPerRun > 0) || !(p.maxTotal > 0)) return { error: "policy.toml must set POSITIVE max_cards_per_run and max_total_cards (no unbounded publishing)" };
-  return { policy: p };
+  if (p.enabled !== true) return { error: "automation not enabled (enabled != true)" };
+  if (!p.allowedScopes || !p.allowedScopes.length) return { error: "no allowed_scopes — nothing may be published" };
+  if (!(p.maxPerRun >= 1) || !(p.maxTotal >= 1)) return { error: "missing/invalid caps" };
+  return { policy: p, text };
 }
-// Publish grounded candidate cards to .logbook/leads/ (policy-published tier).
-// NEVER writes to .logbook/decisions/. Returns {published, skipped[{reason}]}.
-export function autopublish(repo, candidates, policy) {
-  const leadsDir = join(realpathSync(repo), ".logbook", LEAD_PLANE);
-  const existing = existsSync(leadsDir) ? readdirSync(leadsDir).filter((f) => f.endsWith(".json")).length : 0;
-  const published = [], skipped = [];
-  for (const cand of candidates || []) {
-    const card = { schema: DECISION_SCHEMA, cardId: "", sha: cand.sha, sourceType: "machine_source",
-      claim: cand.claim, side: cand.side || "diff", evidenceFile: cand.evidenceFile, span: cand.span,
-      scopes: (cand.scopes && cand.scopes.length ? cand.scopes : (cand.evidenceFile ? [cand.evidenceFile] : [])),
-      by: cand.by || "auto-policy", at: today() };
-    if (!card.scopes.length) { skipped.push({ reason: "no-scope", claim: cand.claim }); continue; }
-    const gs = groundStatus(repo, card.sha, card.span, card.side, card.evidenceFile);
-    if (gs === "unmeasurable") { skipped.push({ reason: "unmeasurable", claim: cand.claim }); continue; } // couldn't verify (merge / missing object) — distinct from absent
-    if (gs !== "grounded") { skipped.push({ reason: "not-grounded", claim: cand.claim }); continue; }
-    if (!card.scopes.every((s) => policy.allowedScopes.some((a) => scopeMatches(a, s)))) { skipped.push({ reason: "scope-not-allowed", scopes: card.scopes }); continue; }
-    if (card.scopes.some((s) => policy.protectedPaths.some((pp) => scopesOverlap(s, pp)))) { skipped.push({ reason: "protected-path", scopes: card.scopes }); continue; } // OVERLAP, not just under
-    card.cardId = decisionCardId(card);
-    if (!validDecisionCard(card)) { skipped.push({ reason: "invalid", claim: cand.claim }); continue; }
-    if (published.length >= policy.maxPerRun) { skipped.push({ reason: "run-cap" }); continue; }         // caps are REQUIRED positives (loadPolicy)
-    if (existing + published.length >= policy.maxTotal) { skipped.push({ reason: "total-cap" }); continue; }
-    mkdirSync(leadsDir, { recursive: true });
-    try { writeCardFileSafe(join(leadsDir, card.cardId + ".json"), serializeDecisionCard(card)); }
-    catch { skipped.push({ reason: "unsafe-target", cardId: card.cardId }); continue; }                  // e.g. a planted symlink
-    published.push(card);
+// Disabled if the trusted ref carries the marker (a worktree-only delete cannot
+// re-enable), OR any local entry exists at the path (lstat — a dangling symlink
+// counts). Rechecked immediately before every install.
+function killSwitchEngaged(repo, commit) {
+  const c = spawnSync("git", ["-C", repo, "--no-replace-objects", "cat-file", "-e", `${commit}:.logbook/AUTOMATION_DISABLED`], { encoding: "utf8" });
+  if (c.status === 0) return "committed";
+  try { lstatSync(join(realpathSync(repo), ".logbook", "AUTOMATION_DISABLED")); return "local"; }
+  catch (e) { if (e.code !== "ENOENT") return "local"; }
+  return null;
+}
+function isAncestor(repo, sha, ref) {
+  let full = sha;
+  if (typeof sha !== "string" || !OID.test(sha)) { const rp = resolveTrustCommit(repo, sha); if (!rp) return false; full = rp; }
+  const r = spawnSync("git", ["-C", repo, "--no-replace-objects", "merge-base", "--is-ancestor", full, ref], { encoding: "utf8" });
+  return r.status === 0;
+}
+// Scope + evidence authorization against a validated policy (pure — no writes).
+function authorizeScopesEvidence(card, policy) {
+  if (!card.scopes.every((s) => policy.allowedScopes.some((a) => scopeMatches(a, s)))) return { reason: "scope-not-allowed" };
+  if (card.scopes.some((s) => policy.protectedPaths.some((pp) => scopesOverlap(s, pp)))) return { reason: "protected-scope" };
+  if (card.evidenceFile) {
+    if (!policy.allowedScopes.some((a) => scopeMatches(a, card.evidenceFile))) return { reason: "evidence-not-allowed" };
+    if (policy.protectedPaths.some((pp) => scopesOverlap(card.evidenceFile, pp))) return { reason: "protected-evidence" };
   }
-  return { published, skipped, existingBefore: existing };
+  return { ok: true };
+}
+// Pin the plane directory: .logbook and .logbook/<plane> must be REAL directories
+// (not symlinks), resolving to exactly <real-repo>/.logbook/<plane>. Rejects a
+// leads->decisions redirect or any parent-directory redirection.
+function pinPlaneDir(repo, plane) {
+  const realRepo = realpathSync(repo);
+  const dotlog = join(realRepo, ".logbook");
+  try { const s = lstatSync(dotlog); if (!s.isDirectory()) return { error: ".logbook is not a real directory" }; }
+  catch (e) { if (e.code !== "ENOENT") return { error: `.logbook lstat ${e.code}` }; mkdirSync(dotlog); }
+  const dir = join(dotlog, plane);
+  try { const s = lstatSync(dir); if (!s.isDirectory()) return { error: `.logbook/${plane} is not a real directory (symlink redirect?)` }; }
+  catch (e) { if (e.code !== "ENOENT") return { error: `.logbook/${plane} lstat ${e.code}` }; mkdirSync(dir); return { dir }; }
+  let real; try { real = realpathSync(dir); } catch { return { error: `.logbook/${plane} unresolved` }; }
+  if (real !== dir) return { error: `.logbook/${plane} redirects to ${real}` };
+  return { dir };
+}
+let cardTmpCtr = 0;
+// Install a card by ATOMIC no-replace link. Existing target must be a regular
+// single-link file; byte-identical => idempotent, different => conflict. A failed
+// write leaves no malformed final card (temp is fully written+closed, then linked).
+function installCard(dir, cardId, content) {
+  const target = join(dir, cardId + ".json");
+  let ex; try { ex = lstatSync(target); } catch (e) { if (e.code !== "ENOENT") return { error: `target lstat ${e.code}` }; }
+  if (ex) {
+    if (!ex.isFile() || ex.nlink !== 1) return { error: "unsafe existing target (symlink / hardlink / fifo / dir)" };
+    let cur; try { cur = readFileSync(target, "utf8"); } catch { return { error: "target unreadable" }; }
+    return cur === content ? { idempotent: true } : { conflict: true };
+  }
+  const tmp = join(dir, `.tmp.${process.pid}.${cardTmpCtr++}`);
+  let fd;
+  try {
+    fd = openSync(tmp, FS.O_WRONLY | FS.O_CREAT | FS.O_EXCL | FS.O_NOFOLLOW, 0o644);
+    const buf = Buffer.from(content, "utf8");
+    for (let off = 0; off < buf.length;) { const n = writeSync(fd, buf, off, buf.length - off); if (!(n > 0)) throw new Error("short write"); off += n; }
+    closeSync(fd); fd = undefined;
+    linkSync(tmp, target);                                  // atomic, fails EEXIST if the target appeared
+  } catch (e) {
+    if (fd !== undefined) { try { closeSync(fd); } catch { /* ignore */ } }
+    try { unlinkSync(tmp); } catch { /* ignore */ }
+    return e.code === "EEXIST" ? { conflict: true } : { error: e.code || String(e) };
+  }
+  try { unlinkSync(tmp); } catch { /* ignore */ }
+  return { installed: true };
+}
+// Non-stealable publication lock in git's COMMON dir (not the hostile .logbook).
+function withPublishLock(repo, fn) {
+  let common; try { common = git(repo, ["rev-parse", "--git-common-dir"]).trim(); } catch { return { error: "not a git repository" }; }
+  const lockDir = join(isAbsolute(common) ? common : join(realpathSync(repo), common), "logbook-publish.lock");
+  const start = process.hrtime.bigint(), budget = 5_000_000_000n;
+  for (;;) {
+    try { mkdirSync(lockDir); break; }
+    catch (e) {
+      if (e.code !== "EEXIST") throw e;
+      if (process.hrtime.bigint() - start > budget) return { error: "publication lock held — if no logbook process is running, remove logbook-publish.lock from the git common dir manually" };
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+    }
+  }
+  try { return fn(); } finally { try { rmdirSync(lockDir); } catch { /* released */ } }
+}
+function planeIdsAtRef(repo, commit, plane) {
+  let out; try { out = git(repo, ["ls-tree", "-r", "--name-only", "-z", commit, "--", `.logbook/${plane}/`]); } catch { return new Set(); }
+  const ids = new Set();
+  for (const p of out.split("\0").filter(Boolean)) { const b = basename(p); if (b.endsWith(".json")) ids.add(b.slice(0, -5)); }
+  return ids;
+}
+// Worktree lead ids; malformed=true if ANY entry is unsafe/invalid (=> unmeasurable).
+function worktreePlaneState(dir) {
+  const ids = new Set();
+  let files; try { files = readdirSync(dir); } catch { return { ids, malformed: false }; }
+  for (const f of files) {
+    if (f.startsWith(".tmp.")) continue;
+    if (!f.endsWith(".json")) continue;
+    const p = join(dir, f);
+    let st; try { st = lstatSync(p); } catch { return { ids, malformed: true }; }
+    if (!st.isFile() || st.nlink !== 1) return { ids, malformed: true };
+    let text; try { text = readFileSync(p, "utf8"); } catch { return { ids, malformed: true }; }
+    const card = parseDecisionCard(text);
+    if (!card || card.cardId + ".json" !== f) return { ids, malformed: true };
+    ids.add(card.cardId);
+  }
+  return { ids, malformed: false };
+}
+function buildAutoCard(cand) {
+  return { schema: DECISION_SCHEMA, cardId: "", sha: cand && typeof cand.sha === "string" ? cand.sha : "",
+    sourceType: "machine_source", claim: cand.claim, side: cand.side || "diff", evidenceFile: cand.evidenceFile ?? null,
+    span: cand.span, scopes: cand.scopes || [], by: cand.by || "auto-policy", at: today() };
+}
+// THE unbypassable publication API. No caller-supplied policy. Returns structured
+// counts { published, idempotent, conflicts, unmeasurable, skipped[], incomplete }.
+export function publishPolicyLeads(repo, candidates, { trustRef = "HEAD" } = {}) {
+  const counts = { published: 0, idempotent: 0, conflicts: 0, unmeasurable: 0, skipped: [], incomplete: false };
+  const done = (extra) => ({ ...counts, ...extra });
+  const commit = resolveTrustCommit(repo, trustRef);
+  if (!commit) return done({ error: `cannot resolve trust ref ${trustRef}` });
+  if ((candidates || []).length > MAX_CANDIDATES) return done({ error: `too many candidates (>${MAX_CANDIDATES})` });
+  const pol = loadTrustedPolicy(repo, commit);
+  if (pol.error) return done({ error: pol.error });
+  const policy = pol.policy;
+  if (killSwitchEngaged(repo, commit)) return done({ error: "automation disabled (kill switch)" });
+  // ---- pure evaluation (no writes) ----
+  const byId = new Map(), ordered = [];
+  for (const cand of candidates || []) {
+    const card = buildAutoCard(cand);
+    const sc = canonicalizeScopes(card.scopes && card.scopes.length ? card.scopes : (card.evidenceFile ? [card.evidenceFile] : []));
+    if (sc.error) { counts.skipped.push({ reason: "bad-scopes" }); continue; }
+    card.scopes = sc.value;
+    if (!card.scopes.length) { counts.skipped.push({ reason: "no-scope" }); continue; }
+    const az = authorizeScopesEvidence(card, policy);
+    if (az.reason) { counts.skipped.push({ reason: az.reason }); continue; }
+    if (typeof card.sha !== "string" || !OID.test(card.sha) || !isAncestor(repo, card.sha, commit)) { counts.skipped.push({ reason: "non-ancestral" }); continue; }
+    const gs = groundStatus(repo, card.sha, card.span, card.side, card.evidenceFile);
+    if (gs === "unmeasurable") { counts.unmeasurable++; counts.incomplete = true; continue; }
+    if (gs !== "grounded") { counts.skipped.push({ reason: "not-grounded" }); continue; }
+    card.cardId = decisionCardId(card);
+    if (!validDecisionCard(card)) { counts.skipped.push({ reason: "invalid" }); continue; }
+    const content = serializeDecisionCard(card);
+    if (Buffer.byteLength(content, "utf8") > MAX_CARD_BYTES) { counts.skipped.push({ reason: "too-large" }); continue; }
+    if (byId.has(card.cardId)) { if (byId.get(card.cardId).content !== content) byId.get(card.cardId).conflict = true; continue; } // same id, diff bytes => conflict pre-write
+    const rec = { card, content, conflict: false }; byId.set(card.cardId, rec); ordered.push(rec);
+  }
+  for (const r of ordered) if (r.conflict) counts.conflicts++;
+  const installable = ordered.filter((r) => !r.conflict);
+  // ---- locked: revalidate, count union, install atomically ----
+  return withPublishLock(repo, () => {
+    if (killSwitchEngaged(repo, commit)) return done({ error: "kill switch engaged before install", incomplete: true });
+    const pol2 = loadTrustedPolicy(repo, commit);
+    if (pol2.error || pol2.text !== pol.text) return done({ error: "policy changed mid-run", incomplete: true });
+    const pin = pinPlaneDir(repo, LEAD_PLANE);
+    if (pin.error) return done({ error: pin.error, incomplete: true });
+    const wt = worktreePlaneState(pin.dir);
+    if (wt.malformed) return done({ error: "malformed/unsafe worktree lead — unmeasurable", incomplete: true });
+    const union = new Set([...planeIdsAtRef(repo, commit, LEAD_PLANE), ...wt.ids]); // trusted-ref + worktree; a local delete can't restore quota
+    for (const { card, content } of installable) {
+      if (killSwitchEngaged(repo, commit)) { counts.incomplete = true; break; }     // mid-run kill: stop, report subset
+      if (counts.published >= policy.maxPerRun) { counts.skipped.push({ reason: "run-cap" }); continue; }
+      if (!union.has(card.cardId) && union.size >= policy.maxTotal) { counts.skipped.push({ reason: "total-cap" }); continue; }
+      const res = installCard(pin.dir, card.cardId, content);
+      if (res.idempotent) { counts.idempotent++; continue; }                         // consumes no quota
+      if (res.conflict) { counts.conflicts++; continue; }
+      if (res.error) { counts.skipped.push({ reason: "install-failed", detail: res.error }); counts.incomplete = true; continue; }
+      union.add(card.cardId); counts.published++;                                     // maxPerRun counts NEW unique installs
+    }
+    return done({});
+  });
 }
 
 // ---- Stage 4a: legacy journal -> inert git-files DRAFTS ---------------------
@@ -2202,7 +2368,8 @@ function commitChangedFiles(repo, sha) {
 }
 export function migrateLegacyToDrafts(repo, dir = repo) {
   const anns = loadAnnotations(dir);
-  const draftsDir = join(realpathSync(repo), ".logbook", "drafts");
+  const pin = pinPlaneDir(repo, "drafts");            // real dir only (no symlink redirect)
+  if (pin.error) return { drafted: [], skipped: [{ reason: "unsafe-drafts-dir", detail: pin.error }] };
   const drafted = [], skipped = [], seen = new Set();
   for (const ann of anns) {
     if (!ann || typeof ann.sha !== "string" || !OID.test(ann.sha)) { skipped.push({ reason: "bad-sha" }); continue; }
@@ -2219,9 +2386,9 @@ export function migrateLegacyToDrafts(repo, dir = repo) {
     if (!validDecisionCard(card)) { skipped.push({ reason: "invalid", sha: ann.sha }); continue; }
     if (seen.has(card.cardId)) { skipped.push({ reason: "duplicate", sha: ann.sha }); continue; }
     seen.add(card.cardId);
-    mkdirSync(draftsDir, { recursive: true });
-    try { writeCardFileSafe(join(draftsDir, card.cardId + ".json"), serializeDecisionCard(card)); }
-    catch { skipped.push({ reason: "unsafe-target", sha: ann.sha }); continue; }
+    const res = installCard(pin.dir, card.cardId, serializeDecisionCard(card)); // atomic, no-replace, symlink-safe
+    if (res.error) { skipped.push({ reason: "unsafe-target", sha: ann.sha, detail: res.error }); continue; }
+    if (res.conflict) { skipped.push({ reason: "conflict", sha: ann.sha }); continue; } // existing edited draft — don't clobber
     drafted.push(card);
   }
   // drafts are LOCAL + inert — keep them out of git.
