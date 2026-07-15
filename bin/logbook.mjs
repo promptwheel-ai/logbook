@@ -2323,7 +2323,10 @@ function trustedPlaneState(repo, commit, plane) {
 // Worktree lead ids; malformed=true if ANY entry is unsafe/invalid (=> unmeasurable).
 function worktreePlaneState(dir) {
   const ids = new Set();
-  let files; try { files = readdirSync(dir); } catch { return { ids, malformed: false }; }
+  // dir is guaranteed to exist by the preceding pinPlaneDir, so a readdir failure
+  // (e.g. EACCES) is genuinely UNREADABLE, never legitimately absent: fail closed so
+  // present-but-hidden cards cannot silently drop out of the quota union.
+  let files; try { files = readdirSync(dir); } catch { return { ids, malformed: true }; }
   for (const f of files) {
     if (f.startsWith(".tmp.")) continue;
     if (!f.endsWith(".json")) continue;

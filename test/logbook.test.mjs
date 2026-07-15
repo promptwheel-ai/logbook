@@ -3495,3 +3495,16 @@ test("closure2: a non-EEXIST lock-acquisition error returns the structured contr
   assert.ok(Array.isArray(r.skipped));                          // full structured shape, not a bare rethrow
   rmSync(d, { recursive: true, force: true });
 });
+
+test("closure2: an UNREADABLE worktree lead plane fails closed — no quota bypass via chmod (readdir EACCES)", () => {
+  const { d, sha } = policyRepo("cwt-", 'enabled = true\nallowed_scopes = ["src/"]\nmax_cards_per_run = 5\nmax_total_cards = 1\n');
+  const leads = join(d, ".logbook", "leads");
+  assert.equal(publishPolicyLeads(d, [goodCand(sha)]).published, 1);           // 1 lead accrued in the worktree
+  assert.equal(publishPolicyLeads(d, [{ ...goodCand(sha), claim: "second" }]).skipped.some((s) => s.reason === "total-cap"), true); // cap holds when readable
+  chmodSync(leads, 0o300);                                                      // attacker hides the accrued card from enumeration
+  let r; try { r = publishPolicyLeads(d, [{ ...goodCand(sha), claim: "second" }]); } finally { chmodSync(leads, 0o755); }
+  assert.equal(r.published, 0);                                                // must NOT publish past the cap
+  assert.equal(r.incomplete, true); assert.equal(r.exitCode, 1);              // unreadable worktree => unmeasurable, not clean
+  assert.equal(leadCount(d), 1);                                              // still exactly one card on disk
+  rmSync(d, { recursive: true, force: true });
+});
