@@ -104,17 +104,18 @@ export const CONFIG_PAT =
   /(^|\/)(\.eslintrc|eslint\.config|tsconfig[^/]*\.json|pytest\.ini|setup\.cfg|setup\.py|tox\.ini|\.rubocop|\.github\/|Dockerfile|docker-compose|vercel\.json|package\.json|Cargo\.toml|lerna\.json|nx\.json|turbo\.json|rush\.json|\.babelrc|babel\.config[^/]*|bower\.json|deno\.json[c]?|pyproject\.toml|go\.(mod|sum)|Gemfile|Rakefile|mix\.exs|composer\.json|CMakeLists\.txt|Makefile|\.pre-commit-config[^/]*|.*\.ya?ml|[^/]+\.config\.[cm]?[jt]s|\.[^/]+)$/i;
 export const DOC_PAT = /\.(md|txt|rst|adoc)$|(^|\/)(LICENSE|CHANGELOG|CHANGES|NEWS|AUTHORS|CONTRIBUTORS|HISTORY|COPYING)([^/]*)?$|^docs\//i;
 export const GEN_PAT =
-  /node_modules\/|\.map$|\.lock$|lock\.json$|\.gen\.|generated|dist\/|build\/|vendor\/|-?snapshot\.json$|\.snap$|(^|\/)next-env\.d\.ts$/i;
+  /node_modules\/|\.map$|\.lock$|lock\.json$|\.gen\.|generated|dist\/|build\/|vendor\/|-?snapshot\.json$|\.snap$|(^|\/)next-env\.d\.ts$|^\.logbook\/|(^|\/)(events|annotations|annotation-reviews|decision-cards)\.jsonl$/i;
 // Bump whenever detector precision changes: a cached events.jsonl written by
 // an older extractor must trigger a full rebuild, not survive the upgrade.
 // (4: event paths are complete, not a six-path display sample, so --file
 // queries cannot silently miss wide commits)
 // (5: burned during development before the fixed-width SHA change was complete)
 // (6: event.sha is a fixed 12-char fullSha prefix, independent of unrelated objects)
-export const EXTRACTOR_VERSION = 6;
+export const EXTRACTOR_VERSION = 7;
 // Default commit window (-n/--max). The ledger cache is only trusted at this
 // cap (or when it reaches a root commit), so the two sites must agree.
 export const DEFAULT_MAX = 20000;
+const MAX_EVENT_CACHE = 128 << 20;
 const FULL_SHA_PAT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
 const LOWER_FULL_SHA_PAT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 // Compact context is an additive, bounded view over queryEvents' existing
@@ -407,10 +408,13 @@ function isCurrentCachedEvent(event) {
 export function loadEvents(repo, opts, onProgress, scanDiff = diffScan) {
   if (process.env.LOGBOOK_NO_CACHE) return null;
   if (opts.max !== DEFAULT_MAX || opts.since || opts.until || opts.range) return null;
-  let lines;
-  try {
-    lines = readFileSync(join(repo, "events.jsonl"), "utf8").split("\n").filter(Boolean);
-  } catch { return null; }
+  // Cache state is an optimization, never a reason to block or trust an unsafe
+  // worktree path. In particular, O_NONBLOCK keeps a planted FIFO from hanging
+  // `annotate` after its note was already saved; unsafe/oversized cache state is
+  // simply rebuilt through the normal extraction path.
+  const cache = readRegularUtf8NoFollow(join(repo, "events.jsonl"), MAX_EVENT_CACHE);
+  if (cache.error) return null;
+  const lines = cache.text.split("\n").filter(Boolean);
   if (!lines.length) return null;
   let cached;
   try { cached = lines.map((l) => JSON.parse(l)); } catch { return null; }
@@ -582,6 +586,27 @@ function spanHuman(days) {
 const fmt = (x) => x.toLocaleString("en-US");
 const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
+function normalizeNoteState(noteInput) {
+  return Array.isArray(noteInput)
+    ? { notes: noteInput, malformed: 0, error: null }
+    : { notes: noteInput?.notes || [], malformed: noteInput?.malformed || 0,
+      error: noteInput?.error || null };
+}
+
+// Bind LOGBOOK.md to the exact logical note snapshot it renders. Fixed-width
+// tuples make the marker independent of object insertion order while retaining
+// note order (which determines the bounded newest-first view).
+export function noteStateDigest(noteInput) {
+  const state = normalizeNoteState(noteInput);
+  return sha256(JSON.stringify({
+    notes: state.notes.map((note) => [note.schema ?? 0, note.type ?? "legacy_note",
+      note.sha, note.why, note.by, note.date, note.side ?? null,
+      note.evidenceFile ?? null, note.span ?? null]),
+    malformed: state.malformed,
+    error: state.error,
+  }));
+}
+
 // Literal inventory, not a task-risk score. Repository-wide LOW/MEDIUM/HIGH
 // thresholds were never normalized or validated against outcomes; task-local
 // checks use present / absent / unmeasurable instead.
@@ -592,12 +617,15 @@ export function historyInventory(A) {
   return { reverts, fragile, suppressions: supp, weakenings: weak, parts,
     empty: reverts === 0 && fragile === 0 && supp === 0 && weak === 0 };
 }
-export function renderLogbookMd(name, A, shallow, capped) {
+export function renderLogbookMd(name, A, shallow, capped, noteInput = []) {
   const safeSubject = (value) => sanitizeContextText(value, 1024);
   const safePath = (value) => sanitizeContextText(value, 1024);
   const safePerson = (value) => sanitizeContextText(value, 512);
+  const safeNote = (value) => sanitizeContextText(value, 4096);
+  const noteState = normalizeNoteState(noteInput);
   const L = [];
   L.push(`# The Logbook of ${safePath(name)}`);
+  L.push(`<!-- logbook:notes-sha256:${noteStateDigest(noteState)} -->`);
   L.push(``, `_${UNTRUSTED_EVIDENCE_WARNING}_`);
   {
     const inventory = historyInventory(A);
@@ -618,6 +646,35 @@ export function renderLogbookMd(name, A, shallow, capped) {
   if (A.fragile.length)
     L.push(`- Fragile areas (fixed 2+ times): ${A.fragile.slice(0, 3).map(([k]) => safeSubject(k.trim())).join("; ")}`);
   L.push(`- Oversight ledger: ${plural(A.suspEvents.length, "suppression commit")}, ${plural(A.weaken.length, "assertion-weakening commit")}`);
+  if (noteState.notes.length || noteState.malformed || noteState.error) {
+    L.push(``);
+    L.push(`## Unreviewed agent notes (${noteState.notes.length})`);
+    L.push(`> ⚠️ Machine-authored leads, not reviewed decisions. They are never consumed by \`check --diff\`. Verify each claim against the cited commit and current code before relying on it.`);
+    if (noteState.error)
+      L.push(`> ⚠️ The note store could not be read safely (${safeNote(noteState.error)}); no unreadable content was rendered.`);
+    if (noteState.malformed)
+      L.push(`> ⚠️ ${noteState.malformed} malformed note row${noteState.malformed === 1 ? " was" : "s were"} omitted.`);
+    let shown = 0, bytes = 0;
+    for (const note of noteState.notes.slice().reverse()) {
+      if (shown >= 20) break;
+      const verifySha = safePerson(note.sha);
+      const rawShow = process.platform === "win32"
+        ? `set "GIT_GRAFT_FILE=${devNull}" && git --no-replace-objects show ${verifySha}`
+        : `GIT_GRAFT_FILE=${devNull} git --no-replace-objects show ${verifySha}`;
+      const rows = [`- ${safePerson(note.sha)} — ${safeNote(note.why)}`,
+        `  - unreviewed; recorded by ${safePerson(note.by)} on ${safePerson(note.date)}; verify without replace refs or grafts: \`${rawShow}\``];
+      if (note.span) {
+        const where = note.side === "diff" && note.evidenceFile
+          ? ` in ${safePath(note.evidenceFile)}` : note.side === "message" ? " in the commit message" : "";
+        rows.push(`  - source quote${where}: “${safeNote(note.span)}”`);
+      }
+      const size = Buffer.byteLength(rows.join("\n") + "\n");
+      if (bytes + size > 8 * 1024) break;
+      L.push(...rows); bytes += size; shown++;
+    }
+    if (noteState.notes.length > shown)
+      L.push(`- …and ${noteState.notes.length - shown} older unreviewed notes in annotations.jsonl`);
+  }
   if (A.notable.length) {
     L.push(``);
     L.push(`## Notable events (outliers a reader should see)`);
@@ -792,7 +849,7 @@ export function parseArtifactRecord(markdown) {
 // to be transactional; `logbook doctor` detects an interrupted multi-file
 // update by comparing both stamps with the exact ledger hash.
 export function writeArtifactBundle(outDir, {
-  name, A, shallow, capped, headSha, record, ledgerText = null,
+  name, A, shallow, capped, notes = [], headSha, record, ledgerText = null,
   compare = false,
 }) {
   if (ledgerText !== null) {
@@ -803,7 +860,7 @@ export function writeArtifactBundle(outDir, {
       throw new Error("artifact record count does not match events ledger");
   }
   managedWriteFile(outDir, join(outDir, "LOGBOOK.md"),
-    stampArtifact(renderLogbookMd(name, A, shallow, capped), headSha, record));
+    stampArtifact(renderLogbookMd(name, A, shallow, capped, notes), headSha, record));
   if (ledgerText !== null)
     managedWriteFile(outDir, join(outDir, "events.jsonl"), ledgerText);
   managedWriteFile(outDir, join(outDir, "JOURNEY.md"),
@@ -2349,7 +2406,7 @@ export function renderReviewOutcomes(res) {
   if (res.reviewed < 20) lines.push("", `  note: only ${res.reviewed} reviewed — too few to assess automatic-lead usefulness; machine authority remains lower regardless of sample size.`);
   return lines.join("\n");
 }
-// ---- Plane human authoring: annotate -> inert draft -> accept-draft -> decision ----
+// ---- Plane human authoring: annotate-draft -> accept-draft -> decision ---------
 // A committed, explicit REVIEW record captures reviewer provenance (who vouched, when,
 // verdict) SEPARATELY from the card's proposer (`by`), so an accepted card never
 // silently claims a machine/agent as its human reviewer.
@@ -2532,7 +2589,7 @@ function acceptDraftUnlocked(repo, cardId, { scopes, by } = {}) {
   if (dpin.error) return { error: dpin.error };
   const draftFile = join(dpin.dir, cardId + ".json");
   const rr = readRegularUtf8NoFollow(draftFile);
-  if (rr.error) return { error: rr.error === "missing" ? `no local draft ${cardId} (run annotate first)` : `unsafe local draft: ${rr.error}` };
+  if (rr.error) return { error: rr.error === "missing" ? `no local draft ${cardId} (run annotate-draft first)` : `unsafe local draft: ${rr.error}` };
   const text = rr.text, draft = parseDecisionCard(text);
   if (!draft || draft.cardId !== cardId) return { error: "draft is malformed" };
   const ancestry = ancestryStatus(repo, draft.sha, state.commit);
@@ -3145,8 +3202,9 @@ export function publishPolicyLeads(repo, candidates, { trustRef = "HEAD" } = {})
   return locked; // withPublishLock already flags cleanup failure (incomplete + nonzero)
 }
 
-// ---- Stage 4a: legacy journal -> inert git-files DRAFTS ---------------------
-// The pre-card journal (annotations.jsonl) becomes local, gitignored, INERT
+// ---- Explicit compatibility helper: legacy journal -> inert DRAFTS ---------
+// Not called by init: schema-less annotations remain visible unreviewed notes.
+// If invoked directly, the pre-card journal becomes local, gitignored, INERT
 // drafts under .logbook/drafts/ — legacy_unverified, transferring NO authority
 // (old acceptances/scopes grant nothing; a human RE-ACCEPTS by promoting a draft
 // into decisions/). Every transformation and dropped row is REPORTED. Scope
@@ -3210,6 +3268,12 @@ export function migrateLegacyToDrafts(repo, dir = repo) {
       if (!ann || typeof ann !== "object" || Array.isArray(ann)) {
         skipped.push({ reason: "bad-row-shape", line: lineNo }); continue;
       }
+      if (ann.schema !== undefined || ann.type !== undefined) {
+        if (ann.schema === NOTE_SCHEMA && ann.type === NOTE_TYPE)
+          skipped.push({ reason: "current-machine-note", line: lineNo });
+        else skipped.push({ reason: "unknown-annotation-schema", line: lineNo });
+        continue;
+      }
       anns.push(ann);
     }
   }
@@ -3255,7 +3319,7 @@ export function migrateLegacyToDrafts(repo, dir = repo) {
 // Append one line to a private append-only file without a leaf TOCTOU window:
 // O_NOFOLLOW refuses a symlinked leaf at open time, and we fstat the FD we hold
 // (not the path) so the file cannot be swapped between check and write.
-export function appendPrivateLine(path, line) {
+export function appendPrivateLine(path, line, maxBytes = null) {
   // O_NONBLOCK so a FIFO planted at `path` cannot block the open indefinitely;
   // then require a regular, single-link file (no hardlink aliasing).
   const fd = openSync(path, FS.O_WRONLY | FS.O_APPEND | FS.O_CREAT | FS.O_NOFOLLOW | FS.O_NONBLOCK, 0o600);
@@ -3264,12 +3328,192 @@ export function appendPrivateLine(path, line) {
     if (!st.isFile() || st.nlink !== 1)
       throw new Error(`refusing append through non-private regular file: ${path}`);
     const buf = Buffer.from(line, "utf8");
+    if (maxBytes !== null && (st.size > maxBytes || buf.length > maxBytes - st.size))
+      throw new Error(`append would exceed ${maxBytes} byte limit: ${path}`);
     for (let off = 0; off < buf.length;) {           // loop: a legal SHORT write must not leave a truncated line
       const n = writeSync(fd, buf, off, buf.length - off);
       if (!(n > 0)) throw new Error(`short write appending to ${path}`);
       off += n;
     }
   } finally { closeSync(fd); }
+}
+
+// Unreviewed digest notes are deliberately outside the decision planes. They
+// improve recall immediately, but can never satisfy a review, enter outcomes,
+// or surface through check --diff. New rows are versioned so no migration can
+// accidentally reinterpret them as decision drafts; schema-less 0.8 rows stay
+// readable as the same low-authority notes they always were.
+const NOTE_SCHEMA = 1, NOTE_TYPE = "machine_note", MAX_NOTE_STORE = 8 << 20;
+const NOTE_DATE = /^\d{4}-\d{2}-\d{2}$/;
+const NOTE_KEYS = new Set(["schema", "type", "sha", "why", "by", "date", "side", "evidenceFile", "span"]);
+function parseAnnotation(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const versioned = value.schema !== undefined || value.type !== undefined;
+  if (versioned && (value.schema !== NOTE_SCHEMA || value.type !== NOTE_TYPE)) return null;
+  if (Object.keys(value).some((key) => !NOTE_KEYS.has(key))) return null;
+  if (typeof value.sha !== "string" || !OID.test(value.sha) ||
+      !okText(value.why, MAX_CLAIM) || !okText(value.by, MAX_BY) ||
+      typeof value.date !== "string" || !NOTE_DATE.test(value.date)) return null;
+  let side = value.side ?? null, evidenceFile = value.evidenceFile ?? null, span = value.span ?? null;
+  if (versioned) {
+    if (span === null) {
+      if (side !== null || evidenceFile !== null) return null;
+    } else {
+      if (!okText(span, MAX_SPAN) || (side !== "message" && side !== "diff")) return null;
+      if (side === "message" && evidenceFile !== null) return null;
+      if (side === "diff" && !okEvPath(evidenceFile)) return null;
+    }
+  } else {
+    // Older annotations could carry a quote without naming its exact side.
+    if (span !== null && !okText(span, MAX_SPAN)) return null;
+    if (side !== null && side !== "message" && side !== "diff") return null;
+    if (evidenceFile !== null && !okEvPath(evidenceFile)) return null;
+  }
+  return { schema: versioned ? NOTE_SCHEMA : 0, type: versioned ? NOTE_TYPE : "legacy_note",
+    sha: value.sha, why: value.why, by: value.by, date: value.date,
+    side, evidenceFile, span };
+}
+function serializeAnnotation(note) {
+  return JSON.stringify({ schema: NOTE_SCHEMA, type: NOTE_TYPE, sha: note.sha, why: note.why,
+    by: note.by, date: note.date, side: note.side ?? null,
+    evidenceFile: note.evidenceFile ?? null, span: note.span ?? null });
+}
+export function loadDigestNotes(dir) {
+  const path = join(realpathSync(dir), "annotations.jsonl");
+  const rr = readRegularUtf8NoFollow(path, MAX_NOTE_STORE);
+  if (rr.error === "missing") return { notes: [], malformed: 0, error: null, needsNewline: false };
+  if (rr.error) return { notes: [], malformed: 0, error: rr.error, needsNewline: false };
+  const bySha = new Map(); let malformed = 0;
+  for (const line of rr.text.split("\n")) {
+    if (!line.trim()) continue;
+    let value; try { value = JSON.parse(line); } catch { malformed++; continue; }
+    const note = parseAnnotation(value);
+    if (!note || (note.schema === NOTE_SCHEMA && line !== serializeAnnotation(note))) { malformed++; continue; }
+    // Reinsert so an updated old SHA is newest for the bounded digest section.
+    bySha.delete(note.sha); bySha.set(note.sha, note);
+  }
+  return { notes: [...bySha.values()], malformed, error: null,
+    needsNewline: rr.text.length > 0 && !rr.text.endsWith("\n") };
+}
+function loadDigestNotesStable(dir) {
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const state = loadDigestNotes(dir);
+    if (state.error !== "file changed while reading") return state;
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2);
+  }
+  return loadDigestNotes(dir);
+}
+// Compatibility export for integrations that used the 0.8 array loader.
+export function loadAnnotations(dir) { return loadDigestNotes(dir).notes; }
+
+// Serialize only the tiny load -> semantic-dedup -> bounded-append note
+// transaction. Grounding and digest regeneration remain outside this lock.
+// Like Git's index.lock, it is deliberately non-stealable: a crashed holder
+// fails closed with one explicit cleanup path instead of letting waiters fork
+// the append journal or race its size cap.
+function withNoteLock(repo, fn) {
+  let common;
+  try { common = gitRaw(repo, ["rev-parse", "--git-common-dir"]).trim(); }
+  catch { return { error: "cannot locate Git common directory for note lock" }; }
+  let commonDir;
+  try {
+    const candidate = isAbsolute(common) ? common : join(realpathSync(repo), common);
+    commonDir = realpathSync(candidate);
+  } catch { return { error: "Git common directory is unreadable" }; }
+  const lockDir = join(commonDir, "logbook-notes.lock");
+  const start = process.hrtime.bigint(), budget = 5_000_000_000n;
+  for (;;) {
+    try { mkdirSync(lockDir); break; }
+    catch (error) {
+      if (error.code !== "EEXIST")
+        return { error: `cannot acquire note lock: ${error.code || error.message}` };
+      if (process.hrtime.bigint() - start > budget)
+        return { error: "note lock held — if no logbook process is running, remove logbook-notes.lock from the Git common directory manually" };
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+    }
+  }
+  let out, cleanupFailed = false;
+  try { out = fn(); }
+  catch (error) { out = { error: error.code || error.message }; }
+  finally { try { rmdirSync(lockDir); } catch { cleanupFailed = true; } }
+  if (cleanupFailed && out && typeof out === "object") {
+    const warning = "note lock not released; remove logbook-notes.lock from the Git common directory manually";
+    if (out.error) out.error = `${out.error}; ${warning}`;
+    else out.cleanupWarning = warning;
+  }
+  return out;
+}
+
+export function saveAnnotation(repo, dir, { sha, why, by, span, side, evidenceFile }) {
+  if (typeof sha !== "string") return { error: "commit id must be a string" };
+  const r = rawGitStatus(repo, ["rev-parse", "--verify", "--quiet", `${sha}^{commit}`]);
+  const full = r.status === 0 ? r.stdout.trim() : null;
+  if (!full || !OID.test(full)) return { error: `no such commit ${String(sha)}` };
+  if (!okText(why, MAX_CLAIM)) return { error: "why is empty, unsafe, or too long" };
+  if (by !== undefined && !okText(by, MAX_BY)) return { error: "author identity is unsafe or too long" };
+  let spanVal = null, sideVal = null, fileVal = null;
+  if (span !== undefined && span !== null && span !== "") {
+    if (!okText(span, MAX_SPAN)) return { error: "span is empty, unsafe, or too long" };
+    if (side !== "message" && side !== "diff") return { error: "a span requires --side message|diff" };
+    if (side === "message" && evidenceFile) return { error: "message evidence must not name --evidence-file" };
+    if (side === "diff" && !okEvPath(evidenceFile)) return { error: "diff evidence requires a normalized --evidence-file" };
+    const status = groundStatus(repo, full, span, side, evidenceFile || null);
+    if (status === "absent") return { error: "quoted span is not evidence introduced or removed by that commit" };
+    if (status !== "grounded") return { error: "could not verify the quoted span from raw Git objects (unmeasurable)" };
+    spanVal = span; sideVal = side; fileVal = evidenceFile || null;
+  } else if (side !== undefined || evidenceFile !== undefined) {
+    return { error: "--side/--evidence-file require --span" };
+  }
+  const note = { schema: NOTE_SCHEMA, type: NOTE_TYPE, sha: full, why,
+    by: by || "agent", date: todayLocal(), side: sideVal, evidenceFile: fileVal, span: spanVal };
+  return withNoteLock(repo, () => {
+    const state = loadDigestNotesStable(dir);
+    if (state.error) return { error: `unsafe note store: ${state.error}` };
+    const existing = state.notes.find((item) => item.sha === note.sha);
+    if (existing && existing.why === note.why && existing.by === note.by &&
+        existing.side === note.side && existing.evidenceFile === note.evidenceFile && existing.span === note.span)
+      return { ...existing, idempotent: true };
+    const path = join(realpathSync(dir), "annotations.jsonl");
+    appendPrivateLine(path, `${state.needsNewline ? "\n" : ""}${serializeAnnotation(note)}\n`, MAX_NOTE_STORE);
+    return { ...note, idempotent: false };
+  });
+}
+
+// Rebuild the digest immediately after a note append. Notes are loaded outside
+// the event cache and the post-write snapshot is checked so concurrent writers
+// cannot leave LOGBOOK.md stuck on a stale subset.
+export function refreshDigestNotes(repo, opts = {}) {
+  const o = { max: DEFAULT_MAX, since: null, until: null, quiet: true, out: null, ...opts };
+  const reused = loadEvents(repo, o);
+  let events = reused?.events, capped = reused?.capped;
+  if (!events) {
+    events = collectEvents(repo, o); capped = events.capped;
+    if (!events.length) return { error: "no commits found" };
+    if (!diffScan(repo, events, o)) return { error: "diff scan failed; note saved but digest was not refreshed from partial history" };
+  }
+  const A = analyze(events, hotspots(repo, o));
+  const headSha = git(repo, ["rev-parse", "HEAD"]).trim();
+  const ledgerText = events.map((event) => JSON.stringify(event)).join("\n") + "\n";
+  const record = { events: events.length, max: o.max, scope: "default",
+    capped: Boolean(capped), sha256: sha256(ledgerText) };
+  const journey = readRegularUtf8NoFollow(join(repo, "JOURNEY.md"), 4 << 20);
+  const compare = !journey.error && journey.text.includes("_Percentiles vs the top 2,500 repos on GitHub");
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const notes = loadDigestNotesStable(repo);
+    if (notes.error === "file changed while reading") continue;
+    if (notes.error) return { error: `note store became unreadable during refresh: ${notes.error}` };
+    const signature = noteStateDigest(notes);
+    try {
+      writeArtifactBundle(repo, { name: basename(repo), A,
+        shallow: existsSync(join(repo, ".git", "shallow")), capped, notes,
+        headSha, record, ledgerText, compare });
+    } catch (error) {
+      return { error: `digest artifacts could not be replaced safely: ${error.code || error.message}` };
+    }
+    if (noteStateDigest(loadDigestNotesStable(repo)) === signature)
+      return { refreshed: true, notes: notes.notes.length };
+  }
+  return { error: "note store kept changing; note saved but digest refresh did not converge" };
 }
 
 // Local (uncommitted) changes vs an IMMUTABLE captured commit OID, RAW (no replace/graft):
@@ -3423,6 +3667,9 @@ function currentWiringProblem(text) {
       !value.includes(`${NPX_COMMAND} context --file path/to/file --revert`) ||
       !/If output says NEXT[\s\S]*until END complete/.test(value) ||
       !/leads, not verdicts[\s\S]*raw Git evidence/.test(value) ||
+      !value.includes(`${NPX_COMMAND} annotate SHA "one specific sentence"`) ||
+      !/unreviewed digest note[\s\S]*annotate-draft/.test(value) ||
+      !value.includes(`${NPX_COMMAND} pending`) ||
       !value.includes("accept-draft CARD_ID --by WHO") ||
       !/Never run[\s\S]*accept-draft[\s\S]*accept-lead[\s\S]*reject-lead/.test(value) ||
       !/check --diff[\s\S]*NEXT[\s\S]*END complete/.test(value))
@@ -3435,6 +3682,13 @@ function artifactHead(markdown) {
     /<!-- logbook:generated-through:((?:[0-9a-f]{40}|[0-9a-f]{64})|unknown) -->/gi,
   )];
   return matches.length === 1 ? matches[0][1].toLowerCase() : null;
+}
+
+function artifactNoteDigest(markdown) {
+  const matches = [...String(markdown).matchAll(
+    /<!-- logbook:notes-sha256:([0-9a-f]{64}) -->/g,
+  )];
+  return matches.length === 1 ? matches[0][1] : null;
 }
 
 function isUsableLogbookSkill(path) {
@@ -3618,6 +3872,26 @@ export function doctorRepo(repo) {
     }
   }
 
+  // Notes are deliberately non-authoritative, but they are durable memory.
+  // Doctor must distinguish a current digest from a crash/merge/manual edit
+  // that changed annotations.jsonl without refreshing LOGBOOK.md.
+  const noteState = loadDigestNotes(repo);
+  const digestState = readRegularUtf8NoFollow(join(repo, "LOGBOOK.md"), 4 << 20);
+  if (noteState.error) {
+    add("fail", "notes", `annotations.jsonl cannot be read safely (${sanitizeContextText(noteState.error, 256, { markdown: false })})`,
+      `repair annotations.jsonl, then run: ${NPX_COMMAND}`);
+  } else {
+    if (noteState.malformed)
+      add("warn", "notes", `${noteState.malformed} malformed note row${noteState.malformed === 1 ? " was" : "s were"} omitted`,
+        "repair or remove the malformed rows, then refresh the digest");
+    const renderedDigest = digestState.error ? null : artifactNoteDigest(digestState.text);
+    if (renderedDigest !== noteStateDigest(noteState))
+      add("fail", "notes", "LOGBOOK.md does not match the current unreviewed-note snapshot",
+        `run: ${NPX_COMMAND}`);
+    else if (noteState.notes.length)
+      add("pass", "notes", `${plural(noteState.notes.length, "unreviewed note")} rendered in the current digest`);
+  }
+
   // Read-only reminder from the git-files draft plane. An unsafe/malformed
   // local queue is a health failure; ordinary drafts are inert steady state.
   const drafts = readLocalDrafts(repo);
@@ -3648,7 +3922,7 @@ export function renderDoctor(name, report) {
 // Exact block emitted by the first 0.9 release candidate. Keep it only as a
 // migration source: its unversioned npx commands resolve npm `latest`, which
 // may be an older release while this package is staged under `next`.
-const UNPINNED_PLANE_REPO_MEMORY_BLOCK = `
+const UNPINNED_V090_PLANE_REPO_MEMORY_BLOCK = `
 ## Repo memory
 Before planning or editing:
 1. Read LOGBOOK.md at the repo root completely before any history query.
@@ -3673,6 +3947,37 @@ Before finalizing work, run the decision preflight on the actual diff:
 npx -y @promptwheel/logbook check --diff
 If output says NEXT, repeat with --cursor TOKEN until END complete.
 `;
+const V090_PLANE_REPO_MEMORY_BLOCK = UNPINNED_V090_PLANE_REPO_MEMORY_BLOCK.replaceAll(
+  "npx -y @promptwheel/logbook",
+  "npx -y @promptwheel/logbook@0.9.0",
+);
+const UNPINNED_PLANE_REPO_MEMORY_BLOCK = `
+## Repo memory
+Before planning or editing:
+1. Read LOGBOOK.md at the repo root completely before any history query.
+2. Use the raw history inventory as orientation, not a task-level risk score.
+   Inspect task-relevant do-not-retry and test-trust entries regardless of
+   repo-wide totals.
+3. For complete do-not-retry coverage, inspect all relevant paths:
+   npx -y @promptwheel/logbook context --file path/to/file --revert
+   Repeat --file for each other relevant path. If output says NEXT, repeat the
+   identical filters with --cursor TOKEN until END complete before concluding.
+4. Treat findings as leads, not verdicts. Verify claims against raw Git evidence
+   and confirm that the constraint still applies to the current tree.
+Refresh the record: npx -y @promptwheel/logbook
+Check what is still silenced: npx -y @promptwheel/logbook audit
+When you investigate WHY a listed commit happened, preserve it immediately as
+an unreviewed digest note (replace placeholders; never annotate guesses):
+npx -y @promptwheel/logbook annotate SHA "one specific sentence" --span "exact quote" --side diff --evidence-file path/to/file --by MODEL
+For a decision that specifically needs human authority, create an inert card
+instead with npx -y @promptwheel/logbook annotate-draft SHA "one specific sentence" --span "exact quote" --side diff --evidence-file path/to/file --by MODEL
+Then run npx -y @promptwheel/logbook pending and report the full card ID. Human promotion is
+separate: npx -y @promptwheel/logbook accept-draft CARD_ID --by WHO
+Never run accept, accept-draft, accept-lead, or reject-lead for the human.
+Before finalizing work, run the decision preflight on the actual diff:
+npx -y @promptwheel/logbook check --diff
+If output says NEXT, repeat with --cursor TOKEN until END complete.
+`;
 const PLANE_REPO_MEMORY_BLOCK = UNPINNED_PLANE_REPO_MEMORY_BLOCK.replaceAll(
   "npx -y @promptwheel/logbook",
   NPX_COMMAND,
@@ -3681,6 +3986,8 @@ const PLANE_REPO_MEMORY_BLOCK = UNPINNED_PLANE_REPO_MEMORY_BLOCK.replaceAll(
 // Normal refreshes also upgrade exact, released LMH-era blocks. This is an
 // exact-byte migration only: a user-edited block is never rewritten.
 const NORMAL_REFRESH_OLD_BLOCKS = [
+  UNPINNED_V090_PLANE_REPO_MEMORY_BLOCK,
+  V090_PLANE_REPO_MEMORY_BLOCK,
   UNPINNED_PLANE_REPO_MEMORY_BLOCK,
   `
 ## Repo memory
@@ -3774,8 +4081,12 @@ function usage() {
                                   bounded context in query order (20 rows / 8KB)
     logbook annotate SHA "WHY" [--span "exact quote" --side message|diff]
                   [--evidence-file P] [--by WHO] [path]
-                                  create a local, inert decision draft (compatibility
-                                  alias: annotate-draft); grounded spans are raw-verified
+                                  persist an immediately visible UNREVIEWED digest note;
+                                  grounded spans are optional and raw-verified
+    logbook annotate-draft SHA "WHY" [--span "exact quote" --side message|diff]
+                  [--evidence-file P] [--by WHO] [path]
+                                  create a local, inert card for the optional
+                                  human-reviewed decision workflow
     logbook accept CARDID --by WHO [--file P ...] [--dir P/] [path]
                                   human-promote one exact local draft (compatibility
                                   alias: accept-draft); CARDID must be the full id
@@ -3833,7 +4144,7 @@ export function parseArgs(argv) {
     else if (a === "doctor") o.cmd = "doctor";
     else if (a === "query") o.cmd = "query";
     else if (a === "context") o.cmd = "context";
-    else if (a === "annotate") o.cmd = "annotate-draft";
+    else if (a === "annotate") o.cmd = "annotate";
     else if (a === "accept") o.cmd = "accept-draft";
     else if (a === "check") o.cmd = "check";
     else if (a === "pending") o.cmd = "pending";
@@ -3886,7 +4197,7 @@ export function parseArgs(argv) {
     // <cardId> [repo] — cardId positional; --claim edits the claim on accept-lead
     o.cardId = rest[0];
     if (rest[1]) o.repo = rest[1];
-  } else if (o.cmd === "annotate-draft") {
+  } else if (o.cmd === "annotate" || o.cmd === "annotate-draft") {
     // <sha> "<why>" [repo] — sha + why positional
     o.sha = rest[0]; o.why = rest[1];
     if (rest[2]) o.repo = rest[2];
@@ -3963,9 +4274,28 @@ async function main() {
     process.exitCode = r.exitCode || (r.error ? 1 : 0);
     return;
   }
+  if (o.cmd === "annotate") {
+    if (o.out) { console.error("  annotate does not support --out; notes live at the repository root"); process.exit(1); }
+    if (!o.sha || !o.why) { console.error(`  usage: logbook annotate <sha> "<verified why>" [--span "quote" --side message|diff --evidence-file P] [--by WHO] [path]`); process.exit(1); }
+    const note = saveAnnotation(repo, repo, { sha: o.sha, why: o.why, span: o.span,
+      side: o.side, evidenceFile: o.evidenceFile, by: o.by });
+    if (note.error) { console.error(`  annotate: ${sanitizeContextText(note.error, 700, { markdown: false })}`); process.exit(1); }
+    const refreshed = refreshDigestNotes(repo, { max: o.max });
+    if (refreshed.error) {
+      console.error(`  annotate: saved unreviewed note ${note.sha.slice(0, 8)}, but ${sanitizeContextText(refreshed.error, 700, { markdown: false })}`);
+      process.exitCode = 1;
+      return;
+    }
+    if (note.cleanupWarning) {
+      console.error(`  annotate: ${sanitizeContextText(note.cleanupWarning, 700, { markdown: false })}`);
+      process.exitCode = 1;
+    }
+    if (!o.quiet) console.log(`  annotate: ${note.idempotent ? "kept" : "saved"} unreviewed note ${note.sha.slice(0, 8)} in annotations.jsonl + LOGBOOK.md (by ${sanitizeContextText(note.by, 128, { markdown: false })}; never accepted or consumed by check --diff)`);
+    return;
+  }
   if (o.cmd === "annotate-draft") {
-    if (o.out) { console.error("  annotate does not support --out; drafts live under the repo's .logbook/drafts/"); process.exit(1); }
-    if (!o.sha || !o.why) { console.error(`  usage: logbook annotate <sha> "<why>" [--span "quote" --side message|diff --evidence-file P] [--by WHO] [path]`); process.exit(1); }
+    if (o.out) { console.error("  annotate-draft does not support --out; drafts live under the repo's .logbook/drafts/"); process.exit(1); }
+    if (!o.sha || !o.why) { console.error(`  usage: logbook annotate-draft <sha> "<why>" [--span "quote" --side message|diff --evidence-file P] [--by WHO] [path]`); process.exit(1); }
     const r = annotateDraft(repo, { sha: o.sha, why: o.why, span: o.span, side: o.side, evidenceFile: o.evidenceFile, by: o.by });
     if (r.error) { console.error(`  annotate-draft: ${r.error}`); process.exit(1); }
     console.log(`  annotate-draft: drafted ${r.cardId} for ${r.sha.slice(0, 8)} (local + inert; run: logbook accept-draft ${r.cardId} --by WHO to promote)`);
@@ -4075,15 +4405,17 @@ async function main() {
     }
     if (o.out) { console.error("logbook: refine does not support --out"); process.exit(1); }
     const drafts = readLocalDrafts(repo);
+    const digestNotes = loadDigestNotes(repo);
     const trust = resolveTrustCommit(repo, "HEAD");
     const decisions = trust ? readPlane(repo, trust, DECISION_PLANE) : { unreadable: true, cards: [], malformed: [] };
     const leads = trust ? readPlane(repo, trust, LEAD_PLANE) : { unreadable: true, cards: [], malformed: [] };
-    if (drafts.unreadable || drafts.malformed.length || decisions.unreadable || decisions.malformed.length ||
+    if (digestNotes.error || drafts.unreadable || drafts.malformed.length || decisions.unreadable || decisions.malformed.length ||
         leads.unreadable || leads.malformed.length) {
-      console.error("logbook: draft/decision/lead index is unreadable or malformed; refusing a partial refinement worklist");
+      console.error("logbook: note/draft/decision/lead index is unreadable or malformed; refusing a partial refinement worklist");
       process.exit(1);
     }
     const represented = new Set([
+      ...digestNotes.notes.map((note) => note.sha),
       ...drafts.cards.map(({ card }) => card.sha),
       ...decisions.cards.map(({ card }) => card.sha),
       ...leads.cards.map(({ card }) => card.sha),
@@ -4099,7 +4431,7 @@ async function main() {
       const f = (e.files || [])[0] || "";
       console.log(`  ${e.sha}  ${C.dim}[${kind}]${C.r}  ${sanitizeContextText(e.subject || "", 120, { markdown: false })}`);
       console.log(`    ${C.dim}${sanitizeContextText(f, 200, { markdown: false })} — verify: git show ${e.fullSha}${C.r}`);
-      console.log(`    ${C.dim}then draft: logbook annotate-draft ${e.fullSha} "verified why" --span "exact quote" --side diff --evidence-file ${sanitizeContextText(f, 200, { markdown: false })} --by MODEL${C.r}`);
+      console.log(`    ${C.dim}then preserve: logbook annotate ${e.fullSha} "verified why" --span "exact quote" --side diff --evidence-file ${sanitizeContextText(f, 200, { markdown: false })} --by MODEL${C.r}`);
     }
     if (notable.length > limit) console.log(`\n  ${C.dim}… and ${notable.length - limit} more (raise with --limit)${C.r}`);
     if (capped) console.error(`  analysis capped at ${fmt(o.max)} commits — use -n for a larger window`);
@@ -4173,12 +4505,9 @@ async function main() {
   }
   const outDir = o.out ? resolve(o.out) : repo;
   mkdirSync(outDir, { recursive: true });
-  // Legacy annotations are never rendered into the digest or trusted by the
-  // checker. `init` performs the one-way, zero-authority import into local
-  // inert drafts and reports every row it cannot preserve.
-  let legacyMigration = null;
-  if (o.cmd === "init" && existsSync(join(repo, "annotations.jsonl")))
-    legacyMigration = migrateLegacyToDrafts(repo, repo);
+  // Digest notes remain a separate, explicitly unreviewed recall channel.
+  // They are never auto-migrated into the human-review queue.
+  const notes = loadDigestNotes(repo);
   const headSha = git(repo, ["rev-parse", "HEAD"]).trim();
   const ledgerText = events.map((event) => JSON.stringify(event)).join("\n") + "\n";
   const record = {
@@ -4191,7 +4520,7 @@ async function main() {
   // A failed scan may render its explicit warning, but must not persist the
   // partial ledger: the next run could otherwise accept it as clean.
   writeArtifactBundle(outDir, {
-    name, A, shallow, capped, headSha, record,
+    name, A, shallow, capped, notes, headSha, record,
     ledgerText: scanOk ? ledgerText : null, compare: o.compare,
   });
   // A normal refresh updates exact released wiring too; otherwise LOGBOOK.md
@@ -4242,15 +4571,6 @@ async function main() {
     if (!existsSync(claudePath)) {
       managedWriteFile(repo, claudePath, "@AGENTS.md\n");
       if (!o.quiet) console.log(`  ${C.good}✓${C.r} wired ${C.bold}CLAUDE.md${C.r}   ${C.dim}bridges Claude Code to AGENTS.md${C.r}`);
-    }
-    if (legacyMigration && !o.quiet) {
-      console.log(`  ${C.good}✓${C.r} legacy annotations → ${legacyMigration.drafted.length} inert draft${legacyMigration.drafted.length === 1 ? "" : "s"}` +
-        `${legacyMigration.skipped.length ? `; ${legacyMigration.skipped.length} row${legacyMigration.skipped.length === 1 ? "" : "s"} skipped/reported` : ""}`);
-      if (legacyMigration.skipped.length) {
-        const reasons = new Map();
-        for (const row of legacyMigration.skipped) reasons.set(row.reason, (reasons.get(row.reason) || 0) + 1);
-        console.log(`  ${C.dim}migration skips: ${[...reasons].sort(([a], [b]) => a.localeCompare(b)).map(([reason, count]) => `${sanitizeContextText(reason, 80, { markdown: false })} ×${count}`).join("; ")}${C.r}`);
-      }
     }
   }
   if (!o.quiet) {

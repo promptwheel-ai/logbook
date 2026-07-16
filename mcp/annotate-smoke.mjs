@@ -1,7 +1,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { execFileSync } from "node:child_process";
-import { readdirSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 const repo = process.argv[2];
@@ -24,6 +24,12 @@ console.log("annotate:", r1.content[0].text);
 
 const r2 = await client.callTool({ name: "logbook_digest", arguments: { repo } });
 console.log("digest bytes:", Buffer.byteLength(r2.content[0].text));
+console.log("unreviewed notes:", readFileSync(join(repo, "annotations.jsonl"), "utf8").trim().split("\n").length);
+
+const draft = await client.callTool({ name: "logbook_annotate_draft", arguments: { repo, sha,
+  why: "guard missed React Native where window exists but window.top does not",
+  span: subject, side: "message", by: "smoke-model" } });
+console.log("annotate draft:", draft.content[0].text);
 console.log("local inert drafts:", readdirSync(join(repo, ".logbook", "drafts")).filter((f) => f.endsWith(".json")).length);
 
 const bad = await client.callTool({ name: "logbook_annotate", arguments: {

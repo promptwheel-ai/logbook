@@ -59,11 +59,11 @@ test("handshake and tool inventory", async () => {
   const init = await rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {},
     clientInfo: { name: "behavioral-test", version: "0.0.0" } });
   assert.equal(init.result.serverInfo.name, "logbook");
-  assert.equal(init.result.serverInfo.version, "0.5.0");
+  assert.equal(init.result.serverInfo.version, "0.5.1");
   child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
   const tools = await rpc("tools/list", {});
   assert.deepEqual(tools.result.tools.map((t) => t.name).sort(),
-    ["logbook_annotate", "logbook_audit", "logbook_context", "logbook_digest", "logbook_query"]);
+    ["logbook_annotate", "logbook_annotate_draft", "logbook_audit", "logbook_context", "logbook_digest", "logbook_query"]);
 });
 
 test("fresh query (no ledger on disk): events carry xv, truncation is announced", async () => {
@@ -139,9 +139,9 @@ test("release metadata requires the plane-native core", () => {
   const pkg = JSON.parse(readFileSync(join(mcpRoot, "package.json"), "utf8"));
   const lock = JSON.parse(readFileSync(join(mcpRoot, "package-lock.json"), "utf8"));
   const listing = JSON.parse(readFileSync(join(mcpRoot, "server.json"), "utf8"));
-  assert.equal(pkg.version, "0.5.0");
-  assert.equal(pkg.dependencies["@promptwheel/logbook"], "^0.9.0");
-  assert.equal(lock.packages[""].dependencies["@promptwheel/logbook"], "^0.9.0");
+  assert.equal(pkg.version, "0.5.1");
+  assert.equal(pkg.dependencies["@promptwheel/logbook"], "^0.9.1");
+  assert.equal(lock.packages[""].dependencies["@promptwheel/logbook"], "^0.9.1");
   assert.equal(listing.version, pkg.version);
   assert.equal(listing.packages[0].version, pkg.version);
 });
@@ -263,6 +263,8 @@ test("MCP render paths sanitize repository evidence while query JSON stays raw",
     assert.ok(query.includes(rawSubject), "query JSON preserves Markdown-significant subject bytes");
 
     const head = g(["rev-parse", "HEAD"]).trim();
+    const beforeNote = await callTool("logbook_digest", { repo: isolated });
+    assert.doesNotMatch(beforeNote, /verified reason/);
     const annotated = await callTool("logbook_annotate", {
       repo: isolated, sha: head, why: "verified reason", span: "re-add suppression",
       side: "message", by: maliciousBy,
@@ -271,6 +273,18 @@ test("MCP render paths sanitize repository evidence while query JSON stays raw",
     assert.match(annotated,
       /&#91;agent&#93;&#40;http&#58;\/\/evil&#41; &#96;model&#96; &#64;name/,
       "annotation confirmation renders attribution as inert evidence");
+    assert.match(annotated, /saved unreviewed note/);
+    const storedNote = JSON.parse(readFileSync(join(isolated, "annotations.jsonl"), "utf8").trim());
+    assert.equal(storedNote.by, maliciousBy, "sanitization is render-only; persisted note evidence stays raw");
+    const afterNote = await callTool("logbook_digest", { repo: isolated });
+    assert.match(afterNote, /Unreviewed agent notes[\s\S]*verified reason/,
+      "same-HEAD MCP digest loads notes outside its event cache");
+
+    const drafted = await callTool("logbook_annotate_draft", {
+      repo: isolated, sha: head, why: "reviewable reason", span: "re-add suppression",
+      side: "message", by: maliciousBy,
+    });
+    assert.match(drafted, /drafted [0-9a-f]{64}/);
     const draftDir = join(isolated, ".logbook", "drafts");
     const draftFile = readdirSync(draftDir).find((file) => file.endsWith(".json"));
     assert.equal(JSON.parse(readFileSync(join(draftDir, draftFile), "utf8")).by, maliciousBy,

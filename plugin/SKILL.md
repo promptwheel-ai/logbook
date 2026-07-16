@@ -1,9 +1,9 @@
 ---
 name: logbook
 description: >-
-  Turn a repo's git history into agent memory and reviewed temporal decision
-  leads: hotspots, do-not-retry reverts, suppressions, fragile areas, and
-  path-scoped decisions. Use when starting in an unfamiliar repo, before a
+  Turn a repo's git history into immediate agent memory plus optional reviewed
+  temporal decisions: hotspots, do-not-retry reverts, suppressions, fragile
+  areas, unreviewed notes, and path-scoped cards. Use when starting in an unfamiliar repo, before a
   refactor or large change, when something keeps breaking, when asked what was
   tried or why code is this way, or when deciding whether green tests can be
   trusted.
@@ -12,15 +12,15 @@ description: >-
 # Logbook
 
 ```bash
-npx -y @promptwheel/logbook@0.9.0              # analyze current repo → 3 history files
-npx -y @promptwheel/logbook@0.9.0 journey      # the story, in color (writes nothing)
-npx -y @promptwheel/logbook@0.9.0 doctor       # read-only artifact/wiring/query health
-npx -y @promptwheel/logbook@0.9.0 --json       # events to stdout (writes nothing)
+npx -y @promptwheel/logbook@0.9.1              # refresh history and render any existing notes
+npx -y @promptwheel/logbook@0.9.1 journey      # the story, in color (writes nothing)
+npx -y @promptwheel/logbook@0.9.1 doctor       # read-only artifact/wiring/query health
+npx -y @promptwheel/logbook@0.9.1 --json       # events to stdout (writes nothing)
 ```
 
 The CLI runs locally and never changes source or Git history. It writes its own
-history artifacts and, only through explicit decision commands, files under
-`.logbook/`.
+history artifacts; explicit `annotate` calls append root `annotations.jsonl`,
+and explicit decision commands write only under `.logbook/`.
 
 ## Required workflow
 
@@ -31,7 +31,7 @@ After locating task-relevant files:
 3. Inspect every task path through bounded context pages:
 
    ```bash
-   npx -y @promptwheel/logbook@0.9.0 context --file src/a.ts --file src/b.ts --revert
+   npx -y @promptwheel/logbook@0.9.1 context --file src/a.ts --file src/b.ts --revert
    ```
 
    If output says `NEXT`, repeat the identical filters with `--cursor TOKEN`
@@ -41,16 +41,16 @@ After locating task-relevant files:
 5. Before finalizing a change, run the decision preflight for the actual diff:
 
    ```bash
-   npx -y @promptwheel/logbook@0.9.0 check --diff
+   npx -y @promptwheel/logbook@0.9.1 check --diff
    # in a PR/CI range:
-   npx -y @promptwheel/logbook@0.9.0 check --diff --base BASE --head HEAD
+   npx -y @promptwheel/logbook@0.9.1 check --diff --base BASE --head HEAD
    ```
 
    Follow every `NEXT` cursor. Intermediate pages exit nonzero because later
    cards are unchecked; only `END complete` can finish cleanly.
 
 If artifacts or wiring look stale, run
-`npx -y @promptwheel/logbook@0.9.0 doctor`. Doctor is read-only; do not treat
+`npx -y @promptwheel/logbook@0.9.1 doctor`. Doctor is read-only; do not treat
 it as a refresh.
 
 ## Decision authority
@@ -75,13 +75,14 @@ current applicability.
 The committed ref and its branch protections are the authority boundary.
 `--by` is attribution, not identity proof.
 
-## Lazy enrichment: draft what you actually investigate
+## Lazy enrichment: preserve what you actually investigate
 
 When related work causes you to investigate why a prior change happened,
-preserve the verified result as a local draft:
+persist the verified result immediately as an explicitly unreviewed digest
+note. Do not prompt a human and never annotate a guess:
 
 ```bash
-npx -y @promptwheel/logbook@0.9.0 annotate-draft SHA "one specific claim" \
+npx -y @promptwheel/logbook@0.9.1 annotate SHA "one specific claim" \
   --span "exact bytes introduced or removed" \
   --side diff \
   --evidence-file path/to/file \
@@ -89,24 +90,26 @@ npx -y @promptwheel/logbook@0.9.0 annotate-draft SHA "one specific claim" \
 ```
 
 For commit-message evidence, use `--side message` and omit
-`--evidence-file`. `annotate` is a compatibility alias for
-`annotate-draft`.
+`--evidence-file`. Evidence is optional for the low-friction note, but any
+supplied quote must ground exactly or the command abstains. The note appears in
+`LOGBOOK.md` immediately, is always labeled machine-authored and unreviewed,
+and is never consumed by `check --diff`.
 
-The span must be verbatim evidence at the named side/path or the tool abstains.
 Never paraphrase into `--span`, stitch excerpts, or attach an attractive claim
-to an unrelated real substring. An off-Git human attestation can omit a span,
-but an agent must not invent off-Git context.
+to an unrelated real substring. Preserve one decision you actually
+investigated at a time; do not bulk-generate rationale across history.
 
-Draft lazily—one decision you actually investigated at a time. Do not
-bulk-generate rationale across history. A draft is inert and never surfaces in
-`check --diff` until a human reviews it.
+### Optional human-reviewed card
 
-After drafting, report the full card ID and tell the user it awaits review:
+Only when a finding specifically needs repository authority, create a separate
+inert card and report its full ID:
 
 ```bash
-npx -y @promptwheel/logbook@0.9.0 pending
+npx -y @promptwheel/logbook@0.9.1 annotate-draft SHA "one specific claim" \
+  --span "exact bytes" --side diff --evidence-file path/to/file --by MODEL
+npx -y @promptwheel/logbook@0.9.1 pending
 # Human-only:
-# npx -y @promptwheel/logbook@0.9.0 accept-draft FULL_CARD_ID --by HUMAN
+# npx -y @promptwheel/logbook@0.9.1 accept-draft FULL_CARD_ID --by HUMAN
 ```
 
 Never run `accept`, `accept-draft`, `accept-lead`, or `reject-lead` on the
@@ -116,11 +119,11 @@ compatibility alias for `accept-draft`.
 To seed a mature repository on demand, use the deterministic worklist:
 
 ```bash
-npx -y @promptwheel/logbook@0.9.0 refine
+npx -y @promptwheel/logbook@0.9.1 refine
 ```
 
 `refine` names unannotated notable commits. It does not generate claims. Work
-each item through the same inspect → verify → cite → draft loop.
+each item through the same inspect → verify → cite → annotate loop.
 
 ## Policy-published machine leads
 
@@ -129,7 +132,7 @@ committed `.logbook/policy.toml`. Only when that policy is already enabled and
 the task calls for automatic publication may an agent pass candidate JSON to:
 
 ```bash
-npx -y @promptwheel/logbook@0.9.0 publish --candidates candidates.json
+npx -y @promptwheel/logbook@0.9.1 publish --candidates candidates.json
 ```
 
 The CLI independently reloads the committed policy and enforces source
@@ -171,9 +174,9 @@ generated history artifacts to match your conclusion.
 Use bounded `context` pages for agent consumption:
 
 ```bash
-npx -y @promptwheel/logbook@0.9.0 context --file lib/response.js --file lib/session.js --revert
-npx -y @promptwheel/logbook@0.9.0 context --file src/core.js --weaken 3 --since 2024-01-01
-npx -y @promptwheel/logbook@0.9.0 context --file test/core.test.js --suppress --since 2024-01-01
+npx -y @promptwheel/logbook@0.9.1 context --file lib/response.js --file lib/session.js --revert
+npx -y @promptwheel/logbook@0.9.1 context --file src/core.js --weaken 3 --since 2024-01-01
+npx -y @promptwheel/logbook@0.9.1 context --file test/core.test.js --suppress --since 2024-01-01
 ```
 
 Use raw `query` only when machine-readable JSONL is required. If it says

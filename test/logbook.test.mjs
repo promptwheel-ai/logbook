@@ -25,6 +25,7 @@ import {
   CHECK_PAGE_MAX_ITEMS, CHECK_PAGE_MAX_BYTES,
   acceptLead, rejectLead, computeReviewOutcomes, renderReviewOutcomes, renderPublish,
   annotateDraft, acceptDraft, parseReview, serializeReview, REVIEW_SCHEMA,
+  loadDigestNotes, saveAnnotation,
 } from "../bin/logbook.mjs";
 
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "bin", "logbook.mjs");
@@ -88,6 +89,8 @@ test("classifyFile buckets correctly", () => {
   assert.equal(classifyFile(".gitignore"), "config");
   assert.equal(classifyFile("next.config.ts"), "config");
   assert.equal(classifyFile("next-env.d.ts"), "gen");
+  assert.equal(classifyFile("annotations.jsonl"), "gen");
+  assert.equal(classifyFile(".logbook/decisions/card.json"), "gen");
 });
 
 test("history inventory renders literal counts and an honest empty-window note", () => {
@@ -654,7 +657,7 @@ test("concurrent distinct CLI drafts preserve every independently-addressed card
   const g = (args) => execFileSync("git", ["-C", d, ...args], { env, encoding: "utf8" });
   const runAnnotation = (sha, index) => new Promise((resolvePromise, rejectPromise) => {
     const child = spawn(process.execPath, [
-      CLI, "annotate", sha, `distinct reason ${index}`, d, "--by", `writer-${index}`, "-q",
+      CLI, "annotate-draft", sha, `distinct reason ${index}`, d, "--by", `writer-${index}`, "-q",
     ], { env, stdio: ["ignore", "ignore", "pipe"] });
     let stderr = "";
     child.stderr.setEncoding("utf8");
@@ -686,6 +689,49 @@ test("concurrent distinct CLI drafts preserve every independently-addressed card
   } finally {
     rmSync(d, { recursive: true, force: true });
   }
+});
+
+test("concurrent note writers preserve every logical note and leave the digest at the final fold", async () => {
+  const d = mkdtempSync(join(tmpdir(), "logbook-note-concurrent-"));
+  const env = { ...process.env, GIT_AUTHOR_NAME: "N", GIT_AUTHOR_EMAIL: "n@n",
+    GIT_COMMITTER_NAME: "N", GIT_COMMITTER_EMAIL: "n@n" };
+  delete env.FORCE_COLOR;
+  const g = (...args) => execFileSync("git", ["-C", d, ...args], { env, encoding: "utf8" });
+  const run = (sha, why, by) => new Promise((resolvePromise, rejectPromise) => {
+    const child = spawn(process.execPath, [CLI, "annotate", sha, why, "--by", by, d, "-q"],
+      { env, stdio: ["ignore", "ignore", "pipe"] });
+    let stderr = ""; child.stderr.setEncoding("utf8"); child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.once("error", rejectPromise);
+    child.once("close", (code) => code === 0 ? resolvePromise() : rejectPromise(new Error(stderr || `exit ${code}`)));
+  });
+  try {
+    g("init", "-q");
+    const shas = [];
+    for (let i = 0; i < 8; i++) {
+      writeFileSync(join(d, "a.txt"), `value ${i}\n`); g("add", "a.txt"); g("commit", "-qm", `change ${i}`);
+      shas.push(g("rev-parse", "HEAD").trim());
+    }
+    execFileSync(process.execPath, [CLI, d, "-q"], { env });
+    await Promise.all(shas.map((sha, i) => run(sha, `reason-${i}`, `writer-${i}`)));
+    const state = loadDigestNotes(d);
+    assert.equal(state.error, null); assert.equal(state.malformed, 0); assert.equal(state.notes.length, 8);
+    const digest = readFileSync(join(d, "LOGBOOK.md"), "utf8");
+    for (let i = 0; i < 8; i++) assert.match(digest, new RegExp(`reason-${i}`));
+    // Widen the read window so the old load-before-append race is reliable:
+    // every retry used to observe the same state and append another physical
+    // row even though the loader folded them to one logical note.
+    const store = join(d, "annotations.jsonl");
+    const padSha = "f".repeat(40);
+    const pad = (JSON.stringify({ sha: padSha, why: "p".repeat(400), by: "pad", date: "2026-07-15" }) + "\n").repeat(6000);
+    writeFileSync(store, Buffer.concat([readFileSync(store), Buffer.from(pad)]));
+    await Promise.all(Array.from({ length: 8 }, () => run(shas[0], "reason-0", "writer-0")));
+    assert.equal(loadDigestNotes(d).notes.length, 9, "concurrent identical retries remain one logical note");
+    const physical = readFileSync(store, "utf8").split("\n").filter(Boolean)
+      .map((line) => JSON.parse(line)).filter((row) => row.sha === shas[0] && row.why === "reason-0");
+    assert.equal(physical.length, 1, "the note transaction physically collapses concurrent identical retries");
+    const finalDigest = readFileSync(join(d, "LOGBOOK.md"), "utf8");
+    for (let i = 0; i < 8; i++) assert.match(finalDigest, new RegExp(`reason-${i}`));
+  } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
 // ---------- integration: the CLI end-to-end ----------
@@ -1544,10 +1590,13 @@ test("init wires the repo once, idempotently, into existing agent files", () => 
   assert.match(agents, /accept-draft CARD_ID --by WHO/);
   assert.match(agents, /Never run accept, accept-draft, accept-lead, or reject-lead/);
   assert.match(agents, /check --diff.*NEXT.*--cursor TOKEN.*END complete/s);
-  assert.equal(PACKAGE_VERSION, "0.9.0");
-  assert.equal(NPX_COMMAND, "npx -y @promptwheel/logbook@0.9.0");
-  assert.match(agents, /npx -y @promptwheel\/logbook@0\.9\.0 context/,
+  assert.equal(PACKAGE_VERSION, "0.9.1");
+  assert.equal(NPX_COMMAND, "npx -y @promptwheel/logbook@0.9.1");
+  assert.match(agents, /npx -y @promptwheel\/logbook@0\.9\.1 context/,
     "generated workflow pins the package that authored it instead of npm latest");
+  assert.match(agents, /npx -y @promptwheel\/logbook@0\.9\.1 pending/,
+    "the optional review handoff works even when the package is only invoked through npx");
+  assert.doesNotMatch(agents, /Then run logbook pending/);
   assert.doesNotMatch(agents, /@promptwheel\/logbook context/);
   // Claude Code reads CLAUDE.md, not AGENTS.md — fresh repos get the import bridge
   assert.equal(readFileSync(join(d, "CLAUDE.md"), "utf8"), "@AGENTS.md\n", "bridge created");
@@ -1751,13 +1800,51 @@ test("init migrates prior generated blocks; user-edited blocks stay", () => {
   g5("add", "-A"); g5("commit", "-q", "-m", "base");
   execFileSync(process.execPath, [CLI, "init", d5], { encoding: "utf8" });
   const currentPinned = readFileSync(join(d5, "AGENTS.md"), "utf8");
-  writeFileSync(join(d5, "AGENTS.md"), currentPinned.replaceAll("@promptwheel/logbook@0.9.0", "@promptwheel/logbook"));
+  writeFileSync(join(d5, "AGENTS.md"), currentPinned.replaceAll(`@promptwheel/logbook@${PACKAGE_VERSION}`, "@promptwheel/logbook"));
   execFileSync(process.execPath, [CLI, d5], { encoding: "utf8" });
   const repinned = readFileSync(join(d5, "AGENTS.md"), "utf8");
-  assert.match(repinned, /@promptwheel\/logbook@0\.9\.0 context/,
+  assert.match(repinned, new RegExp(`@promptwheel/logbook@${PACKAGE_VERSION.replaceAll(".", "\\.")} context`),
     "normal refresh upgrades the first unpinned plane workflow to the exact release");
   assert.doesNotMatch(repinned, /@promptwheel\/logbook context/);
   rmSync(d5, { recursive: true, force: true });
+
+  const d6 = mkdtempSync(join(tmpdir(), "logbook-migrate-pinned-090-plane-"));
+  const g6 = (...a) => execFileSync("git", ["-C", d6, ...a], { env: { ...process.env,
+    GIT_AUTHOR_NAME: "H", GIT_AUTHOR_EMAIL: "h@x.io", GIT_COMMITTER_NAME: "H", GIT_COMMITTER_EMAIL: "h@x.io" } });
+  g6("init", "-q"); writeFileSync(join(d6, "a.js"), "let x = 1;\n");
+  g6("add", "-A"); g6("commit", "-q", "-m", "base");
+  const pinned090 = `
+## Repo memory
+Before planning or editing:
+1. Read LOGBOOK.md at the repo root completely before any history query.
+2. Use the raw history inventory as orientation, not a task-level risk score.
+   Inspect task-relevant do-not-retry and test-trust entries regardless of
+   repo-wide totals.
+3. For complete do-not-retry coverage, inspect all relevant paths:
+   npx -y @promptwheel/logbook@0.9.0 context --file path/to/file --revert
+   Repeat --file for each other relevant path. If output says NEXT, repeat the
+   identical filters with --cursor TOKEN until END complete before concluding.
+4. Treat findings as leads, not verdicts. Verify claims against raw Git evidence
+   and confirm that the constraint still applies to the current tree.
+Refresh the record: npx -y @promptwheel/logbook@0.9.0
+Check what is still silenced: npx -y @promptwheel/logbook@0.9.0 audit
+When you investigate WHY a listed commit happened, preserve an exact source
+quote as an inert draft (replace placeholders; never annotate guesses):
+npx -y @promptwheel/logbook@0.9.0 annotate SHA "one specific sentence" --span "exact quote" --side diff --evidence-file path/to/file --by MODEL
+After drafting, run logbook pending and report the full card ID. Human
+promotion is separate: npx -y @promptwheel/logbook@0.9.0 accept-draft CARD_ID --by WHO
+Never run accept, accept-draft, accept-lead, or reject-lead for the human.
+Before finalizing work, run the decision preflight on the actual diff:
+npx -y @promptwheel/logbook@0.9.0 check --diff
+If output says NEXT, repeat with --cursor TOKEN until END complete.
+`;
+  writeFileSync(join(d6, "AGENTS.md"), pinned090);
+  execFileSync(process.execPath, [CLI, d6], { encoding: "utf8" });
+  const migrated090 = readFileSync(join(d6, "AGENTS.md"), "utf8");
+  assert.match(migrated090, /@promptwheel\/logbook@0\.9\.1 annotate SHA/);
+  assert.match(migrated090, /unreviewed digest note[\s\S]*annotate-draft/,
+    "the exact released 0.9.0 workflow migrates to the restored note/card split");
+  rmSync(d6, { recursive: true, force: true });
 });
 
 test("audit on a suppression-free repo is clean, not an error", () => {
@@ -1850,10 +1937,16 @@ test("--metrics-out refuses to clobber a protected artifact", () => {
   rmSync(r, { recursive: true, force: true });
 });
 
-test("compatibility aliases annotate/accept create only plane files, never legacy journals", () => {
+test("annotate restores digest notes while annotate-draft/accept remain the explicit review path", () => {
   const { r, sha } = mkHistoryRepo();
-  const drafted = execFileSync(process.execPath,
+  const annotated = execFileSync(process.execPath,
     [CLI, "annotate", sha, "pool removal was deliberate", "--span", "remove sync.Pool", "--side", "message", "--by", "codex", r],
+    { encoding: "utf8" });
+  assert.match(annotated, /saved unreviewed note/);
+  assert.match(readFileSync(join(r, "LOGBOOK.md"), "utf8"), /Unreviewed agent notes[\s\S]*pool removal was deliberate/);
+  assert.ok(existsSync(join(r, "annotations.jsonl")));
+  const drafted = execFileSync(process.execPath,
+    [CLI, "annotate-draft", sha, "pool removal needs human authority", "--span", "remove sync.Pool", "--side", "message", "--by", "codex", r],
     { encoding: "utf8" });
   const cardId = drafted.match(/[0-9a-f]{64}/)?.[0];
   assert.ok(cardId, drafted);
@@ -1862,8 +1955,197 @@ test("compatibility aliases annotate/accept create only plane files, never legac
   assert.ok(existsSync(join(r, ".logbook", "decisions", cardId + ".json")));
   assert.ok(existsSync(join(r, ".logbook", "reviews", cardId + ".json")));
   assert.ok(!existsSync(join(r, ".logbook", "drafts", cardId + ".json")));
-  assert.ok(!existsSync(join(r, "annotations.jsonl")));
   assert.ok(!existsSync(join(r, "annotation-reviews.jsonl")));
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("turnkey notes render immediately, retry idempotently, supersede by SHA, and survive refresh", () => {
+  const { r, sha } = mkHistoryRepo();
+  const first = execFileSync(process.execPath,
+    [CLI, "annotate", sha, "pool removal prevents reuse after fork", "--by", "codex", r],
+    { encoding: "utf8" });
+  assert.match(first, /saved unreviewed note/);
+  const store = join(r, "annotations.jsonl");
+  const beforeRetry = readFileSync(store);
+  assert.match(readFileSync(join(r, "LOGBOOK.md"), "utf8"),
+    /Unreviewed agent notes[\s\S]*Machine-authored leads, not reviewed decisions[\s\S]*pool removal prevents reuse/);
+  execFileSync(process.execPath,
+    [CLI, "annotate", sha, "pool removal prevents reuse after fork", "--by", "codex", r], { encoding: "utf8" });
+  assert.deepEqual(readFileSync(store), beforeRetry, "an exact retry does not grow or rewrite the append journal");
+  execFileSync(process.execPath,
+    [CLI, "annotate", sha, "pool removal prevents inherited stale state", "--by", "codex", r], { encoding: "utf8" });
+  const state = loadDigestNotes(r);
+  assert.equal(state.notes.length, 1, "last valid note per immutable SHA is the active note");
+  assert.equal(state.notes[0].why, "pool removal prevents inherited stale state");
+  execFileSync(process.execPath, [CLI, r, "-q"], { encoding: "utf8" });
+  const refreshed = readFileSync(join(r, "LOGBOOK.md"), "utf8");
+  assert.match(refreshed, /pool removal prevents inherited stale state/);
+  assert.doesNotMatch(refreshed, /pool removal prevents reuse after fork/);
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("digest notes are bounded, visibly unreviewed, sanitized, and malformed rows are omitted", () => {
+  const opts = { max: 5000, since: null, until: null };
+  const events = collectEvents(repo, opts); diffScan(repo, events, opts);
+  const A = analyze(events, hotspots(repo, opts));
+  const notes = Array.from({ length: 30 }, (_, i) => ({
+    sha: i.toString(16).padStart(40, "0"), why: `${i}: ${"&".repeat(350)}`,
+    by: "[human-reviewed](https://evil) @AGENTS.md", date: "2026-07-15",
+    side: null, evidenceFile: null, span: null,
+  }));
+  const digest = renderLogbookMd("fixture", A, false, false, { notes, malformed: 2, error: null });
+  assert.match(digest, /Machine-authored leads, not reviewed decisions.*never consumed by `check --diff`/);
+  assert.match(digest, /2 malformed note rows were omitted/);
+  assert.match(digest, /GIT_GRAFT_FILE=.*git --no-replace-objects show/,
+    "the suggested verification command cannot be redirected by a replacement ref or graft");
+  assert.match(digest, /and \d+ older unreviewed notes/);
+  assert.doesNotMatch(digest, /\[human-reviewed\]\(https:\/\/evil\)|@AGENTS\.md/,
+    "repository-controlled attribution cannot manufacture authority or imports");
+  const section = digest.slice(digest.indexOf("## Unreviewed agent notes"), digest.indexOf("## Notable events"));
+  assert.ok(Buffer.byteLength(section) < 10 * 1024, "the section stays close to its 8 KiB row budget plus labels");
+});
+
+test("unsafe or corrupt note stores never block history rendering or redirect a write", () => {
+  {
+    const { r, sha } = mkHistoryRepo();
+    assert.match(saveAnnotation(r, r, { sha: [sha], why: "type confusion", by: "codex" }).error, /string/);
+    rmSync(r, { recursive: true, force: true });
+  }
+  const variants = ["symlink", "hardlink", "fifo", "directory"];
+  for (const variant of variants) {
+    const { r, sha } = mkHistoryRepo();
+    const notePath = join(r, "annotations.jsonl");
+    const outside = join(r, "outside.txt"); writeFileSync(outside, "sentinel");
+    if (variant === "symlink") symlinkSync(outside, notePath);
+    if (variant === "hardlink") linkSync(outside, notePath);
+    if (variant === "fifo") execFileSync("mkfifo", [notePath]);
+    if (variant === "directory") mkdirSync(notePath);
+    const saved = saveAnnotation(r, r, { sha, why: "must not escape", by: "codex" });
+    assert.ok(saved.error, `${variant} target is refused`);
+    assert.equal(readFileSync(outside, "utf8"), "sentinel");
+    rmSync(r, { recursive: true, force: true });
+  }
+
+  const { r } = mkHistoryRepo();
+  writeFileSync(join(r, "annotations.jsonl"), Buffer.from([0xff, 0x0a]));
+  execFileSync(process.execPath, [CLI, r, "-q"], { encoding: "utf8" });
+  assert.match(readFileSync(join(r, "LOGBOOK.md"), "utf8"), /note store could not be read safely \(invalid UTF-8\)/);
+  const doctor = spawnSync(process.execPath, [CLI, "doctor", r], { encoding: "utf8" });
+  assert.equal(doctor.status, 1);
+  assert.match(doctor.stdout, /FAIL notes: annotations\.jsonl cannot be read safely \(invalid UTF-8\)/);
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("note appends enforce the 8 MiB cap before writing and never brick the store", () => {
+  const { r, sha } = mkHistoryRepo();
+  const path = join(r, "annotations.jsonl"), cap = 8 << 20;
+  writeFileSync(path, Buffer.alloc(cap - 100, 0x20));
+  const before = statSync(path).size;
+  const result = saveAnnotation(r, r, { sha, why: "this row cannot fit under the cap", by: "codex" });
+  assert.match(result.error, /exceed.*byte limit/);
+  assert.equal(statSync(path).size, before, "a refused append leaves the readable store byte-identical in size");
+  assert.equal(loadDigestNotes(r).error, null, "refusal does not strand all existing notes behind an oversized file");
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("a note append error cannot hide a stuck-lock cleanup failure", async () => {
+  const { r, sha } = mkHistoryRepo();
+  const path = join(r, "annotations.jsonl"), lock = join(r, ".git", "logbook-notes.lock");
+  writeFileSync(path, Buffer.alloc((8 << 20) - 100, 0x20));
+  const watcherCode = `
+    const fs = require("node:fs"), path = require("node:path"), lock = ${JSON.stringify(lock)};
+    const wait = new Int32Array(new SharedArrayBuffer(4)), until = Date.now() + 3000;
+    while (Date.now() < until) {
+      if (fs.existsSync(lock)) { fs.writeFileSync(path.join(lock, "held"), "x"); process.exit(0); }
+      Atomics.wait(wait, 0, 0, 1);
+    }
+    process.exit(2);
+  `;
+  const watcher = spawn(process.execPath, ["-e", watcherCode], { stdio: "ignore" });
+  const watcherDone = new Promise((resolvePromise, rejectPromise) => {
+    watcher.once("error", rejectPromise); watcher.once("close", resolvePromise);
+  });
+  const result = spawnSync(process.execPath, [CLI, "annotate", sha,
+    "this row cannot fit and cleanup must stay visible", "--by", "codex", r], { encoding: "utf8" });
+  assert.equal(await watcherDone, 0, "watcher made the acquired lock non-empty before cleanup");
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /append would exceed.*note lock not released.*remove logbook-notes\.lock/s);
+  assert.ok(existsSync(lock), "the surfaced warning corresponds to the lock that blocks later writes");
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("unsafe event cache cannot hang annotate after its note is saved", { skip: process.platform === "win32" }, () => {
+  const { r, sha } = mkHistoryRepo();
+  execFileSync(process.execPath, [CLI, "init", r, "-q"], { encoding: "utf8" });
+  rmSync(join(r, "events.jsonl"));
+  execFileSync("mkfifo", [join(r, "events.jsonl")]);
+  const started = Date.now();
+  const result = spawnSync("timeout", ["3", process.execPath, CLI, "annotate", sha,
+    "saved despite an unsafe cache", "--by", "codex", r], { encoding: "utf8" });
+  assert.notEqual(result.status, 124, "a FIFO cache cannot block the command indefinitely");
+  assert.ok(Date.now() - started < 2900);
+  assert.equal(result.status, 1, "unsafe managed output is reported instead of claimed as complete");
+  assert.match(result.stderr, /saved unreviewed note.*digest artifacts could not be replaced safely/s);
+  assert.match(readFileSync(join(r, "annotations.jsonl"), "utf8"), /saved despite an unsafe cache/);
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("doctor binds LOGBOOK.md to the current logical note snapshot", () => {
+  const { r, sha } = mkHistoryRepo();
+  execFileSync(process.execPath, [CLI, "init", r, "-q"], { encoding: "utf8" });
+  assert.equal(saveAnnotation(r, r, { sha, why: "saved after the last digest", by: "codex" }).error, undefined);
+  const noteBeforeDoctor = readFileSync(join(r, "annotations.jsonl"));
+  const digestBeforeDoctor = readFileSync(join(r, "LOGBOOK.md"));
+  const stale = spawnSync(process.execPath, [CLI, "doctor", r], { encoding: "utf8" });
+  assert.equal(stale.status, 1);
+  assert.match(stale.stdout, /FAIL notes: LOGBOOK\.md does not match the current unreviewed-note snapshot/);
+  assert.deepEqual(readFileSync(join(r, "annotations.jsonl")), noteBeforeDoctor);
+  assert.deepEqual(readFileSync(join(r, "LOGBOOK.md")), digestBeforeDoctor,
+    "doctor reports stale note memory without repairing it");
+  execFileSync(process.execPath, [CLI, r, "-q"], { encoding: "utf8" });
+  const current = spawnSync(process.execPath, [CLI, "doctor", r], { encoding: "utf8" });
+  assert.notEqual(current.status, 1);
+  assert.match(current.stdout, /PASS notes: 1 unreviewed note rendered in the current digest/);
+  writeFileSync(join(r, "annotations.jsonl"),
+    readFileSync(join(r, "annotations.jsonl"), "utf8") + "{malformed}\n");
+  execFileSync(process.execPath, [CLI, r, "-q"], { encoding: "utf8" });
+  const malformed = spawnSync(process.execPath, [CLI, "doctor", r], { encoding: "utf8" });
+  assert.equal(malformed.status, 0);
+  assert.match(malformed.stdout, /WARN notes: 1 malformed note row was omitted/);
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("notes confer zero authority and init never turns them into pending drafts", () => {
+  const { r, sha, g } = mkHistoryRepo();
+  const note = saveAnnotation(r, r, { sha, why: "unreviewed only", by: "human-reviewed" });
+  assert.equal(note.error, undefined);
+  g("add", "annotations.jsonl"); g("commit", "-qm", "record unreviewed note");
+  execFileSync(process.execPath, [CLI, "init", r, "-q"], { encoding: "utf8" });
+  const pending = execFileSync(process.execPath, [CLI, "pending", r], { encoding: "utf8" });
+  assert.match(pending, /no draft decisions awaiting acceptance/);
+  assert.equal(existsSync(join(r, ".logbook", "drafts")) &&
+    readdirSync(join(r, ".logbook", "drafts")).some((f) => f.endsWith(".json")), false);
+  const checked = checkDecisions(r);
+  assert.equal(checked.result, "not-configured");
+  assert.equal(checked.leads.length, 0);
+  const outcomes = computeReviewOutcomes(r);
+  assert.equal(outcomes.counts?.reviewed || 0, 0);
+  assert.match(readFileSync(join(r, "LOGBOOK.md"), "utf8"), /unreviewed only/);
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("versioned machine notes are never legacy-migrated, while schema-less 0.8 rows still render", () => {
+  const { r, sha } = mkHistoryRepo();
+  assert.equal(saveAnnotation(r, r, { sha, why: "new versioned note", by: "codex" }).error, undefined);
+  const migrated = migrateLegacyToDrafts(r);
+  assert.equal(migrated.drafted.length, 0);
+  assert.ok(migrated.skipped.some((row) => row.reason === "current-machine-note"));
+  rmSync(join(r, ".logbook"), { recursive: true, force: true });
+  writeFileSync(join(r, "annotations.jsonl"), JSON.stringify({
+    sha, why: "legacy visible note", by: "old-agent", date: "2024-01-01",
+  }) + "\n");
+  execFileSync(process.execPath, [CLI, r, "-q"], { encoding: "utf8" });
+  assert.match(readFileSync(join(r, "LOGBOOK.md"), "utf8"), /legacy visible note/);
   rmSync(r, { recursive: true, force: true });
 });
 
@@ -1876,7 +2158,7 @@ test("doctor surfaces the pending-draft review count (read-only)", () => {
   const sha = execFileSync("git", ["-C", d, "rev-parse", "HEAD"], { env, encoding: "utf8" }).trim();
   execFileSync(process.execPath, [CLI, "init", d, "-q"], { env });
   execFileSync(process.execPath,
-    [CLI, "annotate", sha, "decided X", d, "--span", "c1", "--side", "message", "--by", "codex", "-q"],
+    [CLI, "annotate-draft", sha, "decided X", d, "--span", "c1", "--side", "message", "--by", "codex", "-q"],
     { env });
   const out = execFileSync(process.execPath, [CLI, "doctor", d], { env, encoding: "utf8" });
   assert.match(out, /draft decision.*await human acceptance/);
@@ -2287,8 +2569,9 @@ test("migration is one-way: existing drafts and committed/staged dispositions ar
     assert.equal(repeat.drafted.length, 0);
     assert.ok(repeat.skipped.some((s) => s.reason === "already-dispositioned" && s.cardId === card.cardId));
     assert.ok(!existsSync(join(d, ".logbook", "drafts", card.cardId + ".json")));
-    const init = execFileSync(process.execPath, [CLI, "init", d], { encoding: "utf8" });
-    assert.match(init, /legacy annotations → 0 inert drafts?; 1 row skipped\/reported/);
+    execFileSync(process.execPath, [CLI, "init", d], { encoding: "utf8" });
+    assert.match(readFileSync(join(d, "LOGBOOK.md"), "utf8"), /Unreviewed agent notes[\s\S]*legacy pool decision/,
+      "init renders the legacy note but does not recreate a review draft");
     const pending = execFileSync(process.execPath, [CLI, "pending", d], { encoding: "utf8" });
     assert.match(pending, /no draft decisions awaiting acceptance/);
     rmSync(d, { recursive: true, force: true });
@@ -3235,7 +3518,8 @@ test("stage4b: a promoted human decision surfaces in check as human-reviewed + a
 
 test("stage4b: accept-draft refuses an unknown draft; lead disposition records reviewer provenance too", () => {
   const { d, g, sha } = policyRepo("s4brev-", GOOD_TOML);
-  assert.match(acceptDraft(d, "a".repeat(64), { by: "matthew" }).error, /no local draft/);
+  assert.match(acceptDraft(d, "a".repeat(64), { by: "matthew" }).error,
+    /no local draft.*run annotate-draft first/);
   // acceptLead now also writes a review record separating reviewer from machine proposer
   const lead = mkDecision({ sha, evidenceFile: "src/db.js", span: "createPool", scopes: ["src/db.js"], by: "auto-policy" });
   writeCard(d, g, "leads", lead); g("commit", "-qm", "publish lead");

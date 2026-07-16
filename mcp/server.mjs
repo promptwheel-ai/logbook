@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // @promptwheel/logbook-mcp — the logbook over MCP, for clients without a shell.
-// Five tools wrapping the zero-dep core: digest, annotate, audit, query,
-// and bounded context pages.
+// Six tools wrapping the zero-dep core: digest, unreviewed annotation,
+// reviewable drafting, audit, query, and bounded context pages.
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -9,6 +9,7 @@ import { execFileSync } from "node:child_process";
 import {
   collectEvents, diffScan, hotspots, analyze, renderLogbookMd,
   auditHead, queryEvents, loadEvents, annotateDraft,
+  loadDigestNotes, saveAnnotation, refreshDigestNotes,
   formatContextPage, sanitizeContextText,
 } from "@promptwheel/logbook";
 
@@ -69,7 +70,7 @@ function progressFor(extra) {
   }).catch(() => {});
 }
 
-const server = new McpServer({ name: "logbook", version: "0.5.0" });
+const server = new McpServer({ name: "logbook", version: "0.5.1" });
 
 server.registerTool(
   "logbook_digest",
@@ -81,34 +82,63 @@ server.registerTool(
   async ({ repo }, extra) => {
     const { A, capped } = pipeline(repo, progressFor(extra));
     const root = rootOf(repo);
-    return { content: [{ type: "text", text: renderLogbookMd(root.split("/").pop(), A, false, capped) }] };
+    return { content: [{ type: "text", text: renderLogbookMd(root.split("/").pop(), A, false, capped, loadDigestNotes(root)) }] };
   }
 );
 
 server.registerTool(
   "logbook_annotate",
   {
-    description: "Create a local, inert decision draft after investigating a commit. The quoted evidence is raw-object verified; only a human can promote the returned card ID into the trusted decision plane.",
+    description: "Persist a machine-authored, explicitly unreviewed note after investigating a commit. It appears immediately in the repo digest but never enters check --diff authority. Optional quoted evidence is raw-object verified.",
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     inputSchema: {
     repo: z.string().describe("absolute path to the git repository"),
     sha: z.string().describe("the commit being explained (any unique prefix)"),
     why: z.string().describe("the inferred cause, one sentence, specific (max 400 chars)"),
-    span: z.string().min(1).max(600).describe("an exact contiguous quote from the commit message or changed blob"),
-    side: z.enum(["message", "diff"]).describe("where the exact evidence quote occurs"),
+    span: z.string().min(1).max(600).optional().describe("optional exact contiguous quote from the commit message or changed blob"),
+    side: z.enum(["message", "diff"]).optional().describe("required when span is present: where the exact evidence quote occurs"),
     evidenceFile: z.string().optional().describe("required literal changed path when side=diff; omit for message"),
     by: z.string().optional().describe("who inferred it (model/agent name)"),
     },
   },
   async ({ repo: repoArg, sha, why, span, side, evidenceFile, by }) => {
     const repo = rootOf(repoArg);
-    if ((side === "diff") !== Boolean(evidenceFile)) return { content: [{ type: "text", text: side === "diff"
+    if (!span && (side || evidenceFile)) return { content: [{ type: "text", text: "side/evidenceFile require span" }], isError: true };
+    if (span && (side === "diff") !== Boolean(evidenceFile)) return { content: [{ type: "text", text: side === "diff"
       ? "diff evidence requires evidenceFile"
       : "message evidence must not name evidenceFile" }], isError: true };
+    const note = saveAnnotation(repo, repo, { sha, why, span, side, evidenceFile, by });
+    if (note.error) return { content: [{ type: "text", text: sanitizeContextText(note.error, 700) }], isError: true };
+    const refreshed = refreshDigestNotes(repo, DEFAULTS);
+    if (refreshed.error) return { content: [{ type: "text", text: `saved unreviewed note ${note.sha.slice(0, 8)}, but digest refresh failed: ${sanitizeContextText(refreshed.error, 700)}` }], isError: true };
+    if (note.cleanupWarning) return { content: [{ type: "text", text: `saved unreviewed note ${note.sha.slice(0, 8)} and refreshed LOGBOOK.md, but ${sanitizeContextText(note.cleanupWarning, 700)}` }], isError: true };
+    return { content: [{ type: "text", text: `saved unreviewed note ${note.sha.slice(0, 8)} (recorded by ${sanitizeContextText(by || "agent", 512)}) — visible in LOGBOOK.md; never accepted or consumed by check --diff` }] };
+  }
+);
+
+server.registerTool(
+  "logbook_annotate_draft",
+  {
+    description: "Create a local, inert evidence-bearing decision card for optional human review. Only a human can promote the returned card ID into the trusted decision plane.",
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    inputSchema: {
+      repo: z.string().describe("absolute path to the git repository"),
+      sha: z.string().describe("the commit being explained (any unique prefix)"),
+      why: z.string().describe("the proposed decision claim, one sentence (max 400 chars)"),
+      span: z.string().min(1).max(600).describe("an exact contiguous quote from the commit message or changed blob"),
+      side: z.enum(["message", "diff"]).describe("where the exact evidence quote occurs"),
+      evidenceFile: z.string().optional().describe("required literal changed path when side=diff; omit for message"),
+      by: z.string().optional().describe("who proposed it (model/agent name)"),
+    },
+  },
+  async ({ repo: repoArg, sha, why, span, side, evidenceFile, by }) => {
+    const repo = rootOf(repoArg);
+    if ((side === "diff") !== Boolean(evidenceFile)) return { content: [{ type: "text", text: side === "diff"
+      ? "diff evidence requires evidenceFile" : "message evidence must not name evidenceFile" }], isError: true };
     const draft = annotateDraft(repo, { sha, why, span, side, evidenceFile, by });
     if (draft.error) return { content: [{ type: "text", text: sanitizeContextText(draft.error, 700) }], isError: true };
     return { content: [{ type: "text", text: `drafted ${draft.cardId} for ${draft.sha.slice(0, 8)} (proposed by ${sanitizeContextText(by || "agent", 512)}) — local and inert; a human may run logbook accept-draft ${draft.cardId} --by WHO` }] };
-  }
+  },
 );
 
 server.registerTool(

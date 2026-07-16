@@ -5,7 +5,9 @@
 > **0.9 instrumented alpha.** The deterministic history layer is ready for
 > use. The opt-in temporal decision layer has a hardened trust boundary, but
 > review adoption, downstream task utility, and token ROI are still being
-> measured. Version `0.9.0` is the release candidate for npm's `next` channel.
+> measured. Version `0.9.1` is the corrective release candidate for npm's
+> `next` channel: immediate unreviewed enrichment is restored, while the
+> reviewed decision workflow remains optional.
 
 **Git history is large. When coding agents do not inspect it, they can
 re-propose approaches a repository already rejected.**
@@ -22,7 +24,7 @@ objects for evidence checks, and never sends repository data anywhere.
 Node.js 18 or newer is required.
 
 ```bash
-npx -y @promptwheel/logbook@0.9.0 init
+npx -y @promptwheel/logbook@0.9.1 init
 ```
 
 `init` analyzes the repo, writes the history artifacts, and installs a compact
@@ -37,7 +39,7 @@ workflow in `AGENTS.md`, `CLAUDE.md`, or `.cursorrules`.
 ```
 
 The examples below use `logbook` as the binary name. Run them through the exact
-package above, or install `@promptwheel/logbook@0.9.0` locally or globally.
+package above, or install `@promptwheel/logbook@0.9.1` locally or globally.
 
 ## What it stores
 
@@ -48,6 +50,11 @@ package above, or install `@promptwheel/logbook@0.9.0` locally or globally.
 | `LOGBOOK.md` | Bounded history brief for agents: hotspots, do-not-retry reverts, suppressions, weakened assertions, and fragile areas |
 | `events.jsonl` | Structured deterministic history events for tools and queries |
 | `JOURNEY.md` | Human-readable narrative of the repository's history |
+
+`annotate` separately creates `annotations.jsonl`: durable machine-authored
+notes shown in the digest as explicitly unreviewed leads, never consumed by
+`check --diff`. Commit that file to share the notes with the team, or add it to
+`.gitignore` to keep them local to one checkout.
 
 The optional decision workflow adds state only as cards are drafted or
 published. Cold start does not bulk-generate decisions or a review backlog.
@@ -74,8 +81,21 @@ logbook audit
 logbook doctor
 ```
 
-When an agent investigates a prior decision during real work, it can preserve
-the result as an inert draft:
+When an agent investigates why a prior change happened during real work, it can
+preserve the result immediately—no prompt or human gate:
+
+```bash
+logbook annotate <commit> "why this approach was rejected" --by codex
+```
+
+The note is durably appended to `annotations.jsonl` and appears in
+`LOGBOOK.md` before the command exits. It is always labeled machine-authored
+and unreviewed, is bounded in the startup digest, and can never become a
+reviewed decision or enter `check --diff`. An optional exact quote can be
+attached with `--span`, `--side`, and (for diff evidence) `--evidence-file`.
+
+When a particular finding needs human authority, use the separate reviewed
+card workflow:
 
 ```bash
 logbook annotate-draft <commit> "why this approach was rejected" \
@@ -87,11 +107,9 @@ logbook annotate-draft <commit> "why this approach was rejected" \
 logbook pending
 ```
 
-`annotate` is a compatibility alias for `annotate-draft`. A message citation
-uses `--side message` and no `--evidence-file`. A claim supplied directly by a
-human may omit a span, but an agent should cite evidence whenever its claim is
-derived from Git. An absent or unverifiable quote is rejected rather than
-guessed.
+`annotate-draft` is explicit: it creates an inert local card and returns a full
+card ID. A message citation uses `--side message` and no `--evidence-file`.
+An absent or unverifiable quote is rejected rather than guessed.
 
 A person reviews the complete draft and promotes the exact card:
 
@@ -122,6 +140,8 @@ later cards have not been checked yet; only `END complete` can finish cleanly.
 
 Logbook never converts model confidence into authority.
 
+- **Unreviewed digest note** — immediate machine-authored recall in
+  `LOGBOOK.md`. It is outside the decision planes and never enters `check`.
 - **Draft** — local and inert. It cannot surface in `check --diff`.
 - **Policy-published lead** — machine-authored, grounded and admitted by a
   repository-owned policy. It surfaces as a conspicuous lead, not as a human
@@ -231,12 +251,15 @@ unverifiable trust state, and to prevent drafts or leads from being displayed
 as human-reviewed without an exact matching review record. It does not make a
 hostile committer trustworthy; protect the branch that supplies authority.
 
-## Upgrading from 0.8
+## Upgrading from 0.8 or 0.9.0
 
-On `init` or a normal refresh, legacy `annotations.jsonl` rows are imported as
-local, gitignored `legacy_unverified` drafts. No old acceptance or authority is
-transferred. Logbook reports every imported or skipped row; a person must review
-and promote any legacy draft that should become a decision in the new planes.
+Existing `annotations.jsonl` rows remain unreviewed digest notes and render
+again; `init` does not turn them into a review backlog. Existing 0.9.0 drafts
+remain local and inert. In 0.9.1, `annotate` once again means immediate digest
+enrichment. A 0.9.0 script that expects `annotate` to return a card ID must use
+the explicit `annotate-draft` command instead. If 0.8 wrote annotations to a
+custom `--out` directory, move that `annotations.jsonl` to the repository root;
+0.9.1 intentionally keeps the note store at one unambiguous location.
 
 ## Command reference
 
@@ -249,7 +272,8 @@ logbook doctor [path]
 logbook query [path] [filters]
 logbook context [path] [filters] [--cursor TOKEN]
 
-logbook annotate|annotate-draft SHA "WHY" [evidence options] [--by WHO]
+logbook annotate SHA "WHY" [optional evidence] [--by WHO]
+logbook annotate-draft SHA "WHY" [evidence options] [--by WHO]
 logbook pending [path]
 logbook refine [path] [--limit N]
 logbook accept|accept-draft CARDID --by WHO [--file P ...] [--dir P/]
@@ -287,7 +311,10 @@ was 82× larger. See [context economics](docs/context-economics.md) and the
 
 ## Evidence status
 
-The deterministic history inventory showed value on selected history-dense
+The earlier enrichment benchmark directionally favored immediate annotations:
+the annotated arm recovered the planted failure cause while the unannotated arm
+guessed, but only 2 of 8 tasks were spot-checked, so this is not economic proof.
+The deterministic history inventory also showed value on selected history-dense
 planning tasks. A later sealed held-out screen found no advantage over a strong
 raw-Git instruction because task-facing retrieval delivered none of the sealed
 lineage items. The new diff-time decision path addresses that delivery failure,

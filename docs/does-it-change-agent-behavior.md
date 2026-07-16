@@ -45,7 +45,7 @@ the old failure mode with a test before refactoring.
 
 One trial, one scenario, planning-only. The scenario was chosen because it is
 the tool's core claim (do-not-retry), not at random. Reproduce it: run
-`npx -y @promptwheel/logbook@0.9.0` on any repo with a meaningful revert history (the
+`npx -y @promptwheel/logbook@0.9.1` on any repo with a meaningful revert history (the
 median in our random 400-repo sample had 10 reverts) and ask an agent to plan a
 change adjacent to a reverted one, with and without LOGBOOK.md in context.
 
