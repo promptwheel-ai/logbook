@@ -251,6 +251,26 @@ unverifiable trust state, and to prevent drafts or leads from being displayed
 as human-reviewed without an exact matching review record. It does not make a
 hostile committer trustworthy; protect the branch that supplies authority.
 
+## Open Knowledge Format export
+
+Logbook can project the reviewed decision plane into an
+[Open Knowledge Format (OKF) 0.1](docs/okf-export.md) Markdown bundle:
+
+```bash
+logbook export . --format okf --out ./logbook-okf --ref HEAD
+```
+
+The export is deterministic for one pinned Git commit and includes readable
+decision pages, a neutral manifest, exact native card/review receipts, and a
+file-hash receipt. It exports byte-bound human-reviewed decisions by default;
+machine leads, local drafts, and unreviewed digest notes are not silently
+promoted into the bundle.
+
+OKF is an interoperability view, not another trust plane. Canonical authority
+stays under `.logbook/`; editing or committing an exported Markdown page cannot
+create, accept, or change a Logbook decision. The first exporter is deliberately
+one-way and refuses to overwrite an existing output directory.
+
 ## Upgrading from 0.8 or 0.9.0
 
 Existing `annotations.jsonl` rows remain unreviewed digest notes and render
@@ -284,6 +304,7 @@ logbook reject-lead CARDID --by WHO
 logbook outcomes [path]
 logbook check --diff [--base SHA --head SHA] [--cursor TOKEN]
                      [--metrics-out PATH]
+logbook export [path] --format okf --out NEW_DIR [--ref REF]
 ```
 
 `refine` is a deterministic worklist of unannotated notable history. It does

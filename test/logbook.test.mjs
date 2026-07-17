@@ -26,6 +26,8 @@ import {
   acceptLead, rejectLead, computeReviewOutcomes, renderReviewOutcomes, renderPublish,
   annotateDraft, acceptDraft, parseReview, serializeReview, REVIEW_SCHEMA,
   loadDigestNotes, saveAnnotation,
+  buildOkfProjection, exportOkfProjection, parseOkfDecisionConcept,
+  OKF_VERSION, OKF_EXPORT_SCHEMA, OKF_SPEC_COMMIT,
 } from "../bin/logbook.mjs";
 
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "bin", "logbook.mjs");
@@ -3941,4 +3943,350 @@ test("stage4b: `publish` installed-CLI — stdin parse, size bound, device rejec
   const dev = run("", ["--candidates", "/dev/zero"]);            // a device path is refused, no OOM/hang
   assert.equal(dev.status, 1); assert.match(dev.stderr, /regular file/);
   rmSync(d, { recursive: true, force: true });
+});
+
+// ---------- OKF v0.1: deterministic, one-way reviewed-decision projection ---
+function reviewedOkfRepo(prefix, overrides = {}) {
+  const { d, g, sha } = poolRepo(prefix);
+  const card = mkDecision({ sha, evidenceFile: "src/db.js", span: "createPool",
+    scopes: ["src/db.js"], claim: "pooling: keep #1 [safe](https://example.invalid)", ...overrides });
+  writeCard(d, g, "decisions", card);
+  const review = writeReviewFile(d, g, card, { source: "lead", reviewedBy: "matthew" });
+  g("commit", "-qm", "review decision");
+  return { d, g, sha, card, review, commit: g("rev-parse", "HEAD").trim() };
+}
+function projectionFile(projection, path) {
+  return projection.files.find((file) => file.path === path)?.content;
+}
+function stableTestValue(value) {
+  if (value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map(stableTestValue);
+  return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stableTestValue(value[key])]));
+}
+
+test("OKF CLI args are explicit and keep the output/ref contract", () => {
+  const o = parseArgs(["export", "/some/repo", "--format", "okf", "--out", "/tmp/new-okf", "--ref", "stable"]);
+  assert.equal(o.cmd, "export");
+  assert.equal(o.repo, "/some/repo");
+  assert.equal(o.format, "okf");
+  assert.equal(o.out, "/tmp/new-okf");
+  assert.equal(o.ref, "stable");
+  assert.deepEqual(parseArgs(["export", "a", "b", "--format", "okf", "--out", "c"])._extraPositionals, ["b"]);
+});
+
+test("OKF projection round-trips one reviewed decision and copies exact native receipts", () => {
+  const { d, card, review, commit } = reviewedOkfRepo("okf-roundtrip-");
+  const p = buildOkfProjection(d);
+  assert.equal(p.error, undefined);
+  assert.equal(p.exitCode, 0);
+  assert.equal(p.recordCount, 1);
+  assert.equal(p.trustCommit, commit);
+  assert.equal(p.manifest.okfVersion, OKF_VERSION);
+  assert.equal(p.manifest.okfSpecCommit, OKF_SPEC_COMMIT);
+  assert.equal(p.receipt.exporter.schema, OKF_EXPORT_SCHEMA);
+  assert.equal(p.receipt.authoritySource, ".logbook/ (projection is never imported)");
+
+  const conceptPath = `decisions/${card.cardId}.md`;
+  const concept = projectionFile(p, conceptPath);
+  const parsed = parseOkfDecisionConcept(concept);
+  assert.ok(parsed);
+  assert.equal(parsed.record.id, card.cardId);
+  assert.equal(parsed.record.claim, card.claim);
+  assert.equal(parsed.record.authority.tier, "human-reviewed");
+  assert.equal(parsed.record.authority.current, true);
+  assert.equal(parsed.record.source.evidenceStatus, "grounded");
+  assert.equal(parsed.record.review.reviewedBy, "matthew");
+  assert.equal(projectionFile(p, `receipts/cards/${card.cardId}.json`), serializeDecisionCard(card));
+  assert.equal(projectionFile(p, `receipts/reviews/${card.cardId}.json`), serializeReview(review));
+  assert.match(projectionFile(p, "index.md"), /^---\nokf_version: "0\.1"\n---\n/);
+  assert.doesNotMatch(projectionFile(p, "decisions/index.md"), /^---/);
+  assert.match(concept, /Grounding establishes only/);
+  assert.doesNotMatch(parsed.body, /\[safe\]\(https:\/\/example\.invalid\)/,
+    "repository-authored Markdown is inert in the rendered body/index");
+  assert.match(parsed.body, /&#91;safe&#93;&#40;https&#58;\/\/example\.invalid&#41;/);
+  assert.equal(parseOkfDecisionConcept(concept + "\nFORGED BODY\n"), null,
+    "the strict Logbook subset binds the full canonical Markdown page");
+  const wrongDecisionHash = "b".repeat(64);
+  const wrongReviewRecord = { ...review, decisionCardSha256: wrongDecisionHash };
+  const wrongReviewBytesHash = sha256(serializeReview(wrongReviewRecord));
+  const wrongNeutralRecord = {
+    ...parsed.record,
+    review: {
+      ...parsed.record.review,
+      decisionCardSha256: wrongDecisionHash,
+      canonicalBytesSha256: wrongReviewBytesHash,
+    },
+  };
+  const wrongNeutralHash = sha256(JSON.stringify(stableTestValue(wrongNeutralRecord)));
+  const wrongReview = concept
+    .replace(
+      /x-logbook-decision-card-sha256: "[0-9a-f]{64}"/,
+      `x-logbook-decision-card-sha256: "${wrongDecisionHash}"`,
+    )
+    .replace(
+      /x-logbook-review-bytes-sha256: "[0-9a-f]{64}"/,
+      `x-logbook-review-bytes-sha256: "${wrongReviewBytesHash}"`,
+    )
+    .replace(
+      /x-logbook-neutral-record-sha256: "[0-9a-f]{64}"/,
+      `x-logbook-neutral-record-sha256: "${wrongNeutralHash}"`,
+    );
+  assert.equal(parseOkfDecisionConcept(wrongReview), null,
+    "even a coherently rehashed page cannot claim review for different decision bytes");
+
+  const receipt = p.receipt;
+  const expectedCovered = p.files
+    .filter((file) => file.path !== "receipts/projection-receipt.json")
+    .map((file) => ({ path: file.path, bytes: Buffer.byteLength(file.content), sha256: sha256(file.content) }))
+    .sort((a, b) => Buffer.from(a.path).compare(Buffer.from(b.path)));
+  assert.deepEqual(receipt.files, expectedCovered,
+    "the receipt covers every non-receipt output exactly once and nothing else");
+  assert.equal(receipt.coveredFileCount, expectedCovered.length);
+  assert.equal(receipt.coveredBytes, expectedCovered.reduce((sum, file) => sum + file.bytes, 0));
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("OKF projection is byte-identical for HEAD, tag, and OID and ignores dirty trust-plane edits", () => {
+  const { d, g, card, commit } = reviewedOkfRepo("okf-determinism-");
+  g("tag", "okf-freeze", commit);
+  const byHead = buildOkfProjection(d, { ref: "HEAD" });
+  const byTag = buildOkfProjection(d, { ref: "okf-freeze" });
+  const byOid = buildOkfProjection(d, { ref: commit });
+  assert.deepEqual(byTag.files, byHead.files);
+  assert.deepEqual(byOid.files, byHead.files);
+  assert.equal(byTag.projectionDigest, byHead.projectionDigest);
+
+  const dirty = { ...card, claim: "WORKTREE MUST NOT LEAK" };
+  writeFileSync(join(d, ".logbook", "decisions", `${card.cardId}.json`), serializeDecisionCard(dirty));
+  writeFileSync(join(d, ".logbook", "reviews", `${card.cardId}.json`), "worktree junk\n");
+  const afterDirty = buildOkfProjection(d, { ref: "HEAD" });
+  assert.deepEqual(afterDirty.files, byHead.files);
+  assert.doesNotMatch(JSON.stringify(afterDirty.files), /WORKTREE MUST NOT LEAK|worktree junk/);
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("OKF projection fails closed on any malformed plane entry or byte-mismatched review", () => {
+  const { d, g, card } = reviewedOkfRepo("okf-malformed-");
+  const bad = { ...parseReview(readFileSync(join(d, ".logbook", "reviews", `${card.cardId}.json`), "utf8")),
+    decisionCardSha256: "b".repeat(64) };
+  writeFileSync(join(d, ".logbook", "reviews", `${card.cardId}.json`), serializeReview(bad));
+  mkdirSync(join(d, ".logbook", "decisions", "nested"), { recursive: true });
+  writeFileSync(join(d, ".logbook", "decisions", "nested", `${"f".repeat(64)}.json`), "{}\n");
+  g("add", "-A"); g("commit", "-qm", "corrupt trusted planes");
+  const p = buildOkfProjection(d);
+  assert.equal(p.exitCode, 1);
+  assert.match(p.error, /malformed.*unmeasurable/i);
+  assert.deepEqual(p.files, []);
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("OKF exporter keeps raw-Git authority semantics under replace refs and grafts", () => {
+  {
+    const { d, g, card, commit } = reviewedOkfRepo("okf-raw-replace-");
+    const before = buildOkfProjection(d, { ref: commit });
+    const other = tmpGitRepo("okf-replacement-");
+    other.g("init", "-q"); mkdirSync(join(other.d, "src"));
+    writeFileSync(join(other.d, "src", "db.js"), "NO_SPAN_BASE\n");
+    other.g("add", "-A"); other.g("commit", "-qm", "unrelated base without evidence");
+    writeFileSync(join(other.d, "src", "db.js"), "NO_SPAN_CHILD\n");
+    other.g("add", "-A"); other.g("commit", "-qm", "unrelated child without evidence");
+    const replacement = other.g("rev-parse", "HEAD").trim();
+    g("fetch", "-q", other.d, replacement);
+    g("replace", card.sha, replacement);
+    const after = buildOkfProjection(d, { ref: commit });
+    assert.equal(after.projectionDigest, before.projectionDigest);
+    assert.deepEqual(after.files, before.files,
+      "a replacement ref cannot rewrite exported evidence or authority");
+    rmSync(other.d, { recursive: true, force: true });
+    rmSync(d, { recursive: true, force: true });
+  }
+
+  {
+    const { d, g } = poolRepo("okf-raw-graft-");
+    const main = g("branch", "--show-current").trim();
+    g("checkout", "-q", "-b", "side");
+    writeFileSync(join(d, "src", "side.js"), "SIDE_ONLY_EVIDENCE\n");
+    g("add", "-A"); g("commit", "-qm", "side-only evidence");
+    const sideSha = g("rev-parse", "HEAD").trim();
+    g("checkout", "-q", main);
+    const card = mkDecision({ sha: sideSha, claim: "side branch rationale",
+      evidenceFile: "src/side.js", span: "SIDE_ONLY_EVIDENCE", scopes: ["src/side.js"] });
+    writeCard(d, g, "decisions", card);
+    writeReviewFile(d, g, card);
+    g("commit", "-qm", "review side-branch record");
+    const trust = g("rev-parse", "HEAD").trim(), realParent = g("rev-parse", "HEAD~1").trim();
+    mkdirSync(join(d, ".git", "info"), { recursive: true });
+    writeFileSync(join(d, ".git", "info", "grafts"), `${trust} ${realParent} ${sideSha}\n`);
+    const p = buildOkfProjection(d, { ref: trust });
+    const parsed = parseOkfDecisionConcept(projectionFile(p, `decisions/${card.cardId}.md`));
+    assert.equal(parsed.record.source.ancestry, "non-ancestor");
+    assert.equal(parsed.record.authority.current, false);
+    assert.deepEqual(parsed.record.authority.reasons, ["non-ancestral-source"]);
+    assert.match(parsed.body, /Current authority failed: non-ancestral-source\./);
+    rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("OKF empty and multi-decision projections are complete and byte-sorted", () => {
+  const { d, g, sha } = poolRepo("okf-order-");
+  const empty = buildOkfProjection(d);
+  assert.equal(empty.recordCount, 0);
+  assert.deepEqual(empty.files.map((file) => file.path), [
+    "decisions/index.md",
+    "index.md",
+    "receipts/neutral-manifest.json",
+    "receipts/projection-receipt.json",
+  ]);
+
+  const cards = ["zulu decision", "alpha decision"].map((claim) => mkDecision({
+    sha, claim, sourceType: "human_attestation", side: null, evidenceFile: null,
+    span: null, scopes: ["src/db.js"],
+  }));
+  for (const card of cards) {
+    writeCard(d, g, "decisions", card);
+    writeReviewFile(d, g, card);
+  }
+  g("commit", "-qm", "two reviewed attestations");
+  const p = buildOkfProjection(d);
+  const ids = cards.map((card) => card.cardId).sort((a, b) => Buffer.from(a).compare(Buffer.from(b)));
+  assert.deepEqual(p.manifest.records.map((record) => record.id), ids);
+  const index = projectionFile(p, "decisions/index.md");
+  assert.ok(index.indexOf(`${ids[0]}.md`) < index.indexOf(`${ids[1]}.md`));
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("OKF retains a reviewed card with absent machine evidence but loudly removes current authority", () => {
+  const { d, g, sha } = poolRepo("okf-demote-");
+  const card = mkDecision({ sha, span: "not introduced by this commit", claim: "reviewed but stale evidence" });
+  writeCard(d, g, "decisions", card);
+  writeReviewFile(d, g, card, { source: "draft" });
+  g("commit", "-qm", "accept unsupported decision");
+  const p = buildOkfProjection(d);
+  assert.equal(p.exitCode, 0);
+  const parsed = parseOkfDecisionConcept(projectionFile(p, `decisions/${card.cardId}.md`));
+  assert.ok(parsed);
+  assert.equal(parsed.record.source.evidenceStatus, "absent");
+  assert.equal(parsed.record.authority.current, false);
+  assert.deepEqual(parsed.record.authority.reasons, ["evidence-absent"]);
+  assert.match(parsed.body, /RE-REVIEW REQUIRED/);
+  assert.match(parsed.body, /Current authority failed: evidence-absent\./);
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("OKF preserves reviewed human attestation without pretending it was mechanically grounded", () => {
+  const { d, g, sha } = poolRepo("okf-attestation-");
+  const card = mkDecision({ sha, sourceType: "human_attestation", side: null,
+    evidenceFile: null, span: null, claim: "maintainer context not present in Git" });
+  writeCard(d, g, "decisions", card);
+  writeReviewFile(d, g, card, { source: "draft", reviewedBy: "maintainer" });
+  g("commit", "-qm", "accept attestation");
+  const p = buildOkfProjection(d);
+  const parsed = parseOkfDecisionConcept(projectionFile(p, `decisions/${card.cardId}.md`));
+  assert.ok(parsed);
+  assert.equal(parsed.record.source.evidenceStatus, "human-attestation");
+  assert.equal(parsed.record.authority.current, true);
+  assert.match(parsed.body, /No mechanically grounded span is asserted/);
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("OKF writer installs one complete new directory and refuses overwrite or trust-path output", () => {
+  const { d } = reviewedOkfRepo("okf-write-");
+  const p = buildOkfProjection(d);
+  const parent = mkdtempSync(join(tmpdir(), "okf-output-"));
+  const out = join(parent, "bundle");
+  const before = spawnSync("git", ["-C", d, "status", "--porcelain=v1"], { encoding: "utf8" }).stdout;
+  const written = exportOkfProjection(d, out);
+  assert.equal(written.exitCode, 0);
+  assert.equal(written.projectionDigest, p.projectionDigest);
+  for (const file of p.files)
+    assert.equal(readFileSync(join(out, ...file.path.split("/")), "utf8"), file.content);
+  const receipt = JSON.parse(readFileSync(join(out, "receipts", "projection-receipt.json"), "utf8"));
+  for (const file of receipt.files)
+    assert.equal(sha256(readFileSync(join(out, ...file.path.split("/")), "utf8")), file.sha256);
+
+  writeFileSync(join(out, "do-not-delete.txt"), "owned by user\n");
+  const again = exportOkfProjection(d, out);
+  assert.equal(again.exitCode, 1);
+  assert.match(again.error, /already exists/);
+  assert.equal(readFileSync(join(out, "do-not-delete.txt"), "utf8"), "owned by user\n");
+  assert.match(exportOkfProjection(d, join(d, ".logbook", "export")).error, /\.git\/\.logbook|\.git\/\.logbook|inside \.git\/\.logbook|repository root/i);
+  const inRepo = join(d, "logbook-okf");
+  assert.equal(exportOkfProjection(d, inRepo).exitCode, 0,
+    "a disposable projection may live in an ordinary repository subdirectory");
+  rmSync(inRepo, { recursive: true, force: true });
+  assert.equal(spawnSync("git", ["-C", d, "status", "--porcelain=v1"], { encoding: "utf8" }).stdout, before);
+  rmSync(d, { recursive: true, force: true });
+  rmSync(parent, { recursive: true, force: true });
+});
+
+test("OKF writer refuses a symlinked parent and leaves its external target untouched", () => {
+  const { d } = reviewedOkfRepo("okf-symlink-parent-");
+  const parent = mkdtempSync(join(tmpdir(), "okf-symlink-"));
+  const outside = mkdtempSync(join(tmpdir(), "okf-outside-"));
+  symlinkSync(outside, join(parent, "redirect"), "dir");
+  const r = exportOkfProjection(d, join(parent, "redirect", "bundle"));
+  assert.equal(r.exitCode, 1);
+  assert.match(r.error, /symlinked parent/);
+  assert.deepEqual(readdirSync(outside), []);
+  rmSync(d, { recursive: true, force: true });
+  rmSync(parent, { recursive: true, force: true });
+  rmSync(outside, { recursive: true, force: true });
+});
+
+test("installed OKF CLI exports a reviewed bundle and refuses ambiguous/unsafe invocations", () => {
+  const { d, card } = reviewedOkfRepo("okf-cli-");
+  const parent = mkdtempSync(join(tmpdir(), "okf-cli-output-"));
+  const out = join(parent, "bundle");
+  const ok = spawnSync(process.execPath,
+    [CLI, "export", d, "--format", "okf", "--out", out, "--ref", "HEAD"],
+    { encoding: "utf8" });
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.match(ok.stdout, /1 reviewed decision.*OKF 0\.1/);
+  assert.match(ok.stdout, /projection [0-9a-f]{64}\)/);
+  assert.ok(existsSync(join(out, "decisions", `${card.cardId}.md`)));
+  const existing = spawnSync(process.execPath,
+    [CLI, "export", d, "--format", "okf", "--out", out], { encoding: "utf8" });
+  assert.equal(existing.status, 1);
+  assert.match(existing.stderr, /already exists/);
+  const badFormat = spawnSync(process.execPath,
+    [CLI, "export", d, "--format", "not-okf", "--out", join(parent, "other")], { encoding: "utf8" });
+  assert.equal(badFormat.status, 1);
+  assert.match(badFormat.stderr, /usage: logbook export/);
+  const ignoredFlag = spawnSync(process.execPath,
+    [CLI, "export", d, "--format", "okf", "--out", join(parent, "other"), "--json"], { encoding: "utf8" });
+  assert.equal(ignoredFlag.status, 1);
+  assert.match(ignoredFlag.stderr, /accepts only/);
+  const ignoredMax = spawnSync(process.execPath,
+    [CLI, "export", d, "--format", "okf", "--out", join(parent, "other"), "--max", "1"], { encoding: "utf8" });
+  assert.equal(ignoredMax.status, 1);
+  assert.match(ignoredMax.stderr, /accepts only/);
+  const exportOnlyFlag = spawnSync(process.execPath,
+    [CLI, "doctor", d, "--ref", "HEAD"], { encoding: "utf8" });
+  assert.equal(exportOnlyFlag.status, 1);
+  assert.match(exportOnlyFlag.stderr, /valid only with logbook export/);
+  rmSync(d, { recursive: true, force: true });
+  rmSync(parent, { recursive: true, force: true });
+});
+
+test("concurrent installed OKF exports yield one coherent winner and no staging debris", async () => {
+  const { d } = reviewedOkfRepo("okf-concurrent-");
+  const parent = mkdtempSync(join(tmpdir(), "okf-concurrent-output-"));
+  const out = join(parent, "bundle");
+  const run = () => new Promise((resolveRun) => {
+    const child = spawn(process.execPath,
+      [CLI, "export", d, "--format", "okf", "--out", out, "--ref", "HEAD"],
+      { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "", stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("close", (status) => resolveRun({ status, stdout, stderr }));
+  });
+  const results = await Promise.all([run(), run()]);
+  assert.deepEqual(results.map((result) => result.status).sort(), [0, 1]);
+  const receipt = JSON.parse(readFileSync(join(out, "receipts", "projection-receipt.json"), "utf8"));
+  for (const file of receipt.files)
+    assert.equal(sha256(readFileSync(join(out, ...file.path.split("/")), "utf8")), file.sha256);
+  assert.deepEqual(readdirSync(parent).filter((name) => name.startsWith(".logbook-okf-")), []);
+  rmSync(d, { recursive: true, force: true });
+  rmSync(parent, { recursive: true, force: true });
 });

@@ -37,7 +37,7 @@ function rawGitStatus(repo, args) { // raw, no-throw; returns {status, stdout}
 import {
   writeFileSync, existsSync, realpathSync, readFileSync, mkdirSync, lstatSync, readdirSync,
   renameSync, unlinkSync, chmodSync, openSync, fstatSync, writeSync, closeSync, readSync,
-  rmSync, rmdirSync, linkSync, constants as FS,
+  rmSync, rmdirSync, linkSync, mkdtempSync, constants as FS,
 } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { resolve, join, basename, dirname, relative, isAbsolute, sep } from "node:path";
@@ -2485,6 +2485,466 @@ export function validateDispositionState(decisions = [], leads = [], reviews = [
   for (const id of leadById) if (decisionById.has(id)) issue("lead-decision-overlap", id);
   return { valid: issues.length === 0, issues, issueById, decisionById, leadById, reviewById };
 }
+
+// ---- OKF v0.1 projection ----------------------------------------------------
+// Open Knowledge Format is an intentionally permissive Markdown interchange
+// format, not an authority model. Logbook therefore EXPORTS a disposable,
+// deterministic view while keeping canonical cards/reviews under .logbook/.
+// Nothing in this section imports Markdown or writes a trust plane.
+export const OKF_VERSION = "0.1";
+export const OKF_EXPORT_SCHEMA = 1;
+export const OKF_SPEC_COMMIT = "ee67a5ca27044ebe7c38385f5b6cffc2305a9c1a";
+export const OKF_SPEC_URL =
+  `https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/${OKF_SPEC_COMMIT}/okf/SPEC.md`;
+const OKF_MAX_RECORDS = 10000;
+const OKF_MAX_SOURCE_BYTES = 32 << 20;
+const OKF_MAX_FILE_BYTES = 64 << 20;
+const OKF_MAX_BUNDLE_BYTES = 128 << 20;
+const OKF_NEUTRAL_SCHEMA = "logbook-okf-neutral-manifest-v1";
+const OKF_RECEIPT_SCHEMA = "logbook-okf-projection-receipt-v1";
+
+function byteCmp(a, b) { return Buffer.from(a).compare(Buffer.from(b)); }
+function canonicalPrettyJson(value) {
+  return JSON.stringify(stableContextValue(value), null, 2) + "\n";
+}
+function okfFrontmatter(fields) {
+  return `---\n${fields.map(([key, value]) => `${key}: ${JSON.stringify(value)}`).join("\n")}\n---\n`;
+}
+function okfSafe(value, maxBytes = 4096) {
+  return sanitizeContextText(value, maxBytes, { markdown: true });
+}
+function okfAuthorityReasons(sourceAncestry, evidenceStatus, sourceType) {
+  const reasons = [];
+  if (sourceAncestry === "non-ancestor") reasons.push("non-ancestral-source");
+  else if (sourceAncestry !== "ancestor") reasons.push("source-ancestry-unmeasurable");
+  if (sourceType === "machine_source" && evidenceStatus !== "grounded")
+    reasons.push(`evidence-${evidenceStatus}`);
+  return reasons;
+}
+function okfEvidenceStatus(repo, card) {
+  if (card.sourceType === "machine_source")
+    return groundStatus(repo, card.sha, card.span, card.side, card.evidenceFile);
+  if (card.sourceType === "human_attestation") return "human-attestation";
+  return "not-mechanically-verified";
+}
+function okfDecisionRecord(card, review, trustCommit, sourceAncestry, evidenceStatus,
+    cardBytes = serializeDecisionCard(card), reviewBytes = serializeReview(review)) {
+  const reasons = okfAuthorityReasons(sourceAncestry, evidenceStatus, card.sourceType);
+  return {
+    schema: "logbook-okf-neutral-record-v1",
+    kind: "decision",
+    id: card.cardId,
+    outputPath: `decisions/${card.cardId}.md`,
+    claim: card.claim,
+    authority: {
+      tier: "human-reviewed",
+      current: reasons.length === 0,
+      reasons,
+    },
+    trustCommit,
+    source: {
+      cardSchema: card.schema,
+      type: card.sourceType,
+      commit: card.sha,
+      ancestry: sourceAncestry,
+      evidenceStatus,
+      side: card.side,
+      evidenceFile: card.evidenceFile,
+      span: card.span,
+      scopes: [...card.scopes],
+      proposedBy: card.by,
+      proposedAt: card.at,
+      canonicalBytesSha256: sha256(cardBytes),
+    },
+    review: {
+      schema: review.schema,
+      source: review.source,
+      verdict: review.verdict,
+      sourceCardSha256: review.sourceCardSha256,
+      decisionCardSha256: review.decisionCardSha256,
+      reviewedBy: review.reviewedBy,
+      reviewedAt: review.reviewedAt,
+      canonicalBytesSha256: sha256(reviewBytes),
+    },
+  };
+}
+function okfDecisionDescription(record) {
+  const scope = record.source.scopes.length === 1
+    ? record.source.scopes[0]
+    : `${record.source.scopes.length} repository scopes`;
+  return `${record.authority.current ? "Human-reviewed" : "Previously human-reviewed; re-review required"} Logbook decision applying to ${scope}.`;
+}
+function renderOkfDecision(record, recordSha256) {
+  const id = record.id;
+  const type = record.authority.current ? "Logbook Decision" : "Logbook Decision Re-review Required";
+  const cardReceipt = `../receipts/cards/${id}.json`;
+  const reviewReceipt = `../receipts/reviews/${id}.json`;
+  const fields = [
+    ["type", type],
+    ["title", record.claim],
+    ["description", okfDecisionDescription(record)],
+    ["tags", ["logbook", "decision", "human-reviewed"]],
+    ["x-logbook-export-schema", OKF_EXPORT_SCHEMA],
+    ["x-logbook-record-kind", record.kind],
+    ["x-logbook-card-id", id],
+    ["x-logbook-authority", record.authority.tier],
+    ["x-logbook-current-authoritative", record.authority.current],
+    ["x-logbook-authority-reasons", record.authority.reasons],
+    ["x-logbook-trust-commit", record.trustCommit],
+    ["x-logbook-card-schema", record.source.cardSchema],
+    ["x-logbook-source-type", record.source.type],
+    ["x-logbook-source-commit", record.source.commit],
+    ["x-logbook-source-ancestry", record.source.ancestry],
+    ["x-logbook-evidence-status", record.source.evidenceStatus],
+    ["x-logbook-evidence-side", record.source.side],
+    ["x-logbook-evidence-file", record.source.evidenceFile],
+    ["x-logbook-evidence-span", record.source.span],
+    ["x-logbook-scopes", record.source.scopes],
+    ["x-logbook-proposed-by", record.source.proposedBy],
+    ["x-logbook-proposed-at", record.source.proposedAt],
+    ["x-logbook-review-schema", record.review.schema],
+    ["x-logbook-review-source", record.review.source],
+    ["x-logbook-review-verdict", record.review.verdict],
+    ["x-logbook-reviewed-by", record.review.reviewedBy],
+    ["x-logbook-reviewed-at", record.review.reviewedAt],
+    ["x-logbook-source-card-sha256", record.review.sourceCardSha256],
+    ["x-logbook-decision-card-sha256", record.review.decisionCardSha256],
+    ["x-logbook-card-bytes-sha256", record.source.canonicalBytesSha256],
+    ["x-logbook-review-bytes-sha256", record.review.canonicalBytesSha256],
+    ["x-logbook-card-receipt", cardReceipt],
+    ["x-logbook-review-receipt", reviewReceipt],
+    ["x-logbook-neutral-record-sha256", recordSha256],
+  ];
+  const scopes = record.source.scopes.map((scope) => `* ${okfSafe(scope)}`).join("\n");
+  const evidence = record.source.span === null
+    ? `No mechanically grounded span is asserted for this ${okfSafe(record.source.type)} source.`
+    : `* Commit: \`${record.source.commit}\`\n` +
+      `* Side: ${okfSafe(record.source.side)}\n` +
+      `* File: ${record.source.evidenceFile === null ? "(commit message)" : okfSafe(record.source.evidenceFile)}\n` +
+      `* Current evidence status: **${okfSafe(record.source.evidenceStatus)}**\n\n` +
+      `Exact asserted span (JSON string):\n\n    ${JSON.stringify(record.source.span)}`;
+  const authority = record.authority.current
+    ? "This decision has an exact byte-bound human review at the exported trust commit."
+    : `**RE-REVIEW REQUIRED.** Current authority failed: ${record.authority.reasons.map((reason) => okfSafe(reason)).join(", ")}.`;
+  return okfFrontmatter(fields) +
+    `# Decision\n\n${okfSafe(record.claim)}\n\n` +
+    `> Generated interoperability view. Canonical authority remains under \`.logbook/\`; ` +
+    `this page cannot create or change a decision.\n\n` +
+    `> ${authority}\n\n` +
+    `# Applicability\n\n${scopes}\n\n` +
+    `# Evidence\n\n${evidence}\n\n` +
+    `Grounding establishes only that asserted bytes occur in the named Git change. ` +
+    `It does not establish that the interpretation is correct, causal, or still applicable.\n\n` +
+    `# Review\n\n` +
+    `* Authority tier: **human-reviewed**\n` +
+    `* Proposed by: ${okfSafe(record.source.proposedBy)} on ${okfSafe(record.source.proposedAt)}\n` +
+    `* Reviewed by: ${okfSafe(record.review.reviewedBy)} on ${okfSafe(record.review.reviewedAt)}\n` +
+    `* Verdict: ${okfSafe(record.review.verdict)}\n\n` +
+    `# Citations\n\n` +
+    `[1] [Canonical Logbook decision card](${cardReceipt})\n\n` +
+    `[2] [Byte-bound human review receipt](${reviewReceipt})\n`;
+}
+
+function parseOkfFrontmatter(text) {
+  if (typeof text !== "string" || !text.startsWith("---\n")) return null;
+  const end = text.indexOf("\n---\n", 4);
+  if (end < 0) return null;
+  const values = {};
+  for (const line of text.slice(4, end).split("\n")) {
+    const m = line.match(/^([a-z0-9][a-z0-9-]*): (.+)$/);
+    if (!m || Object.hasOwn(values, m[1])) return null;
+    try { values[m[1]] = JSON.parse(m[2]); } catch { return null; }
+  }
+  return { values, body: text.slice(end + 5) };
+}
+
+// Strict parser for Logbook's deterministic OKF subset. Generic OKF consumers
+// are permissive; this parser exists only to prove our generated page round-trips
+// to the same neutral record and does not confer authority on arbitrary Markdown.
+export function parseOkfDecisionConcept(text) {
+  const parsed = parseOkfFrontmatter(text);
+  if (!parsed) return null;
+  const f = parsed.values;
+  const keys = [
+    "type", "title", "description", "tags", "x-logbook-export-schema",
+    "x-logbook-record-kind", "x-logbook-card-id", "x-logbook-authority",
+    "x-logbook-current-authoritative", "x-logbook-authority-reasons",
+    "x-logbook-trust-commit", "x-logbook-card-schema", "x-logbook-source-type",
+    "x-logbook-source-commit", "x-logbook-source-ancestry", "x-logbook-evidence-status",
+    "x-logbook-evidence-side", "x-logbook-evidence-file", "x-logbook-evidence-span",
+    "x-logbook-scopes", "x-logbook-proposed-by", "x-logbook-proposed-at",
+    "x-logbook-review-schema", "x-logbook-review-source", "x-logbook-review-verdict",
+    "x-logbook-reviewed-by", "x-logbook-reviewed-at", "x-logbook-source-card-sha256",
+    "x-logbook-decision-card-sha256", "x-logbook-card-bytes-sha256",
+    "x-logbook-review-bytes-sha256", "x-logbook-card-receipt",
+    "x-logbook-review-receipt", "x-logbook-neutral-record-sha256",
+  ];
+  if (Object.keys(f).length !== keys.length || keys.some((key) => !Object.hasOwn(f, key))) return null;
+  const id = f["x-logbook-card-id"];
+  const card = {
+    schema: f["x-logbook-card-schema"],
+    cardId: id,
+    sha: f["x-logbook-source-commit"],
+    sourceType: f["x-logbook-source-type"],
+    claim: f.title,
+    side: f["x-logbook-evidence-side"],
+    evidenceFile: f["x-logbook-evidence-file"],
+    span: f["x-logbook-evidence-span"],
+    scopes: f["x-logbook-scopes"],
+    by: f["x-logbook-proposed-by"],
+    at: f["x-logbook-proposed-at"],
+  };
+  const review = {
+    schema: f["x-logbook-review-schema"],
+    cardId: id,
+    source: f["x-logbook-review-source"],
+    verdict: f["x-logbook-review-verdict"],
+    sourceCardSha256: f["x-logbook-source-card-sha256"],
+    decisionCardSha256: f["x-logbook-decision-card-sha256"],
+    reviewedBy: f["x-logbook-reviewed-by"],
+    reviewedAt: f["x-logbook-reviewed-at"],
+  };
+  const ancestry = f["x-logbook-source-ancestry"], evidenceStatus = f["x-logbook-evidence-status"];
+  if (f["x-logbook-export-schema"] !== OKF_EXPORT_SCHEMA ||
+      f["x-logbook-record-kind"] !== "decision" ||
+      f["x-logbook-authority"] !== "human-reviewed" ||
+      typeof f["x-logbook-current-authoritative"] !== "boolean" ||
+      !Array.isArray(f["x-logbook-authority-reasons"]) ||
+      !OID.test(f["x-logbook-trust-commit"] || "") ||
+      !["ancestor", "non-ancestor", "unmeasurable"].includes(ancestry) ||
+      !validDecisionCard(card) || !validReview(review) ||
+      !["accepted", "edited"].includes(review.verdict) ||
+      review.decisionCardSha256 !== sha256(serializeDecisionCard(card)) ||
+      sha256(serializeDecisionCard(card)) !== f["x-logbook-card-bytes-sha256"] ||
+      sha256(serializeReview(review)) !== f["x-logbook-review-bytes-sha256"])
+    return null;
+  const expectedEvidence = card.sourceType === "machine_source"
+    ? ["grounded", "absent", "unmeasurable"].includes(evidenceStatus)
+    : evidenceStatus === (card.sourceType === "human_attestation"
+      ? "human-attestation" : "not-mechanically-verified");
+  if (!expectedEvidence) return null;
+  const record = okfDecisionRecord(card, review, f["x-logbook-trust-commit"], ancestry, evidenceStatus);
+  const recordHash = sha256(stableContextJson(record));
+  if (renderOkfDecision(record, recordHash) !== text) return null;
+  return { record, recordSha256: recordHash, body: parsed.body };
+}
+
+export function buildOkfProjection(repo, { ref = "HEAD" } = {}) {
+  const fail = (error) => ({ error, exitCode: 1, files: [] });
+  try {
+    const trustCommit = resolveTrustCommit(repo, ref);
+    if (!trustCommit) return fail(`cannot resolve trust ref ${String(ref)}`);
+    const decisions = readPlane(repo, trustCommit, DECISION_PLANE);
+    const leads = readPlane(repo, trustCommit, LEAD_PLANE);
+    const reviews = readReviewPlane(repo, trustCommit);
+    if (decisions.unreadable || leads.unreadable || reviews.unreadable)
+      return fail(`cannot enumerate the decision/review planes at ${trustCommit.slice(0, 12)} (unmeasurable)`);
+    const malformed = [...decisions.malformed, ...leads.malformed, ...reviews.malformed];
+    const state = validateDispositionState(decisions.cards, leads.cards, reviews.reviews);
+    malformed.push(...state.issues);
+    if (malformed.length)
+      return fail(`${malformed.length} malformed card/review relation(s) at the trusted commit (unmeasurable)`);
+    if (decisions.cards.length > OKF_MAX_RECORDS)
+      return fail(`too many reviewed decisions to export (>${OKF_MAX_RECORDS})`);
+
+    const records = [], files = new Map();
+    let bundleBytes = 0, sourceBytes = 0;
+    const addFile = (path, content) => {
+      const bytes = Buffer.byteLength(content);
+      if (bytes > OKF_MAX_FILE_BYTES)
+        throw new Error(`OKF projection file exceeds ${OKF_MAX_FILE_BYTES} bytes: ${path}`);
+      if (bundleBytes + bytes > OKF_MAX_BUNDLE_BYTES)
+        throw new Error(`OKF projection exceeds ${OKF_MAX_BUNDLE_BYTES} aggregate bytes`);
+      files.set(path, content);
+      bundleBytes += bytes;
+    };
+    for (const { card } of [...decisions.cards].sort((a, b) => byteCmp(a.card.cardId, b.card.cardId))) {
+      const review = state.reviewById.get(card.cardId);
+      if (!review) return fail(`decision ${card.cardId} has no byte-bound review`);
+      const cardBytes = serializeDecisionCard(card), reviewBytes = serializeReview(review);
+      sourceBytes += Buffer.byteLength(cardBytes) + Buffer.byteLength(reviewBytes);
+      if (sourceBytes > OKF_MAX_SOURCE_BYTES)
+        return fail(`reviewed decision source exceeds ${OKF_MAX_SOURCE_BYTES} bytes`);
+      const sourceAncestry = ancestryStatus(repo, card.sha, trustCommit);
+      const evidenceStatus = okfEvidenceStatus(repo, card);
+      const record = okfDecisionRecord(card, review, trustCommit, sourceAncestry, evidenceStatus,
+        cardBytes, reviewBytes);
+      const recordSha256 = sha256(stableContextJson(record));
+      const concept = renderOkfDecision(record, recordSha256);
+      const roundTrip = parseOkfDecisionConcept(concept);
+      if (!roundTrip || stableContextJson(roundTrip.record) !== stableContextJson(record))
+        return fail(`internal OKF round-trip failed for ${card.cardId}`);
+      records.push({ ...record, recordSha256 });
+      addFile(record.outputPath, concept);
+      addFile(`receipts/cards/${card.cardId}.json`, cardBytes);
+      addFile(`receipts/reviews/${card.cardId}.json`, reviewBytes);
+    }
+
+    const decisionLinks = records.length
+      ? records.map((record) =>
+        `* [${okfSafe(record.claim)}](${record.id}.md) - ${okfSafe(okfDecisionDescription(record))}`).join("\n")
+      : "No human-reviewed decisions are present at this trust commit.";
+    addFile("decisions/index.md", `# Human-reviewed decisions\n\n${decisionLinks}\n`);
+    addFile("index.md",
+      `---\nokf_version: "${OKF_VERSION}"\n---\n` +
+      `# Logbook decision memory\n\n` +
+      `This is a generated, non-authoritative projection of Logbook records at ` +
+      `\`${trustCommit}\`. Canonical authority remains under \`.logbook/\`; editing this bundle ` +
+      `cannot create or change a Logbook decision.\n\n` +
+      `# Contents\n\n` +
+      `* [Human-reviewed decisions](decisions/index.md) - ${records.length} byte-bound decision${records.length === 1 ? "" : "s"}.\n`);
+
+    const manifest = {
+      schema: OKF_NEUTRAL_SCHEMA,
+      okfVersion: OKF_VERSION,
+      okfSpecCommit: OKF_SPEC_COMMIT,
+      trustCommit,
+      recordCount: records.length,
+      records,
+    };
+    const manifestText = canonicalPrettyJson(manifest);
+    addFile("receipts/neutral-manifest.json", manifestText);
+    const covered = [...files.entries()]
+      .map(([path, content]) => ({ path, bytes: Buffer.byteLength(content), sha256: sha256(content) }))
+      .sort((a, b) => byteCmp(a.path, b.path));
+    const coveredBytes = bundleBytes;
+    const receipt = {
+      schema: OKF_RECEIPT_SCHEMA,
+      exporter: { package: "@promptwheel/logbook", version: PACKAGE_VERSION, schema: OKF_EXPORT_SCHEMA },
+      okfVersion: OKF_VERSION,
+      okfSpecCommit: OKF_SPEC_COMMIT,
+      okfSpecUrl: OKF_SPEC_URL,
+      trustCommit,
+      recordCount: records.length,
+      manifestSha256: sha256(manifestText),
+      coveredFileCount: covered.length,
+      coveredBytes,
+      files: covered,
+      bundleDigest: sha256(stableContextJson(covered)),
+      authoritySource: ".logbook/ (projection is never imported)",
+    };
+    const receiptText = canonicalPrettyJson(receipt);
+    addFile("receipts/projection-receipt.json", receiptText);
+    const orderedFiles = [...files.entries()]
+      .map(([path, content]) => ({ path, content }))
+      .sort((a, b) => byteCmp(a.path, b.path));
+    return {
+      schema: "logbook-okf-projection-v1",
+      exitCode: 0,
+      trustCommit,
+      recordCount: records.length,
+      projectionDigest: sha256(receiptText),
+      files: orderedFiles,
+      manifest,
+      receipt,
+    };
+  } catch (error) {
+    return fail(error?.message || String(error));
+  }
+}
+
+function pathWithin(root, candidate) {
+  const rel = relative(root, candidate);
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
+// Install one complete generation as a previously absent directory. Refusing
+// overwrite keeps this first exporter from becoming a directory merge/delete
+// engine; regeneration uses a fresh --out until an ownership-checked swap
+// protocol is justified.
+function writeOkfProjection(repo, out, projection) {
+  const fail = (error) => ({ error, exitCode: 1 });
+  if (!projection || projection.error || projection.exitCode !== 0 || !Array.isArray(projection.files))
+    return fail(projection?.error || "invalid OKF projection");
+  if (typeof out !== "string" || !out.trim()) return fail("--out must name a new directory");
+  let repoRoot, parent, target;
+  try {
+    repoRoot = realpathSync(repo);
+    const requested = resolve(out), requestedParent = dirname(requested);
+    parent = realpathSync(requestedParent);
+    if (parent !== resolve(requestedParent))
+      return fail("refusing OKF output through a symlinked parent");
+    const pst = lstatSync(parent);
+    if (!pst.isDirectory() || pst.isSymbolicLink())
+      return fail("OKF output parent must be a real directory");
+    target = join(parent, basename(requested));
+    try {
+      lstatSync(target);
+      return fail("OKF output already exists; choose a new directory");
+    } catch (error) {
+      if (error.code !== "ENOENT") return fail(`cannot inspect OKF output: ${error.code || error.message}`);
+    }
+    const forbidden = [join(repoRoot, ".logbook")];
+    for (const arg of ["--git-dir", "--git-common-dir"]) {
+      const raw = gitRaw(repoRoot, ["rev-parse", arg]).trim();
+      const gitPath = realpathSync(isAbsolute(raw) ? raw : join(repoRoot, raw));
+      forbidden.push(gitPath);
+    }
+    if (target === repoRoot || forbidden.some((root) => pathWithin(root, target)))
+      return fail("refusing OKF output at the repository root or inside .git/.logbook");
+  } catch (error) {
+    return fail(`cannot prepare OKF output: ${error.code || error.message}`);
+  }
+
+  const seen = new Set(); let aggregate = 0;
+  for (const file of projection.files) {
+    if (!file || typeof file.path !== "string" || typeof file.content !== "string" ||
+        file.path.startsWith("/") || file.path.split("/").some((part) => !part || part === "." || part === "..") ||
+        seen.has(file.path))
+      return fail("projection contains an unsafe or duplicate output path");
+    const bytes = Buffer.byteLength(file.content);
+    if (bytes > OKF_MAX_FILE_BYTES) return fail(`projection file too large: ${file.path}`);
+    aggregate += bytes;
+    if (aggregate > OKF_MAX_BUNDLE_BYTES) return fail("projection aggregate size is too large");
+    seen.add(file.path);
+  }
+
+  let stage = null;
+  try {
+    stage = mkdtempSync(join(parent, ".logbook-okf-"));
+    for (const file of projection.files) {
+      const destination = join(stage, ...file.path.split("/"));
+      mkdirSync(dirname(destination), { recursive: true, mode: 0o755 });
+      const canonicalParent = realpathSync(dirname(destination));
+      if (!pathWithin(stage, canonicalParent)) throw new Error("generated path escaped the staging directory");
+      writeFileSync(destination, file.content, { flag: "wx", mode: 0o644 });
+    }
+    // Recheck immediately before the generation-level atomic install. A
+    // concurrent winner leaves a nonempty target, so rename fails coherently.
+    try {
+      lstatSync(target);
+      throw new Error("OKF output appeared during export; refusing overwrite");
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+    chmodSync(stage, 0o755);
+    renameSync(stage, target);
+    stage = null;
+    return {
+      exitCode: 0,
+      out: target,
+      trustCommit: projection.trustCommit,
+      recordCount: projection.recordCount,
+      projectionDigest: projection.projectionDigest,
+    };
+  } catch (error) {
+    return fail(`cannot install OKF projection: ${error.code || error.message}`);
+  } finally {
+    if (stage) {
+      try { rmSync(stage, { recursive: true, force: true }); } catch { /* private best-effort cleanup */ }
+    }
+  }
+}
+
+// Keep build + install indivisible for callers. Exposing the intermediate
+// projection to an external writer would let mutable caller state diverge from
+// its receipt between validation and installation.
+export function exportOkfProjection(repo, out, { ref = "HEAD" } = {}) {
+  const projection = buildOkfProjection(repo, { ref });
+  if (projection.error) return projection;
+  return writeOkfProjection(repo, out, projection);
+}
+
 function todayLocal() { const n = new Date(); return new Date(n.getTime() - n.getTimezoneOffset() * 60000).toISOString().slice(0, 10); }
 // Creation retries keep the first-created date. cardId deliberately excludes
 // `at`, so a retry on a later day must not become a false content conflict.
@@ -4110,6 +4570,10 @@ function usage() {
                                   (accepted as-is / edited / rejected / pending /
                                   vanished unreviewed) — NOT semantic claim precision;
                                   exits nonzero when history is untrustworthy
+    logbook export [path] --format okf --out DIR [--ref REF]
+                                  generate a deterministic OKF v0.1 projection of
+                                  byte-bound human-reviewed decisions at REF (default
+                                  HEAD); DIR must not already exist; never imported
     logbook pending [path]        local draft decisions awaiting human acceptance
                                   (inert until accept-draft + a trusted commit)
     logbook refine [path] [--limit N]
@@ -4150,6 +4614,7 @@ export function parseArgs(argv) {
     else if (a === "pending") o.cmd = "pending";
     else if (a === "refine") o.cmd = "refine";
     else if (a === "outcomes") o.cmd = "outcomes";
+    else if (a === "export") o.cmd = "export";
     else if (a === "publish") o.cmd = "publish";
     else if (a === "annotate-draft") o.cmd = "annotate-draft";
     else if (a === "accept-draft") o.cmd = "accept-draft";
@@ -4157,6 +4622,8 @@ export function parseArgs(argv) {
     else if (a === "reject-lead") o.cmd = "reject-lead";
     else if (a === "--claim") o.claim = take("--claim");
     else if (a === "--candidates") o.candidates = take("--candidates");
+    else if (a === "--format") o.format = take("--format");
+    else if (a === "--ref") o.ref = take("--ref");
     else if (a === "--diff") o.diff = true;
     else if (a === "--span") o.span = take("--span");
     else if (a === "--side") o.side = take("--side");
@@ -4181,7 +4648,10 @@ export function parseArgs(argv) {
     else if (a === "--grep") o.grep = take("--grep");
     else if (a === "--limit") { const v = take("--limit"); if (v !== undefined) o.limit = Number(v); }
     else if (a === "--cursor") { o.cursorProvided = true; o.cursor = take("--cursor"); }
-    else if (a === "-n" || a === "--max") { const v = take(a); if (v !== undefined) o.max = Number(v); }
+    else if (a === "-n" || a === "--max") {
+      o.maxProvided = true;
+      const v = take(a); if (v !== undefined) o.max = Number(v);
+    }
     else if (a === "--since") o.since = take("--since");
     else if (a === "--until") o.until = take("--until");
     else if (a === "--json") o.json = true;
@@ -4201,7 +4671,10 @@ export function parseArgs(argv) {
     // <sha> "<why>" [repo] — sha + why positional
     o.sha = rest[0]; o.why = rest[1];
     if (rest[2]) o.repo = rest[2];
-  } else if (rest.length) o.repo = rest[0];
+  } else if (rest.length) {
+    o.repo = rest[0];
+    if (o.cmd === "export" && rest.length > 1) o._extraPositionals = rest.slice(1);
+  }
   return o;
 }
 
@@ -4249,6 +4722,35 @@ async function main() {
   }
   const name = basename(repo);
   const shallow = existsSync(join(repo, ".git", "shallow"));
+
+  if (o.cmd === "export") {
+    if (o.format !== "okf" || !o.out || !String(o.out).trim() || !String(o.ref || "HEAD").trim() ||
+        o._extraPositionals?.length) {
+      console.error("  usage: logbook export [path] --format okf --out NEW_DIR [--ref REF]");
+      process.exit(1);
+    }
+    const incompatible = o.json || o.compare || o.diff || o.cursorProvided || o.metricsOut ||
+      o.candidates || o.claim || o.by || o.span || o.side || o.evidenceFile ||
+      o.files?.length || o.since || o.until || o.limit !== undefined ||
+      o.weaken !== undefined || o.downgrade !== undefined || o.revert || o.suppress || o.grep ||
+      o.maxProvided;
+    if (incompatible) {
+      console.error("  export accepts only [path], --format okf, --out DIR, --ref REF, and --quiet");
+      process.exit(1);
+    }
+    const written = exportOkfProjection(repo, o.out, { ref: o.ref || "HEAD" });
+    if (written.error) {
+      console.error(`  export: ${sanitizeContextText(written.error, 700, { markdown: false })}`);
+      process.exit(1);
+    }
+    if (!o.quiet)
+      console.log(`  export: ${written.recordCount} reviewed decision${written.recordCount === 1 ? "" : "s"} → ${sanitizeContextText(written.out, 700, { markdown: false })} (OKF ${OKF_VERSION}; trust ${written.trustCommit.slice(0, 12)}; projection ${written.projectionDigest})`);
+    return;
+  }
+  if (o.format !== undefined || o.ref !== undefined) {
+    console.error("  --format and --ref are valid only with logbook export");
+    process.exit(1);
+  }
 
   if (o.cmd === "doctor") {
     const report = doctorRepo(repo);
