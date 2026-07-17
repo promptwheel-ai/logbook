@@ -37,7 +37,7 @@ function rawGitStatus(repo, args) { // raw, no-throw; returns {status, stdout}
 import {
   writeFileSync, existsSync, realpathSync, readFileSync, mkdirSync, lstatSync, readdirSync,
   renameSync, unlinkSync, chmodSync, openSync, fstatSync, writeSync, closeSync, readSync,
-  rmSync, rmdirSync, linkSync, constants as FS,
+  rmSync, rmdirSync, linkSync, mkdtempSync, constants as FS,
 } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { resolve, join, basename, dirname, relative, isAbsolute, sep } from "node:path";
@@ -51,6 +51,48 @@ export const PACKAGE_VERSION = JSON.parse(
 export const NPX_COMMAND = `npx -y @promptwheel/logbook@${PACKAGE_VERSION}`;
 
 let managedTempId = 0;
+const SYNC_WAIT_CELL = new Int32Array(new SharedArrayBuffer(4));
+function waitSync(ms) { Atomics.wait(SYNC_WAIT_CELL, 0, 0, ms); }
+function sameFileIdentity(a, b) {
+  return a.dev === b.dev && a.ino === b.ino;
+}
+const WINDOWS_TRANSIENT_FS_ERRORS = new Set(["EACCES", "EBUSY", "EPERM"]);
+function renameReplacingSync(from, to) {
+  const start = process.hrtime.bigint(), budget = 500_000_000n;
+  for (;;) {
+    try { renameSync(from, to); return; }
+    catch (error) {
+      if (process.platform !== "win32" || !WINDOWS_TRANSIENT_FS_ERRORS.has(error.code) ||
+          process.hrtime.bigint() - start > budget) throw error;
+      waitSync(10);
+    }
+  }
+}
+function lockCreateState(error, lockDir) {
+  if (error.code === "EEXIST") return "held";
+  if (process.platform !== "win32" || !WINDOWS_TRANSIENT_FS_ERRORS.has(error.code))
+    return "error";
+  // Windows can report EPERM/EACCES/EBUSY while another process creates or
+  // removes the directory. A directory we can see is real contention; an
+  // absent/unstatable path gets only a short per-race grace so a permanent ACL
+  // denial still fails promptly and closed.
+  try { return lstatSync(lockDir).isDirectory() ? "held" : "error"; }
+  catch (statError) {
+    return statError.code === "ENOENT" || WINDOWS_TRANSIENT_FS_ERRORS.has(statError.code)
+      ? "transient" : "error";
+  }
+}
+function removeEmptyLockDir(lockDir) {
+  const start = process.hrtime.bigint(), budget = 500_000_000n;
+  for (;;) {
+    try { rmdirSync(lockDir); return true; }
+    catch (error) {
+      if (process.platform !== "win32" || !WINDOWS_TRANSIENT_FS_ERRORS.has(error.code) ||
+          process.hrtime.bigint() - start > budget) return false;
+      waitSync(10);
+    }
+  }
+}
 
 // Replace generator-managed files atomically and never follow a
 // repository-controlled leaf or parent symlink outside the managed root.
@@ -90,7 +132,7 @@ export function managedWriteFile(base, target, data) {
     // artifacts must retain their permissions even under a restrictive
     // caller umask, so restore the captured mode before the atomic rename.
     if (preserveMode) chmodSync(temp, mode);
-    renameSync(temp, path);
+    renameReplacingSync(temp, path);
   } catch (error) {
     try { if (existsSync(temp)) unlinkSync(temp); } catch { /* best effort */ }
     throw error;
@@ -2485,6 +2527,487 @@ export function validateDispositionState(decisions = [], leads = [], reviews = [
   for (const id of leadById) if (decisionById.has(id)) issue("lead-decision-overlap", id);
   return { valid: issues.length === 0, issues, issueById, decisionById, leadById, reviewById };
 }
+
+// ---- OKF v0.1 projection ----------------------------------------------------
+// Open Knowledge Format is an intentionally permissive Markdown interchange
+// format, not an authority model. Logbook therefore EXPORTS a disposable,
+// deterministic view while keeping canonical cards/reviews under .logbook/.
+// Nothing in this section imports Markdown or writes a trust plane.
+export const OKF_VERSION = "0.1";
+export const OKF_EXPORT_SCHEMA = 1;
+export const OKF_SPEC_COMMIT = "ee67a5ca27044ebe7c38385f5b6cffc2305a9c1a";
+export const OKF_SPEC_URL =
+  `https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/${OKF_SPEC_COMMIT}/okf/SPEC.md`;
+const OKF_MAX_RECORDS = 10000;
+const OKF_MAX_SOURCE_BYTES = 32 << 20;
+const OKF_MAX_FILE_BYTES = 64 << 20;
+const OKF_MAX_BUNDLE_BYTES = 128 << 20;
+const OKF_NEUTRAL_SCHEMA = "logbook-okf-neutral-manifest-v1";
+const OKF_RECEIPT_SCHEMA = "logbook-okf-projection-receipt-v1";
+
+function byteCmp(a, b) { return Buffer.from(a).compare(Buffer.from(b)); }
+function canonicalPrettyJson(value) {
+  return JSON.stringify(stableContextValue(value), null, 2) + "\n";
+}
+function okfFrontmatter(fields) {
+  return `---\n${fields.map(([key, value]) => `${key}: ${JSON.stringify(value)}`).join("\n")}\n---\n`;
+}
+function okfSafe(value, maxBytes = 4096) {
+  return sanitizeContextText(value, maxBytes, { markdown: true });
+}
+function okfAuthorityReasons(sourceAncestry, evidenceStatus, sourceType) {
+  const reasons = [];
+  if (sourceAncestry === "non-ancestor") reasons.push("non-ancestral-source");
+  else if (sourceAncestry !== "ancestor") reasons.push("source-ancestry-unmeasurable");
+  if (sourceType === "machine_source" && evidenceStatus !== "grounded")
+    reasons.push(`evidence-${evidenceStatus}`);
+  return reasons;
+}
+function okfEvidenceStatus(repo, card) {
+  if (card.sourceType === "machine_source")
+    return groundStatus(repo, card.sha, card.span, card.side, card.evidenceFile);
+  if (card.sourceType === "human_attestation") return "human-attestation";
+  return "not-mechanically-verified";
+}
+function okfDecisionRecord(card, review, trustCommit, sourceAncestry, evidenceStatus,
+    cardBytes = serializeDecisionCard(card), reviewBytes = serializeReview(review)) {
+  const reasons = okfAuthorityReasons(sourceAncestry, evidenceStatus, card.sourceType);
+  return {
+    schema: "logbook-okf-neutral-record-v1",
+    kind: "decision",
+    id: card.cardId,
+    outputPath: `decisions/${card.cardId}.md`,
+    claim: card.claim,
+    authority: {
+      tier: "human-reviewed",
+      current: reasons.length === 0,
+      reasons,
+    },
+    trustCommit,
+    source: {
+      cardSchema: card.schema,
+      type: card.sourceType,
+      commit: card.sha,
+      ancestry: sourceAncestry,
+      evidenceStatus,
+      side: card.side,
+      evidenceFile: card.evidenceFile,
+      span: card.span,
+      scopes: [...card.scopes],
+      proposedBy: card.by,
+      proposedAt: card.at,
+      canonicalBytesSha256: sha256(cardBytes),
+    },
+    review: {
+      schema: review.schema,
+      source: review.source,
+      verdict: review.verdict,
+      sourceCardSha256: review.sourceCardSha256,
+      decisionCardSha256: review.decisionCardSha256,
+      reviewedBy: review.reviewedBy,
+      reviewedAt: review.reviewedAt,
+      canonicalBytesSha256: sha256(reviewBytes),
+    },
+  };
+}
+function okfDecisionDescription(record) {
+  const scope = record.source.scopes.length === 1
+    ? record.source.scopes[0]
+    : `${record.source.scopes.length} repository scopes`;
+  return `${record.authority.current ? "Human-reviewed" : "Previously human-reviewed; re-review required"} Logbook decision applying to ${scope}.`;
+}
+function renderOkfDecision(record, recordSha256) {
+  const id = record.id;
+  const type = record.authority.current ? "Logbook Decision" : "Logbook Decision Re-review Required";
+  const cardReceipt = `../receipts/cards/${id}.json`;
+  const reviewReceipt = `../receipts/reviews/${id}.json`;
+  const fields = [
+    ["type", type],
+    ["title", record.claim],
+    ["description", okfDecisionDescription(record)],
+    ["tags", ["logbook", "decision", "human-reviewed"]],
+    ["x-logbook-export-schema", OKF_EXPORT_SCHEMA],
+    ["x-logbook-record-kind", record.kind],
+    ["x-logbook-card-id", id],
+    ["x-logbook-authority", record.authority.tier],
+    ["x-logbook-current-authoritative", record.authority.current],
+    ["x-logbook-authority-reasons", record.authority.reasons],
+    ["x-logbook-trust-commit", record.trustCommit],
+    ["x-logbook-card-schema", record.source.cardSchema],
+    ["x-logbook-source-type", record.source.type],
+    ["x-logbook-source-commit", record.source.commit],
+    ["x-logbook-source-ancestry", record.source.ancestry],
+    ["x-logbook-evidence-status", record.source.evidenceStatus],
+    ["x-logbook-evidence-side", record.source.side],
+    ["x-logbook-evidence-file", record.source.evidenceFile],
+    ["x-logbook-evidence-span", record.source.span],
+    ["x-logbook-scopes", record.source.scopes],
+    ["x-logbook-proposed-by", record.source.proposedBy],
+    ["x-logbook-proposed-at", record.source.proposedAt],
+    ["x-logbook-review-schema", record.review.schema],
+    ["x-logbook-review-source", record.review.source],
+    ["x-logbook-review-verdict", record.review.verdict],
+    ["x-logbook-reviewed-by", record.review.reviewedBy],
+    ["x-logbook-reviewed-at", record.review.reviewedAt],
+    ["x-logbook-source-card-sha256", record.review.sourceCardSha256],
+    ["x-logbook-decision-card-sha256", record.review.decisionCardSha256],
+    ["x-logbook-card-bytes-sha256", record.source.canonicalBytesSha256],
+    ["x-logbook-review-bytes-sha256", record.review.canonicalBytesSha256],
+    ["x-logbook-card-receipt", cardReceipt],
+    ["x-logbook-review-receipt", reviewReceipt],
+    ["x-logbook-neutral-record-sha256", recordSha256],
+  ];
+  const scopes = record.source.scopes.map((scope) => `* ${okfSafe(scope)}`).join("\n");
+  const evidence = record.source.span === null
+    ? `No mechanically grounded span is asserted for this ${okfSafe(record.source.type)} source.`
+    : `* Commit: \`${record.source.commit}\`\n` +
+      `* Side: ${okfSafe(record.source.side)}\n` +
+      `* File: ${record.source.evidenceFile === null ? "(commit message)" : okfSafe(record.source.evidenceFile)}\n` +
+      `* Current evidence status: **${okfSafe(record.source.evidenceStatus)}**\n\n` +
+      `Exact asserted span (JSON string):\n\n    ${JSON.stringify(record.source.span)}`;
+  const authority = record.authority.current
+    ? "This decision has an exact byte-bound human review at the exported trust commit."
+    : `**RE-REVIEW REQUIRED.** Current authority failed: ${record.authority.reasons.map((reason) => okfSafe(reason)).join(", ")}.`;
+  return okfFrontmatter(fields) +
+    `# Decision\n\n${okfSafe(record.claim)}\n\n` +
+    `> Generated interoperability view. Canonical authority remains under \`.logbook/\`; ` +
+    `this page cannot create or change a decision.\n\n` +
+    `> ${authority}\n\n` +
+    `# Applicability\n\n${scopes}\n\n` +
+    `# Evidence\n\n${evidence}\n\n` +
+    `Grounding establishes only that asserted bytes occur in the named Git change. ` +
+    `It does not establish that the interpretation is correct, causal, or still applicable.\n\n` +
+    `# Review\n\n` +
+    `* Authority tier: **human-reviewed**\n` +
+    `* Proposed by: ${okfSafe(record.source.proposedBy)} on ${okfSafe(record.source.proposedAt)}\n` +
+    `* Reviewed by: ${okfSafe(record.review.reviewedBy)} on ${okfSafe(record.review.reviewedAt)}\n` +
+    `* Verdict: ${okfSafe(record.review.verdict)}\n\n` +
+    `# Citations\n\n` +
+    `[1] [Canonical Logbook decision card](${cardReceipt})\n\n` +
+    `[2] [Byte-bound human review receipt](${reviewReceipt})\n`;
+}
+
+function parseOkfFrontmatter(text) {
+  if (typeof text !== "string" || !text.startsWith("---\n")) return null;
+  const end = text.indexOf("\n---\n", 4);
+  if (end < 0) return null;
+  const values = {};
+  for (const line of text.slice(4, end).split("\n")) {
+    const m = line.match(/^([a-z0-9][a-z0-9-]*): (.+)$/);
+    if (!m || Object.hasOwn(values, m[1])) return null;
+    try { values[m[1]] = JSON.parse(m[2]); } catch { return null; }
+  }
+  return { values, body: text.slice(end + 5) };
+}
+
+// Strict parser for Logbook's deterministic OKF subset. Generic OKF consumers
+// are permissive; this parser exists only to prove our generated page round-trips
+// to the same neutral record and does not confer authority on arbitrary Markdown.
+export function parseOkfDecisionConcept(text) {
+  const parsed = parseOkfFrontmatter(text);
+  if (!parsed) return null;
+  const f = parsed.values;
+  const keys = [
+    "type", "title", "description", "tags", "x-logbook-export-schema",
+    "x-logbook-record-kind", "x-logbook-card-id", "x-logbook-authority",
+    "x-logbook-current-authoritative", "x-logbook-authority-reasons",
+    "x-logbook-trust-commit", "x-logbook-card-schema", "x-logbook-source-type",
+    "x-logbook-source-commit", "x-logbook-source-ancestry", "x-logbook-evidence-status",
+    "x-logbook-evidence-side", "x-logbook-evidence-file", "x-logbook-evidence-span",
+    "x-logbook-scopes", "x-logbook-proposed-by", "x-logbook-proposed-at",
+    "x-logbook-review-schema", "x-logbook-review-source", "x-logbook-review-verdict",
+    "x-logbook-reviewed-by", "x-logbook-reviewed-at", "x-logbook-source-card-sha256",
+    "x-logbook-decision-card-sha256", "x-logbook-card-bytes-sha256",
+    "x-logbook-review-bytes-sha256", "x-logbook-card-receipt",
+    "x-logbook-review-receipt", "x-logbook-neutral-record-sha256",
+  ];
+  if (Object.keys(f).length !== keys.length || keys.some((key) => !Object.hasOwn(f, key))) return null;
+  const id = f["x-logbook-card-id"];
+  const card = {
+    schema: f["x-logbook-card-schema"],
+    cardId: id,
+    sha: f["x-logbook-source-commit"],
+    sourceType: f["x-logbook-source-type"],
+    claim: f.title,
+    side: f["x-logbook-evidence-side"],
+    evidenceFile: f["x-logbook-evidence-file"],
+    span: f["x-logbook-evidence-span"],
+    scopes: f["x-logbook-scopes"],
+    by: f["x-logbook-proposed-by"],
+    at: f["x-logbook-proposed-at"],
+  };
+  const review = {
+    schema: f["x-logbook-review-schema"],
+    cardId: id,
+    source: f["x-logbook-review-source"],
+    verdict: f["x-logbook-review-verdict"],
+    sourceCardSha256: f["x-logbook-source-card-sha256"],
+    decisionCardSha256: f["x-logbook-decision-card-sha256"],
+    reviewedBy: f["x-logbook-reviewed-by"],
+    reviewedAt: f["x-logbook-reviewed-at"],
+  };
+  const ancestry = f["x-logbook-source-ancestry"], evidenceStatus = f["x-logbook-evidence-status"];
+  if (f["x-logbook-export-schema"] !== OKF_EXPORT_SCHEMA ||
+      f["x-logbook-record-kind"] !== "decision" ||
+      f["x-logbook-authority"] !== "human-reviewed" ||
+      typeof f["x-logbook-current-authoritative"] !== "boolean" ||
+      !Array.isArray(f["x-logbook-authority-reasons"]) ||
+      !OID.test(f["x-logbook-trust-commit"] || "") ||
+      !["ancestor", "non-ancestor", "unmeasurable"].includes(ancestry) ||
+      !validDecisionCard(card) || !validReview(review) ||
+      !["accepted", "edited"].includes(review.verdict) ||
+      review.decisionCardSha256 !== sha256(serializeDecisionCard(card)) ||
+      sha256(serializeDecisionCard(card)) !== f["x-logbook-card-bytes-sha256"] ||
+      sha256(serializeReview(review)) !== f["x-logbook-review-bytes-sha256"])
+    return null;
+  const expectedEvidence = card.sourceType === "machine_source"
+    ? ["grounded", "absent", "unmeasurable"].includes(evidenceStatus)
+    : evidenceStatus === (card.sourceType === "human_attestation"
+      ? "human-attestation" : "not-mechanically-verified");
+  if (!expectedEvidence) return null;
+  const record = okfDecisionRecord(card, review, f["x-logbook-trust-commit"], ancestry, evidenceStatus);
+  const recordHash = sha256(stableContextJson(record));
+  if (renderOkfDecision(record, recordHash) !== text) return null;
+  return { record, recordSha256: recordHash, body: parsed.body };
+}
+
+export function buildOkfProjection(repo, { ref = "HEAD" } = {}) {
+  const fail = (error) => ({ error, exitCode: 1, files: [] });
+  try {
+    const trustCommit = resolveTrustCommit(repo, ref);
+    if (!trustCommit) return fail(`cannot resolve trust ref ${String(ref)}`);
+    const decisions = readPlane(repo, trustCommit, DECISION_PLANE);
+    const leads = readPlane(repo, trustCommit, LEAD_PLANE);
+    const reviews = readReviewPlane(repo, trustCommit);
+    if (decisions.unreadable || leads.unreadable || reviews.unreadable)
+      return fail(`cannot enumerate the decision/review planes at ${trustCommit.slice(0, 12)} (unmeasurable)`);
+    const malformed = [...decisions.malformed, ...leads.malformed, ...reviews.malformed];
+    const state = validateDispositionState(decisions.cards, leads.cards, reviews.reviews);
+    malformed.push(...state.issues);
+    if (malformed.length)
+      return fail(`${malformed.length} malformed card/review relation(s) at the trusted commit (unmeasurable)`);
+    if (decisions.cards.length > OKF_MAX_RECORDS)
+      return fail(`too many reviewed decisions to export (>${OKF_MAX_RECORDS})`);
+
+    const records = [], files = new Map();
+    let bundleBytes = 0, sourceBytes = 0;
+    const addFile = (path, content) => {
+      const bytes = Buffer.byteLength(content);
+      if (bytes > OKF_MAX_FILE_BYTES)
+        throw new Error(`OKF projection file exceeds ${OKF_MAX_FILE_BYTES} bytes: ${path}`);
+      if (bundleBytes + bytes > OKF_MAX_BUNDLE_BYTES)
+        throw new Error(`OKF projection exceeds ${OKF_MAX_BUNDLE_BYTES} aggregate bytes`);
+      files.set(path, content);
+      bundleBytes += bytes;
+    };
+    for (const { card } of [...decisions.cards].sort((a, b) => byteCmp(a.card.cardId, b.card.cardId))) {
+      const review = state.reviewById.get(card.cardId);
+      if (!review) return fail(`decision ${card.cardId} has no byte-bound review`);
+      const cardBytes = serializeDecisionCard(card), reviewBytes = serializeReview(review);
+      sourceBytes += Buffer.byteLength(cardBytes) + Buffer.byteLength(reviewBytes);
+      if (sourceBytes > OKF_MAX_SOURCE_BYTES)
+        return fail(`reviewed decision source exceeds ${OKF_MAX_SOURCE_BYTES} bytes`);
+      const sourceAncestry = ancestryStatus(repo, card.sha, trustCommit);
+      const evidenceStatus = okfEvidenceStatus(repo, card);
+      const record = okfDecisionRecord(card, review, trustCommit, sourceAncestry, evidenceStatus,
+        cardBytes, reviewBytes);
+      const recordSha256 = sha256(stableContextJson(record));
+      const concept = renderOkfDecision(record, recordSha256);
+      const roundTrip = parseOkfDecisionConcept(concept);
+      if (!roundTrip || stableContextJson(roundTrip.record) !== stableContextJson(record))
+        return fail(`internal OKF round-trip failed for ${card.cardId}`);
+      records.push({ ...record, recordSha256 });
+      addFile(record.outputPath, concept);
+      addFile(`receipts/cards/${card.cardId}.json`, cardBytes);
+      addFile(`receipts/reviews/${card.cardId}.json`, reviewBytes);
+    }
+
+    const decisionLinks = records.length
+      ? records.map((record) =>
+        `* [${okfSafe(record.claim)}](${record.id}.md) - ${okfSafe(okfDecisionDescription(record))}`).join("\n")
+      : "No human-reviewed decisions are present at this trust commit.";
+    addFile("decisions/index.md", `# Human-reviewed decisions\n\n${decisionLinks}\n`);
+    addFile("index.md",
+      `---\nokf_version: "${OKF_VERSION}"\n---\n` +
+      `# Logbook decision memory\n\n` +
+      `This is a generated, non-authoritative projection of Logbook records at ` +
+      `\`${trustCommit}\`. Canonical authority remains under \`.logbook/\`; editing this bundle ` +
+      `cannot create or change a Logbook decision.\n\n` +
+      `# Contents\n\n` +
+      `* [Human-reviewed decisions](decisions/index.md) - ${records.length} byte-bound decision${records.length === 1 ? "" : "s"}.\n`);
+
+    const manifest = {
+      schema: OKF_NEUTRAL_SCHEMA,
+      okfVersion: OKF_VERSION,
+      okfSpecCommit: OKF_SPEC_COMMIT,
+      trustCommit,
+      recordCount: records.length,
+      records,
+    };
+    const manifestText = canonicalPrettyJson(manifest);
+    addFile("receipts/neutral-manifest.json", manifestText);
+    const covered = [...files.entries()]
+      .map(([path, content]) => ({ path, bytes: Buffer.byteLength(content), sha256: sha256(content) }))
+      .sort((a, b) => byteCmp(a.path, b.path));
+    const coveredBytes = bundleBytes;
+    const receipt = {
+      schema: OKF_RECEIPT_SCHEMA,
+      exporter: { package: "@promptwheel/logbook", version: PACKAGE_VERSION, schema: OKF_EXPORT_SCHEMA },
+      okfVersion: OKF_VERSION,
+      okfSpecCommit: OKF_SPEC_COMMIT,
+      okfSpecUrl: OKF_SPEC_URL,
+      trustCommit,
+      recordCount: records.length,
+      manifestSha256: sha256(manifestText),
+      coveredFileCount: covered.length,
+      coveredBytes,
+      files: covered,
+      bundleDigest: sha256(stableContextJson(covered)),
+      authoritySource: ".logbook/ (projection is never imported)",
+    };
+    const receiptText = canonicalPrettyJson(receipt);
+    addFile("receipts/projection-receipt.json", receiptText);
+    const orderedFiles = [...files.entries()]
+      .map(([path, content]) => ({ path, content }))
+      .sort((a, b) => byteCmp(a.path, b.path));
+    return {
+      schema: "logbook-okf-projection-v1",
+      exitCode: 0,
+      trustCommit,
+      recordCount: records.length,
+      projectionDigest: sha256(receiptText),
+      files: orderedFiles,
+      manifest,
+      receipt,
+    };
+  } catch (error) {
+    return fail(error?.message || String(error));
+  }
+}
+
+function pathWithin(root, candidate) {
+  const rel = relative(root, candidate);
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
+// Resolve an existing output parent without accepting a caller-controlled
+// redirect. macOS exposes stable root aliases such as /var -> /private/var and
+// /tmp -> /private/tmp, so a blanket lexical === realpath comparison rejects
+// ordinary temp output. Permit only those fixed Darwin aliases after verifying
+// how this host resolves the alias itself. Never derive an exception from
+// TMPDIR/TMP/TEMP: those are caller-controlled. A nested symlink changes the
+// mapped suffix and is still rejected.
+function canonicalOkfParent(requestedParent) {
+  const requested = resolve(requestedParent);
+  const canonical = realpathSync(requested);
+  if (canonical === requested) return canonical;
+  if (process.platform === "darwin") {
+    for (const [alias, destination] of [["/tmp", "/private/tmp"], ["/var", "/private/var"]]) {
+      if (realpathSync(alias) !== destination || !pathWithin(alias, requested)) continue;
+      const expected = resolve(destination, relative(alias, requested));
+      if (canonical === expected) return canonical;
+    }
+  }
+  return null;
+}
+
+// Install one complete generation as a previously absent directory. Refusing
+// overwrite keeps this first exporter from becoming a directory merge/delete
+// engine; regeneration uses a fresh --out until an ownership-checked swap
+// protocol is justified.
+function writeOkfProjection(repo, out, projection) {
+  const fail = (error) => ({ error, exitCode: 1 });
+  if (!projection || projection.error || projection.exitCode !== 0 || !Array.isArray(projection.files))
+    return fail(projection?.error || "invalid OKF projection");
+  if (typeof out !== "string" || !out.trim()) return fail("--out must name a new directory");
+  let repoRoot, parent, target;
+  try {
+    repoRoot = realpathSync(repo);
+    const requested = resolve(out), requestedParent = dirname(requested);
+    parent = canonicalOkfParent(requestedParent);
+    if (!parent)
+      return fail("refusing OKF output through a symlinked parent");
+    const pst = lstatSync(parent);
+    if (!pst.isDirectory() || pst.isSymbolicLink())
+      return fail("OKF output parent must be a real directory");
+    target = join(parent, basename(requested));
+    try {
+      lstatSync(target);
+      return fail("OKF output already exists; choose a new directory");
+    } catch (error) {
+      if (error.code !== "ENOENT") return fail(`cannot inspect OKF output: ${error.code || error.message}`);
+    }
+    const forbidden = [join(repoRoot, ".logbook")];
+    for (const arg of ["--git-dir", "--git-common-dir"]) {
+      const raw = gitRaw(repoRoot, ["rev-parse", arg]).trim();
+      const gitPath = realpathSync(isAbsolute(raw) ? raw : join(repoRoot, raw));
+      forbidden.push(gitPath);
+    }
+    if (target === repoRoot || forbidden.some((root) => pathWithin(root, target)))
+      return fail("refusing OKF output at the repository root or inside .git/.logbook");
+  } catch (error) {
+    return fail(`cannot prepare OKF output: ${error.code || error.message}`);
+  }
+
+  const seen = new Set(); let aggregate = 0;
+  for (const file of projection.files) {
+    if (!file || typeof file.path !== "string" || typeof file.content !== "string" ||
+        file.path.startsWith("/") || file.path.split("/").some((part) => !part || part === "." || part === "..") ||
+        seen.has(file.path))
+      return fail("projection contains an unsafe or duplicate output path");
+    const bytes = Buffer.byteLength(file.content);
+    if (bytes > OKF_MAX_FILE_BYTES) return fail(`projection file too large: ${file.path}`);
+    aggregate += bytes;
+    if (aggregate > OKF_MAX_BUNDLE_BYTES) return fail("projection aggregate size is too large");
+    seen.add(file.path);
+  }
+
+  let stage = null;
+  try {
+    stage = mkdtempSync(join(parent, ".logbook-okf-"));
+    for (const file of projection.files) {
+      const destination = join(stage, ...file.path.split("/"));
+      mkdirSync(dirname(destination), { recursive: true, mode: 0o755 });
+      const canonicalParent = realpathSync(dirname(destination));
+      if (!pathWithin(stage, canonicalParent)) throw new Error("generated path escaped the staging directory");
+      writeFileSync(destination, file.content, { flag: "wx", mode: 0o644 });
+    }
+    // Recheck immediately before the generation-level atomic install. A
+    // concurrent winner leaves a nonempty target, so rename fails coherently.
+    try {
+      lstatSync(target);
+      throw new Error("OKF output appeared during export; refusing overwrite");
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+    chmodSync(stage, 0o755);
+    renameSync(stage, target);
+    stage = null;
+    return {
+      exitCode: 0,
+      out: target,
+      trustCommit: projection.trustCommit,
+      recordCount: projection.recordCount,
+      projectionDigest: projection.projectionDigest,
+    };
+  } catch (error) {
+    return fail(`cannot install OKF projection: ${error.code || error.message}`);
+  } finally {
+    if (stage) {
+      try { rmSync(stage, { recursive: true, force: true }); } catch { /* private best-effort cleanup */ }
+    }
+  }
+}
+
+// Keep build + install indivisible for callers. Exposing the intermediate
+// projection to an external writer would let mutable caller state diverge from
+// its receipt between validation and installation.
+export function exportOkfProjection(repo, out, { ref = "HEAD" } = {}) {
+  const projection = buildOkfProjection(repo, { ref });
+  if (projection.error) return projection;
+  return writeOkfProjection(repo, out, projection);
+}
+
 function todayLocal() { const n = new Date(); return new Date(n.getTime() - n.getTimezoneOffset() * 60000).toISOString().slice(0, 10); }
 // Creation retries keep the first-created date. cardId deliberately excludes
 // `at`, so a retry on a later day must not become a false content conflict.
@@ -2648,12 +3171,22 @@ export function acceptDraft(repo, cardId, opts = {}) {
 // slow/endless stream cannot OOM before publishPolicyLeads' own bounds run.
 const PUBLISH_INPUT_MAX = 8 << 20;
 function readBoundedInput(source, max) {
-  let fd;
-  // O_NOFOLLOW: reject a symlinked candidates path; O_NONBLOCK: a FIFO/device must not block the open.
+  let fd, pathState = null;
+  // O_NOFOLLOW is not effective on every supported platform. Pin the lstat
+  // identity too, then compare it with the held descriptor before reading.
+  if (source !== 0) {
+    try { pathState = lstatSync(source); }
+    catch (e) { return { error: `cannot open input: ${e.code || e.message}` }; }
+    if (!pathState.isFile() || pathState.isSymbolicLink() || pathState.nlink !== 1)
+      return { error: "candidates path must be a private regular file (not a device/FIFO/dir/symlink/hardlink)" };
+  }
   try { fd = source === 0 ? 0 : openSync(source, FS.O_RDONLY | FS.O_NOFOLLOW | FS.O_NONBLOCK); } catch (e) { return { error: `cannot open input: ${e.code || e.message}` }; }
   try {
     const st = fstatSync(fd);
-    if (source !== 0 && !st.isFile()) return { error: "candidates path must be a regular file (not a device/FIFO/dir/symlink)" };
+    if (source !== 0 && (!st.isFile() || st.nlink !== 1))
+      return { error: "candidates path must be a private regular file (not a device/FIFO/dir/symlink/hardlink)" };
+    if (source !== 0 && !sameFileIdentity(pathState, st))
+      return { error: "candidates path changed while opening" };
     if (st.isFile() && st.size > max) return { error: `input too large (>${max} bytes)` };
     const buf = Buffer.alloc(max + 1); let total = 0, n;
     for (;;) {
@@ -2662,6 +3195,13 @@ function readBoundedInput(source, max) {
       if (n <= 0) break;
       total += n;
       if (total > max) return { error: `input too large (>${max} bytes)` };
+    }
+    if (source !== 0) {
+      let after;
+      try { after = lstatSync(source); } catch { return { error: "candidates path changed while reading" }; }
+      if (!after.isFile() || after.isSymbolicLink() || after.nlink !== 1 ||
+          !sameFileIdentity(st, after))
+        return { error: "candidates path changed while reading" };
     }
     const text = decodeUtf8Strict(buf.slice(0, total));
     return text === null ? { error: "input is not valid UTF-8" } : { text };
@@ -2797,6 +3337,18 @@ function killSwitchEngaged(repo, commit) {
   catch (e) { if (e.code !== "ENOENT") return "unmeasurable"; }     // local lstat error (not "absent") => block
   return null;
 }
+// Pure result mapping shared by all three publication checkpoints. Keeping the
+// tri-state in one place prevents a caller from collapsing "unmeasurable" into
+// an ordinary disabled state, while still distinguishing an entry-time policy
+// stop from a state change after the run began.
+function publicationKillFailure(state, phase) {
+  if (!state) return null;
+  if (state === "unmeasurable")
+    return { error: "kill switch state unmeasurable", incomplete: true };
+  if (phase === "entry")
+    return { error: "automation disabled (kill switch)", incomplete: false };
+  return { error: `kill switch engaged ${phase}`, incomplete: true };
+}
 function ancestryStatus(repo, sha, ref) {
   let full = sha;
   if (typeof sha !== "string" || !OID.test(sha)) { const rp = resolveTrustCommit(repo, sha); if (!rp) return "unmeasurable"; full = rp; }
@@ -2822,12 +3374,17 @@ function authorizeScopesEvidence(card, policy) {
 // not be a symlink, hardlink, FIFO/device, oversized file, invalid UTF-8, or mutate
 // while it is being read. Path replacement after open cannot redirect the held fd.
 function readRegularUtf8NoFollow(path, max = MAX_CARD_BYTES) {
-  let fd;
+  let fd, pathBefore;
+  try { pathBefore = lstatSync(path); }
+  catch (e) { return { error: e.code === "ENOENT" ? "missing" : `lstat ${e.code || e.message}` }; }
+  if (!pathBefore.isFile() || pathBefore.isSymbolicLink() || pathBefore.nlink !== 1)
+    return { error: "not a private regular file" };
   try { fd = openSync(path, FS.O_RDONLY | FS.O_NOFOLLOW | FS.O_NONBLOCK); }
   catch (e) { return { error: e.code === "ENOENT" ? "missing" : `open ${e.code || e.message}` }; }
   try {
     const before = fstatSync(fd);
     if (!before.isFile() || before.nlink !== 1) return { error: "not a private regular file" };
+    if (!sameFileIdentity(pathBefore, before)) return { error: "file changed while opening" };
     if (before.size > max) return { error: "file too large" };
     const buf = Buffer.alloc(before.size); let off = 0;
     while (off < buf.length) {
@@ -2838,6 +3395,11 @@ function readRegularUtf8NoFollow(path, max = MAX_CARD_BYTES) {
     const after = fstatSync(fd);
     if (after.dev !== before.dev || after.ino !== before.ino || after.nlink !== 1 ||
         after.size !== before.size || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs)
+      return { error: "file changed while reading" };
+    let pathAfter;
+    try { pathAfter = lstatSync(path); } catch { return { error: "file changed while reading" }; }
+    if (!pathAfter.isFile() || pathAfter.isSymbolicLink() || pathAfter.nlink !== 1 ||
+        !sameFileIdentity(after, pathAfter))
       return { error: "file changed while reading" };
     const text = decodeUtf8Strict(buf);
     return text === null ? { error: "invalid UTF-8" } : { text };
@@ -2936,17 +3498,29 @@ function installCard(dir, cardId, content) {
 export function withPublishLock(repo, fn) {
   let common; try { common = gitRaw(repo, ["rev-parse", "--git-common-dir"]).trim(); } catch { return { __lock: "error", error: "not a git repository" }; }
   const lockDir = join(isAbsolute(common) ? common : join(realpathSync(repo), common), "logbook-publish.lock");
-  const start = process.hrtime.bigint(), budget = 5_000_000_000n;
+  const start = process.hrtime.bigint(), budget = 5_000_000_000n, transientBudget = 250_000_000n;
+  let transientSince = null;
   for (;;) {
     try { mkdirSync(lockDir); break; }
     catch (e) {
-      if (e.code !== "EEXIST") return { __lock: "error", error: `cannot acquire publication lock: ${e.code || e.message}` }; // EACCES/EPERM/etc => structured, never escape the contract
-      if (process.hrtime.bigint() - start > budget) return { __lock: "timeout", error: "publication lock held — if no logbook process is running, remove logbook-publish.lock from the git common dir manually" };
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+      const state = lockCreateState(e, lockDir), now = process.hrtime.bigint();
+      if (state === "error")
+        return { __lock: "error", error: `cannot acquire publication lock: ${e.code || e.message}` }; // EACCES/EPERM/etc => structured, never escape the contract
+      if (state === "transient") {
+        transientSince ??= now;
+        if (now - transientSince > transientBudget)
+          return { __lock: "error", error: `cannot acquire publication lock after bounded retries: ${e.code || e.message}` };
+      } else transientSince = null;
+      if (now - start > budget) {
+        if (state === "held")
+          return { __lock: "timeout", error: "publication lock held — if no logbook process is running, remove logbook-publish.lock from the git common dir manually" };
+        return { __lock: "error", error: `cannot acquire publication lock after bounded retries: ${e.code || e.message}` };
+      }
+      waitSync(20);
     }
   }
   let out, cleanupFailed = false;
-  try { out = fn(); } finally { try { rmdirSync(lockDir); } catch { cleanupFailed = true; } }
+  try { out = fn(); } finally { cleanupFailed = !removeEmptyLockDir(lockDir); }
   if (cleanupFailed && out && typeof out === "object") {
     out.incomplete = true;
     out.cleanupWarning = "publication lock not released; remove logbook-publish.lock from the git common dir manually";
@@ -3089,12 +3663,6 @@ export function publishPolicyLeads(repo, candidates, { trustRef = "HEAD" } = {})
   const counts = { published: 0, idempotent: 0, conflicts: 0, unmeasurable: 0, skipped: [], incomplete: false };
   // every path returns counts + exitCode; nonzero when anything is unfinished.
   const done = (extra = {}) => { const r = { ...counts, ...extra }; r.exitCode = (r.error || r.incomplete || r.unmeasurable > 0 || r.conflicts > 0) ? 1 : 0; return r; };
-  // tri-state kill switch: an UNMEASURABLE marker (state we could not determine) is
-  // incomplete + explicitly unmeasurable; a DEFINITIVELY engaged marker is the
-  // ordinary disabled result. Never collapse "unmeasurable" into "engaged".
-  const killResult = (state, engagedMsg) => state === "unmeasurable"
-    ? done({ error: "kill switch state unmeasurable", incomplete: true })
-    : done({ error: engagedMsg });
   if (!Array.isArray(candidates)) return done({ error: "candidates must be an array" }); // a Set/iterable would bypass the .length cap
   if (candidates.length > MAX_CANDIDATES) return done({ error: `too many candidates (>${MAX_CANDIDATES})` });
   const worktrees = publicationWorktreeCount(repo);
@@ -3108,7 +3676,7 @@ export function publishPolicyLeads(repo, candidates, { trustRef = "HEAD" } = {})
   const pol = loadTrustedPolicy(repo, commit);
   if (pol.error) return done({ error: pol.error, incomplete: Boolean(pol.unmeasurable) });
   const policy = pol.policy;
-  { const ks = killSwitchEngaged(repo, commit); if (ks) return killResult(ks, "automation disabled (kill switch)"); }
+  { const stop = publicationKillFailure(killSwitchEngaged(repo, commit), "entry"); if (stop) return done(stop); }
   // ---- pure evaluation (no writes) ----
   const byId = new Map(), ordered = [];
   for (const cand of candidates) {
@@ -3138,7 +3706,7 @@ export function publishPolicyLeads(repo, candidates, { trustRef = "HEAD" } = {})
   const installable = ordered.filter((r) => !r.conflict);
   // ---- locked: revalidate, count union, install atomically ----
   const locked = withPublishLock(repo, () => {
-    { const ks = killSwitchEngaged(repo, commit); if (ks) return ks === "unmeasurable" ? done({ error: "kill switch state unmeasurable", incomplete: true }) : done({ error: "kill switch engaged before install", incomplete: true }); }
+    { const stop = publicationKillFailure(killSwitchEngaged(repo, commit), "before install"); if (stop) return done(stop); }
     const pol2 = loadTrustedPolicy(repo, commit);
     if (pol2.error || pol2.text !== pol.text) return done({ error: "policy changed mid-run", incomplete: true });
     const pin = pinPlaneDir(repo, LEAD_PLANE);
@@ -3177,7 +3745,7 @@ export function publishPolicyLeads(repo, candidates, { trustRef = "HEAD" } = {})
     for (const rec of installable) {
       const card = rec.card;
       let content = rec.content;
-      { const ks = killSwitchEngaged(repo, commit); if (ks) return done({ error: ks === "unmeasurable" ? "kill switch state unmeasurable" : "kill switch engaged during install", incomplete: true }); } // mid-run: stop, report the partial subset with an explicit reason
+      { const stop = publicationKillFailure(killSwitchEngaged(repo, commit), "during install"); if (stop) return done(stop); } // mid-run: stop, report the partial subset with an explicit reason
       if (dispositioned.has(card.cardId)) { counts.skipped.push({ reason: "already-dispositioned" }); continue; }
       const existingLead = union.has(card.cardId);
       if (existingLead) {
@@ -3316,17 +3884,38 @@ export function migrateLegacyToDrafts(repo, dir = repo) {
   return { drafted, skipped };
 }
 
-// Append one line to a private append-only file without a leaf TOCTOU window:
-// O_NOFOLLOW refuses a symlinked leaf at open time, and we fstat the FD we hold
-// (not the path) so the file cannot be swapped between check and write.
+// Append one line through a held regular-file descriptor. O_NOFOLLOW rejects a
+// symlinked leaf where supported; explicit path/descriptor identity checks
+// cover other platforms and fail closed if the path changes during the write.
 export function appendPrivateLine(path, line, maxBytes = null) {
   // O_NONBLOCK so a FIFO planted at `path` cannot block the open indefinitely;
-  // then require a regular, single-link file (no hardlink aliasing).
-  const fd = openSync(path, FS.O_WRONLY | FS.O_APPEND | FS.O_CREAT | FS.O_NOFOLLOW | FS.O_NONBLOCK, 0o600);
+  // then require a regular, single-link file (no hardlink aliasing). O_NOFOLLOW
+  // is not effective on Windows, so existing files are lstat-pinned before
+  // open; absent files use O_EXCL; both paths bind the held descriptor back to
+  // the final lstat identity before any bytes are written.
+  let pathBefore = null, creating = false;
+  try { pathBefore = lstatSync(path); }
+  catch (error) {
+    if (error.code !== "ENOENT") throw error;
+    creating = true;
+  }
+  if (pathBefore && (!pathBefore.isFile() || pathBefore.isSymbolicLink() || pathBefore.nlink !== 1))
+    throw new Error(`refusing append through non-private regular file: ${path}`);
+  const flags = FS.O_WRONLY | FS.O_APPEND | FS.O_NOFOLLOW | FS.O_NONBLOCK |
+    (creating ? FS.O_CREAT | FS.O_EXCL : 0);
+  const fd = openSync(path, flags, 0o600);
   try {
     const st = fstatSync(fd);
     if (!st.isFile() || st.nlink !== 1)
       throw new Error(`refusing append through non-private regular file: ${path}`);
+    if (pathBefore && !sameFileIdentity(pathBefore, st))
+      throw new Error(`refusing append through a replaced file: ${path}`);
+    let pathAfterOpen;
+    try { pathAfterOpen = lstatSync(path); }
+    catch { throw new Error(`refusing append through a replaced file: ${path}`); }
+    if (!pathAfterOpen.isFile() || pathAfterOpen.isSymbolicLink() || pathAfterOpen.nlink !== 1 ||
+        !sameFileIdentity(st, pathAfterOpen))
+      throw new Error(`refusing append through a replaced file: ${path}`);
     const buf = Buffer.from(line, "utf8");
     if (maxBytes !== null && (st.size > maxBytes || buf.length > maxBytes - st.size))
       throw new Error(`append would exceed ${maxBytes} byte limit: ${path}`);
@@ -3335,6 +3924,12 @@ export function appendPrivateLine(path, line, maxBytes = null) {
       if (!(n > 0)) throw new Error(`short write appending to ${path}`);
       off += n;
     }
+    let pathAfterWrite;
+    try { pathAfterWrite = lstatSync(path); }
+    catch { throw new Error(`append target changed while writing: ${path}`); }
+    if (!pathAfterWrite.isFile() || pathAfterWrite.isSymbolicLink() || pathAfterWrite.nlink !== 1 ||
+        !sameFileIdentity(st, pathAfterWrite))
+      throw new Error(`append target changed while writing: ${path}`);
   } finally { closeSync(fd); }
 }
 
@@ -3406,11 +4001,10 @@ function loadDigestNotesStable(dir) {
 // Compatibility export for integrations that used the 0.8 array loader.
 export function loadAnnotations(dir) { return loadDigestNotes(dir).notes; }
 
-// Serialize only the tiny load -> semantic-dedup -> bounded-append note
-// transaction. Grounding and digest regeneration remain outside this lock.
-// Like Git's index.lock, it is deliberately non-stealable: a crashed holder
-// fails closed with one explicit cleanup path instead of letting waiters fork
-// the append journal or race its size cap.
+// Serialize the load -> semantic-dedup -> bounded-append transaction and each
+// final note snapshot -> digest-bundle replacement. Expensive grounding and
+// history analysis stay outside. Like Git's index.lock, this is deliberately
+// non-stealable: a crashed holder fails closed with one explicit cleanup path.
 function withNoteLock(repo, fn) {
   let common;
   try { common = gitRaw(repo, ["rev-parse", "--git-common-dir"]).trim(); }
@@ -3421,27 +4015,42 @@ function withNoteLock(repo, fn) {
     commonDir = realpathSync(candidate);
   } catch { return { error: "Git common directory is unreadable" }; }
   const lockDir = join(commonDir, "logbook-notes.lock");
-  const start = process.hrtime.bigint(), budget = 5_000_000_000n;
+  const start = process.hrtime.bigint(), budget = 5_000_000_000n, transientBudget = 250_000_000n;
+  let transientSince = null;
   for (;;) {
     try { mkdirSync(lockDir); break; }
     catch (error) {
-      if (error.code !== "EEXIST")
+      const state = lockCreateState(error, lockDir), now = process.hrtime.bigint();
+      if (state === "error")
         return { error: `cannot acquire note lock: ${error.code || error.message}` };
-      if (process.hrtime.bigint() - start > budget)
-        return { error: "note lock held — if no logbook process is running, remove logbook-notes.lock from the Git common directory manually" };
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+      if (state === "transient") {
+        transientSince ??= now;
+        if (now - transientSince > transientBudget)
+          return { error: `cannot acquire note lock after bounded retries: ${error.code || error.message}` };
+      } else transientSince = null;
+      if (now - start > budget) {
+        if (state === "held")
+          return { error: "note lock held — if no logbook process is running, remove logbook-notes.lock from the Git common directory manually" };
+        return { error: `cannot acquire note lock after bounded retries: ${error.code || error.message}` };
+      }
+      waitSync(20);
     }
   }
   let out, cleanupFailed = false;
   try { out = fn(); }
   catch (error) { out = { error: error.code || error.message }; }
-  finally { try { rmdirSync(lockDir); } catch { cleanupFailed = true; } }
+  finally { cleanupFailed = !removeEmptyLockDir(lockDir); }
   if (cleanupFailed && out && typeof out === "object") {
     const warning = "note lock not released; remove logbook-notes.lock from the Git common directory manually";
     if (out.error) out.error = `${out.error}; ${warning}`;
     else out.cleanupWarning = warning;
   }
   return out;
+}
+function withStableNoteSnapshot(repo, fn) {
+  const result = withNoteLock(repo, () => fn(loadDigestNotesStable(repo)));
+  if (result?.cleanupWarning) return { ...result, error: result.cleanupWarning };
+  return result;
 }
 
 export function saveAnnotation(repo, dir, { sha, why, by, span, side, evidenceFile }) {
@@ -3498,9 +4107,11 @@ export function refreshDigestNotes(repo, opts = {}) {
     capped: Boolean(capped), sha256: sha256(ledgerText) };
   const journey = readRegularUtf8NoFollow(join(repo, "JOURNEY.md"), 4 << 20);
   const compare = !journey.error && journey.text.includes("_Percentiles vs the top 2,500 repos on GitHub");
-  for (let attempt = 0; attempt < 8; attempt++) {
-    const notes = loadDigestNotesStable(repo);
-    if (notes.error === "file changed while reading") continue;
+  // The note transaction itself is short and releases this lock before refresh.
+  // Reacquire it only around the final notes snapshot -> artifact write ->
+  // signature check. Concurrent analyzers may run in parallel, but their final
+  // folds serialize, so the last writer always sees the complete note set.
+  const result = withStableNoteSnapshot(repo, (notes) => {
     if (notes.error) return { error: `note store became unreadable during refresh: ${notes.error}` };
     const signature = noteStateDigest(notes);
     try {
@@ -3510,10 +4121,11 @@ export function refreshDigestNotes(repo, opts = {}) {
     } catch (error) {
       return { error: `digest artifacts could not be replaced safely: ${error.code || error.message}` };
     }
-    if (noteStateDigest(loadDigestNotesStable(repo)) === signature)
-      return { refreshed: true, notes: notes.notes.length };
-  }
-  return { error: "note store kept changing; note saved but digest refresh did not converge" };
+    if (noteStateDigest(loadDigestNotesStable(repo)) !== signature)
+      return { error: "note store changed while its lock was held; digest refresh did not converge" };
+    return { refreshed: true, notes: notes.notes.length };
+  });
+  return result;
 }
 
 // Local (uncommitted) changes vs an IMMUTABLE captured commit OID, RAW (no replace/graft):
@@ -3607,7 +4219,7 @@ export function writeCheckMetrics(target, metrics) {
       off += n;
     }
     closeSync(fd); fd = undefined;
-    renameSync(tmp, canonical);
+    renameReplacingSync(tmp, canonical);
   } catch (e) {
     if (fd !== undefined) { try { closeSync(fd); } catch { /* ignore */ } }
     try { unlinkSync(tmp); } catch { /* ignore */ }
@@ -3982,6 +4594,10 @@ const PLANE_REPO_MEMORY_BLOCK = UNPINNED_PLANE_REPO_MEMORY_BLOCK.replaceAll(
   "npx -y @promptwheel/logbook",
   NPX_COMMAND,
 );
+const V091_PLANE_REPO_MEMORY_BLOCK = UNPINNED_PLANE_REPO_MEMORY_BLOCK.replaceAll(
+  "npx -y @promptwheel/logbook",
+  "npx -y @promptwheel/logbook@0.9.1",
+);
 
 // Normal refreshes also upgrade exact, released LMH-era blocks. This is an
 // exact-byte migration only: a user-edited block is never rewritten.
@@ -3989,6 +4605,7 @@ const NORMAL_REFRESH_OLD_BLOCKS = [
   UNPINNED_V090_PLANE_REPO_MEMORY_BLOCK,
   V090_PLANE_REPO_MEMORY_BLOCK,
   UNPINNED_PLANE_REPO_MEMORY_BLOCK,
+  V091_PLANE_REPO_MEMORY_BLOCK,
   `
 ## Repo memory
 Before planning or editing:
@@ -4110,6 +4727,10 @@ function usage() {
                                   (accepted as-is / edited / rejected / pending /
                                   vanished unreviewed) — NOT semantic claim precision;
                                   exits nonzero when history is untrustworthy
+    logbook export [path] --format okf --out DIR [--ref REF]
+                                  generate a deterministic OKF v0.1 projection of
+                                  byte-bound human-reviewed decisions at REF (default
+                                  HEAD); DIR must not already exist; never imported
     logbook pending [path]        local draft decisions awaiting human acceptance
                                   (inert until accept-draft + a trusted commit)
     logbook refine [path] [--limit N]
@@ -4121,7 +4742,7 @@ function usage() {
     -n, --max N        commits to analyze (default ${DEFAULT_MAX})
     --compare          rank your almanac against the top 2,500 GitHub repos
     --since / --until  era-scoped archaeology (git date formats)
-    --out DIR          write artifacts somewhere other than the repo root
+    --out DIR          output directory (history artifacts or a fresh export bundle)
     -q, --quiet        suppress the summary
     -v, --version      print version
 
@@ -4150,6 +4771,7 @@ export function parseArgs(argv) {
     else if (a === "pending") o.cmd = "pending";
     else if (a === "refine") o.cmd = "refine";
     else if (a === "outcomes") o.cmd = "outcomes";
+    else if (a === "export") o.cmd = "export";
     else if (a === "publish") o.cmd = "publish";
     else if (a === "annotate-draft") o.cmd = "annotate-draft";
     else if (a === "accept-draft") o.cmd = "accept-draft";
@@ -4157,6 +4779,8 @@ export function parseArgs(argv) {
     else if (a === "reject-lead") o.cmd = "reject-lead";
     else if (a === "--claim") o.claim = take("--claim");
     else if (a === "--candidates") o.candidates = take("--candidates");
+    else if (a === "--format") o.format = take("--format");
+    else if (a === "--ref") o.ref = take("--ref");
     else if (a === "--diff") o.diff = true;
     else if (a === "--span") o.span = take("--span");
     else if (a === "--side") o.side = take("--side");
@@ -4181,7 +4805,10 @@ export function parseArgs(argv) {
     else if (a === "--grep") o.grep = take("--grep");
     else if (a === "--limit") { const v = take("--limit"); if (v !== undefined) o.limit = Number(v); }
     else if (a === "--cursor") { o.cursorProvided = true; o.cursor = take("--cursor"); }
-    else if (a === "-n" || a === "--max") { const v = take(a); if (v !== undefined) o.max = Number(v); }
+    else if (a === "-n" || a === "--max") {
+      o.maxProvided = true;
+      const v = take(a); if (v !== undefined) o.max = Number(v);
+    }
     else if (a === "--since") o.since = take("--since");
     else if (a === "--until") o.until = take("--until");
     else if (a === "--json") o.json = true;
@@ -4201,7 +4828,10 @@ export function parseArgs(argv) {
     // <sha> "<why>" [repo] — sha + why positional
     o.sha = rest[0]; o.why = rest[1];
     if (rest[2]) o.repo = rest[2];
-  } else if (rest.length) o.repo = rest[0];
+  } else if (rest.length) {
+    o.repo = rest[0];
+    if (o.cmd === "export" && rest.length > 1) o._extraPositionals = rest.slice(1);
+  }
   return o;
 }
 
@@ -4249,6 +4879,35 @@ async function main() {
   }
   const name = basename(repo);
   const shallow = existsSync(join(repo, ".git", "shallow"));
+
+  if (o.cmd === "export") {
+    if (o.format !== "okf" || !o.out || !String(o.out).trim() || !String(o.ref || "HEAD").trim() ||
+        o._extraPositionals?.length) {
+      console.error("  usage: logbook export [path] --format okf --out NEW_DIR [--ref REF]");
+      process.exit(1);
+    }
+    const incompatible = o.json || o.compare || o.diff || o.cursorProvided || o.metricsOut ||
+      o.candidates || o.claim || o.by || o.span || o.side || o.evidenceFile ||
+      o.files?.length || o.since || o.until || o.limit !== undefined ||
+      o.weaken !== undefined || o.downgrade !== undefined || o.revert || o.suppress || o.grep ||
+      o.maxProvided;
+    if (incompatible) {
+      console.error("  export accepts only [path], --format okf, --out DIR, --ref REF, and --quiet");
+      process.exit(1);
+    }
+    const written = exportOkfProjection(repo, o.out, { ref: o.ref || "HEAD" });
+    if (written.error) {
+      console.error(`  export: ${sanitizeContextText(written.error, 700, { markdown: false })}`);
+      process.exit(1);
+    }
+    if (!o.quiet)
+      console.log(`  export: ${written.recordCount} reviewed decision${written.recordCount === 1 ? "" : "s"} → ${sanitizeContextText(written.out, 700, { markdown: false })} (OKF ${OKF_VERSION}; trust ${written.trustCommit.slice(0, 12)}; projection ${written.projectionDigest})`);
+    return;
+  }
+  if (o.format !== undefined || o.ref !== undefined) {
+    console.error("  --format and --ref are valid only with logbook export");
+    process.exit(1);
+  }
 
   if (o.cmd === "doctor") {
     const report = doctorRepo(repo);
@@ -4507,7 +5166,6 @@ async function main() {
   mkdirSync(outDir, { recursive: true });
   // Digest notes remain a separate, explicitly unreviewed recall channel.
   // They are never auto-migrated into the human-review queue.
-  const notes = loadDigestNotes(repo);
   const headSha = git(repo, ["rev-parse", "HEAD"]).trim();
   const ledgerText = events.map((event) => JSON.stringify(event)).join("\n") + "\n";
   const record = {
@@ -4519,10 +5177,14 @@ async function main() {
   };
   // A failed scan may render its explicit warning, but must not persist the
   // partial ledger: the next run could otherwise accept it as clean.
-  writeArtifactBundle(outDir, {
-    name, A, shallow, capped, notes, headSha, record,
-    ledgerText: scanOk ? ledgerText : null, compare: o.compare,
+  const written = withStableNoteSnapshot(repo, (notes) => {
+    writeArtifactBundle(outDir, {
+      name, A, shallow, capped, notes, headSha, record,
+      ledgerText: scanOk ? ledgerText : null, compare: o.compare,
+    });
+    return { written: true };
   });
+  if (written.error) throw new Error(`digest artifacts could not be replaced safely: ${written.error}`);
   // A normal refresh updates exact released wiring too; otherwise LOGBOOK.md
   // would lose LMH while AGENTS.md continued telling the agent to branch on it.
   if (!o.out) refreshReleasedWiring(repo, o.quiet);
