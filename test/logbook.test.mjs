@@ -2,10 +2,10 @@ import { test, before } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
-  mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync,
+  mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, realpathSync,
   symlinkSync, linkSync, readdirSync, chmodSync, statSync, utimesSync,
 } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 
@@ -1592,11 +1592,11 @@ test("init wires the repo once, idempotently, into existing agent files", () => 
   assert.match(agents, /accept-draft CARD_ID --by WHO/);
   assert.match(agents, /Never run accept, accept-draft, accept-lead, or reject-lead/);
   assert.match(agents, /check --diff.*NEXT.*--cursor TOKEN.*END complete/s);
-  assert.equal(PACKAGE_VERSION, "0.9.1");
-  assert.equal(NPX_COMMAND, "npx -y @promptwheel/logbook@0.9.1");
-  assert.match(agents, /npx -y @promptwheel\/logbook@0\.9\.1 context/,
+  assert.equal(PACKAGE_VERSION, "0.9.2");
+  assert.equal(NPX_COMMAND, "npx -y @promptwheel/logbook@0.9.2");
+  assert.match(agents, /npx -y @promptwheel\/logbook@0\.9\.2 context/,
     "generated workflow pins the package that authored it instead of npm latest");
-  assert.match(agents, /npx -y @promptwheel\/logbook@0\.9\.1 pending/,
+  assert.match(agents, /npx -y @promptwheel\/logbook@0\.9\.2 pending/,
     "the optional review handoff works even when the package is only invoked through npx");
   assert.doesNotMatch(agents, /Then run logbook pending/);
   assert.doesNotMatch(agents, /@promptwheel\/logbook context/);
@@ -1843,10 +1843,35 @@ If output says NEXT, repeat with --cursor TOKEN until END complete.
   writeFileSync(join(d6, "AGENTS.md"), pinned090);
   execFileSync(process.execPath, [CLI, d6], { encoding: "utf8" });
   const migrated090 = readFileSync(join(d6, "AGENTS.md"), "utf8");
-  assert.match(migrated090, /@promptwheel\/logbook@0\.9\.1 annotate SHA/);
+  assert.match(migrated090, new RegExp(`@promptwheel/logbook@${PACKAGE_VERSION.replaceAll(".", "\\.")} annotate SHA`));
   assert.match(migrated090, /unreviewed digest note[\s\S]*annotate-draft/,
     "the exact released 0.9.0 workflow migrates to the restored note/card split");
   rmSync(d6, { recursive: true, force: true });
+
+  const d7 = mkdtempSync(join(tmpdir(), "logbook-migrate-pinned-091-plane-"));
+  const g7 = (...a) => execFileSync("git", ["-C", d7, ...a], { env: { ...process.env,
+    GIT_AUTHOR_NAME: "H", GIT_AUTHOR_EMAIL: "h@x.io", GIT_COMMITTER_NAME: "H", GIT_COMMITTER_EMAIL: "h@x.io" } });
+  g7("init", "-q"); writeFileSync(join(d7, "a.js"), "let x = 1;\n");
+  g7("add", "-A"); g7("commit", "-q", "-m", "base");
+  const pinned091 = currentPinned.replaceAll(NPX_COMMAND, "npx -y @promptwheel/logbook@0.9.1");
+  const edited091 = pinned091.replace(
+    "Before planning or editing:",
+    "Before planning or editing:\nCUSTOM USER LINE — leave this block alone",
+  );
+  writeFileSync(join(d7, "AGENTS.md"), pinned091);
+  writeFileSync(join(d7, "CLAUDE.md"), edited091);
+  execFileSync(process.execPath, [CLI, "init", d7], { encoding: "utf8" });
+  const migrated091 = readFileSync(join(d7, "AGENTS.md"), "utf8");
+  assert.match(migrated091, new RegExp(`@promptwheel/logbook@${PACKAGE_VERSION.replaceAll(".", "\\.")} context`),
+    "normal refresh upgrades the exact released 0.9.1 workflow");
+  assert.doesNotMatch(migrated091, /@promptwheel\/logbook@0\.9\.1/);
+  assert.equal(migrated091.split("## Repo memory").length - 1, 1, "0.9.1 migration never duplicates the block");
+  assert.equal(readFileSync(join(d7, "CLAUDE.md"), "utf8"), edited091,
+    "a user-edited 0.9.1-shaped block is not rewritten");
+  execFileSync(process.execPath, [CLI, "init", d7], { encoding: "utf8" });
+  assert.equal(readFileSync(join(d7, "AGENTS.md"), "utf8"), migrated091,
+    "the migrated block is stable on the next refresh");
+  rmSync(d7, { recursive: true, force: true });
 });
 
 test("audit on a suppression-free repo is clean, not an error", () => {
@@ -3984,6 +4009,7 @@ test("OKF projection round-trips one reviewed decision and copies exact native r
   assert.equal(p.manifest.okfVersion, OKF_VERSION);
   assert.equal(p.manifest.okfSpecCommit, OKF_SPEC_COMMIT);
   assert.equal(p.receipt.exporter.schema, OKF_EXPORT_SCHEMA);
+  assert.equal(p.receipt.exporter.version, PACKAGE_VERSION);
   assert.equal(p.receipt.authoritySource, ".logbook/ (projection is never imported)");
 
   const conceptPath = `decisions/${card.cardId}.md`;
@@ -4231,6 +4257,38 @@ test("OKF writer refuses a symlinked parent and leaves its external target untou
   rmSync(d, { recursive: true, force: true });
   rmSync(parent, { recursive: true, force: true });
   rmSync(outside, { recursive: true, force: true });
+});
+
+test("OKF writer does not let caller-controlled temp variables bless a symlink", () => {
+  const { d, card } = reviewedOkfRepo("okf-temp-alias-repo-");
+  const aliasRoot = mkdtempSync(join(tmpdir(), "okf-temp-alias-root-"));
+  const physical = mkdtempSync(join(tmpdir(), "okf-temp-alias-target-"));
+  const alias = join(aliasRoot, "system-temp");
+  symlinkSync(physical, alias, "dir");
+  const out = join(alias, "bundle");
+  const run = spawnSync(process.execPath,
+    [CLI, "export", d, "--format", "okf", "--out", out, "--ref", "HEAD"],
+    { encoding: "utf8", env: { ...process.env, TMPDIR: alias, TMP: alias, TEMP: alias } });
+  assert.equal(run.status, 1);
+  assert.match(run.stderr, /symlinked parent/);
+  assert.ok(!existsSync(join(physical, "bundle", "decisions", `${card.cardId}.md`)));
+  rmSync(d, { recursive: true, force: true });
+  rmSync(aliasRoot, { recursive: true, force: true });
+  rmSync(physical, { recursive: true, force: true });
+});
+
+test("OKF writer accepts Darwin's fixed canonical temp-root alias", {
+  skip: process.platform !== "darwin",
+}, () => {
+  const { d, card } = reviewedOkfRepo("okf-darwin-temp-alias-repo-");
+  const parent = mkdtempSync("/tmp/okf-darwin-temp-alias-");
+  assert.notEqual(realpathSync(parent), resolve(parent), "fixture must traverse Darwin's /tmp alias");
+  const out = join(parent, "bundle");
+  const written = exportOkfProjection(d, out);
+  assert.equal(written.exitCode, 0, written.error);
+  assert.ok(existsSync(join(out, "decisions", `${card.cardId}.md`)));
+  rmSync(d, { recursive: true, force: true });
+  rmSync(parent, { recursive: true, force: true });
 });
 
 test("installed OKF CLI exports a reviewed bundle and refuses ambiguous/unsafe invocations", () => {

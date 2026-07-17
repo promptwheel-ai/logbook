@@ -5,9 +5,11 @@
 > **0.9 instrumented alpha.** The deterministic history layer is ready for
 > use. The opt-in temporal decision layer has a hardened trust boundary, but
 > review adoption, downstream task utility, and token ROI are still being
-> measured. Version `0.9.1` is the corrective release candidate for npm's
-> `next` channel: immediate unreviewed enrichment is restored, while the
-> reviewed decision workflow remains optional.
+> measured. Version `0.9.2` adds an experimental, deterministic, one-way
+> OKF 0.1-draft projection of byte-bound human-reviewed decisions. `.logbook`
+> remains authoritative, and the reviewed decision workflow remains optional.
+> The 0.9 line is distributed only through npm's `next` channel; `latest`
+> remains the stable 0.8 line.
 
 **Git history is large. When coding agents do not inspect it, they can
 re-propose approaches a repository already rejected.**
@@ -24,7 +26,7 @@ objects for evidence checks, and never sends repository data anywhere.
 Node.js 18 or newer is required.
 
 ```bash
-npx -y @promptwheel/logbook@0.9.1 init
+npx -y @promptwheel/logbook@0.9.2 init
 ```
 
 `init` analyzes the repo, writes the history artifacts, and installs a compact
@@ -39,7 +41,7 @@ workflow in `AGENTS.md`, `CLAUDE.md`, or `.cursorrules`.
 ```
 
 The examples below use `logbook` as the binary name. Run them through the exact
-package above, or install `@promptwheel/logbook@0.9.1` locally or globally.
+package above, or install `@promptwheel/logbook@0.9.2` locally or globally.
 
 ## What it stores
 
@@ -253,8 +255,9 @@ hostile committer trustworthy; protect the branch that supplies authority.
 
 ## Open Knowledge Format export
 
-Logbook can project the reviewed decision plane into an
-[Open Knowledge Format (OKF) 0.1](docs/okf-export.md) Markdown bundle:
+Logbook can project the reviewed decision plane into an experimental
+[Open Knowledge Format (OKF) 0.1](https://github.com/promptwheel-ai/logbook/blob/v0.9.2/docs/okf-export.md)
+Markdown bundle:
 
 ```bash
 logbook export . --format okf --out ./logbook-okf --ref HEAD

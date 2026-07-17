@@ -6,6 +6,10 @@ projection compatible with the
 The exporter pins that exact specification revision so a future draft cannot
 silently change the meaning of an existing bundle.
 
+This first interoperability surface is available through the CLI and exported
+JavaScript functions only. It intentionally adds no MCP tool, import path, or
+write-back path.
+
 ## Export
 
 ```bash
@@ -20,10 +24,12 @@ intentionally deferred.
 immutable commit and reads all authority records from that commit with raw Git
 object operations. Dirty working-tree edits do not enter the projection.
 
-`--out` must name a new directory whose parent already exists and is not a
-symlink. The exporter refuses the repository root, `.git`, `.logbook`, unsafe
-paths, and an existing target. It assembles a complete generation in a private
-sibling directory and installs it atomically.
+`--out` must name a new directory whose parent already exists and does not
+traverse a caller-controlled symlink. Stable operating-system aliases for the
+temporary directory (such as macOS `/tmp` → `/private/tmp`) are accepted. The
+exporter refuses the repository root, `.git`, `.logbook`, unsafe paths, and an
+existing target. It assembles a complete generation in a private sibling
+directory and installs it atomically.
 
 ## Bundle
 

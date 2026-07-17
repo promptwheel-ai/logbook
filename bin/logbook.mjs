@@ -2848,6 +2848,27 @@ function pathWithin(root, candidate) {
   return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 }
 
+// Resolve an existing output parent without accepting a caller-controlled
+// redirect. macOS exposes stable root aliases such as /var -> /private/var and
+// /tmp -> /private/tmp, so a blanket lexical === realpath comparison rejects
+// ordinary temp output. Permit only those fixed Darwin aliases after verifying
+// how this host resolves the alias itself. Never derive an exception from
+// TMPDIR/TMP/TEMP: those are caller-controlled. A nested symlink changes the
+// mapped suffix and is still rejected.
+function canonicalOkfParent(requestedParent) {
+  const requested = resolve(requestedParent);
+  const canonical = realpathSync(requested);
+  if (canonical === requested) return canonical;
+  if (process.platform === "darwin") {
+    for (const [alias, destination] of [["/tmp", "/private/tmp"], ["/var", "/private/var"]]) {
+      if (realpathSync(alias) !== destination || !pathWithin(alias, requested)) continue;
+      const expected = resolve(destination, relative(alias, requested));
+      if (canonical === expected) return canonical;
+    }
+  }
+  return null;
+}
+
 // Install one complete generation as a previously absent directory. Refusing
 // overwrite keeps this first exporter from becoming a directory merge/delete
 // engine; regeneration uses a fresh --out until an ownership-checked swap
@@ -2861,8 +2882,8 @@ function writeOkfProjection(repo, out, projection) {
   try {
     repoRoot = realpathSync(repo);
     const requested = resolve(out), requestedParent = dirname(requested);
-    parent = realpathSync(requestedParent);
-    if (parent !== resolve(requestedParent))
+    parent = canonicalOkfParent(requestedParent);
+    if (!parent)
       return fail("refusing OKF output through a symlinked parent");
     const pst = lstatSync(parent);
     if (!pst.isDirectory() || pst.isSymbolicLink())
@@ -4442,6 +4463,10 @@ const PLANE_REPO_MEMORY_BLOCK = UNPINNED_PLANE_REPO_MEMORY_BLOCK.replaceAll(
   "npx -y @promptwheel/logbook",
   NPX_COMMAND,
 );
+const V091_PLANE_REPO_MEMORY_BLOCK = UNPINNED_PLANE_REPO_MEMORY_BLOCK.replaceAll(
+  "npx -y @promptwheel/logbook",
+  "npx -y @promptwheel/logbook@0.9.1",
+);
 
 // Normal refreshes also upgrade exact, released LMH-era blocks. This is an
 // exact-byte migration only: a user-edited block is never rewritten.
@@ -4449,6 +4474,7 @@ const NORMAL_REFRESH_OLD_BLOCKS = [
   UNPINNED_V090_PLANE_REPO_MEMORY_BLOCK,
   V090_PLANE_REPO_MEMORY_BLOCK,
   UNPINNED_PLANE_REPO_MEMORY_BLOCK,
+  V091_PLANE_REPO_MEMORY_BLOCK,
   `
 ## Repo memory
 Before planning or editing:
@@ -4585,7 +4611,7 @@ function usage() {
     -n, --max N        commits to analyze (default ${DEFAULT_MAX})
     --compare          rank your almanac against the top 2,500 GitHub repos
     --since / --until  era-scoped archaeology (git date formats)
-    --out DIR          write artifacts somewhere other than the repo root
+    --out DIR          output directory (history artifacts or a fresh export bundle)
     -q, --quiet        suppress the summary
     -v, --version      print version
 
