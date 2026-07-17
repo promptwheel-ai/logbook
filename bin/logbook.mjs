@@ -51,6 +51,48 @@ export const PACKAGE_VERSION = JSON.parse(
 export const NPX_COMMAND = `npx -y @promptwheel/logbook@${PACKAGE_VERSION}`;
 
 let managedTempId = 0;
+const SYNC_WAIT_CELL = new Int32Array(new SharedArrayBuffer(4));
+function waitSync(ms) { Atomics.wait(SYNC_WAIT_CELL, 0, 0, ms); }
+function sameFileIdentity(a, b) {
+  return a.dev === b.dev && a.ino === b.ino;
+}
+const WINDOWS_TRANSIENT_FS_ERRORS = new Set(["EACCES", "EBUSY", "EPERM"]);
+function renameReplacingSync(from, to) {
+  const start = process.hrtime.bigint(), budget = 500_000_000n;
+  for (;;) {
+    try { renameSync(from, to); return; }
+    catch (error) {
+      if (process.platform !== "win32" || !WINDOWS_TRANSIENT_FS_ERRORS.has(error.code) ||
+          process.hrtime.bigint() - start > budget) throw error;
+      waitSync(10);
+    }
+  }
+}
+function lockCreateState(error, lockDir) {
+  if (error.code === "EEXIST") return "held";
+  if (process.platform !== "win32" || !WINDOWS_TRANSIENT_FS_ERRORS.has(error.code))
+    return "error";
+  // Windows can report EPERM/EACCES/EBUSY while another process creates or
+  // removes the directory. A directory we can see is real contention; an
+  // absent/unstatable path gets only a short per-race grace so a permanent ACL
+  // denial still fails promptly and closed.
+  try { return lstatSync(lockDir).isDirectory() ? "held" : "error"; }
+  catch (statError) {
+    return statError.code === "ENOENT" || WINDOWS_TRANSIENT_FS_ERRORS.has(statError.code)
+      ? "transient" : "error";
+  }
+}
+function removeEmptyLockDir(lockDir) {
+  const start = process.hrtime.bigint(), budget = 500_000_000n;
+  for (;;) {
+    try { rmdirSync(lockDir); return true; }
+    catch (error) {
+      if (process.platform !== "win32" || !WINDOWS_TRANSIENT_FS_ERRORS.has(error.code) ||
+          process.hrtime.bigint() - start > budget) return false;
+      waitSync(10);
+    }
+  }
+}
 
 // Replace generator-managed files atomically and never follow a
 // repository-controlled leaf or parent symlink outside the managed root.
@@ -90,7 +132,7 @@ export function managedWriteFile(base, target, data) {
     // artifacts must retain their permissions even under a restrictive
     // caller umask, so restore the captured mode before the atomic rename.
     if (preserveMode) chmodSync(temp, mode);
-    renameSync(temp, path);
+    renameReplacingSync(temp, path);
   } catch (error) {
     try { if (existsSync(temp)) unlinkSync(temp); } catch { /* best effort */ }
     throw error;
@@ -3129,12 +3171,22 @@ export function acceptDraft(repo, cardId, opts = {}) {
 // slow/endless stream cannot OOM before publishPolicyLeads' own bounds run.
 const PUBLISH_INPUT_MAX = 8 << 20;
 function readBoundedInput(source, max) {
-  let fd;
-  // O_NOFOLLOW: reject a symlinked candidates path; O_NONBLOCK: a FIFO/device must not block the open.
+  let fd, pathState = null;
+  // O_NOFOLLOW is not effective on every supported platform. Pin the lstat
+  // identity too, then compare it with the held descriptor before reading.
+  if (source !== 0) {
+    try { pathState = lstatSync(source); }
+    catch (e) { return { error: `cannot open input: ${e.code || e.message}` }; }
+    if (!pathState.isFile() || pathState.isSymbolicLink() || pathState.nlink !== 1)
+      return { error: "candidates path must be a private regular file (not a device/FIFO/dir/symlink/hardlink)" };
+  }
   try { fd = source === 0 ? 0 : openSync(source, FS.O_RDONLY | FS.O_NOFOLLOW | FS.O_NONBLOCK); } catch (e) { return { error: `cannot open input: ${e.code || e.message}` }; }
   try {
     const st = fstatSync(fd);
-    if (source !== 0 && !st.isFile()) return { error: "candidates path must be a regular file (not a device/FIFO/dir/symlink)" };
+    if (source !== 0 && (!st.isFile() || st.nlink !== 1))
+      return { error: "candidates path must be a private regular file (not a device/FIFO/dir/symlink/hardlink)" };
+    if (source !== 0 && !sameFileIdentity(pathState, st))
+      return { error: "candidates path changed while opening" };
     if (st.isFile() && st.size > max) return { error: `input too large (>${max} bytes)` };
     const buf = Buffer.alloc(max + 1); let total = 0, n;
     for (;;) {
@@ -3143,6 +3195,13 @@ function readBoundedInput(source, max) {
       if (n <= 0) break;
       total += n;
       if (total > max) return { error: `input too large (>${max} bytes)` };
+    }
+    if (source !== 0) {
+      let after;
+      try { after = lstatSync(source); } catch { return { error: "candidates path changed while reading" }; }
+      if (!after.isFile() || after.isSymbolicLink() || after.nlink !== 1 ||
+          !sameFileIdentity(st, after))
+        return { error: "candidates path changed while reading" };
     }
     const text = decodeUtf8Strict(buf.slice(0, total));
     return text === null ? { error: "input is not valid UTF-8" } : { text };
@@ -3278,6 +3337,18 @@ function killSwitchEngaged(repo, commit) {
   catch (e) { if (e.code !== "ENOENT") return "unmeasurable"; }     // local lstat error (not "absent") => block
   return null;
 }
+// Pure result mapping shared by all three publication checkpoints. Keeping the
+// tri-state in one place prevents a caller from collapsing "unmeasurable" into
+// an ordinary disabled state, while still distinguishing an entry-time policy
+// stop from a state change after the run began.
+function publicationKillFailure(state, phase) {
+  if (!state) return null;
+  if (state === "unmeasurable")
+    return { error: "kill switch state unmeasurable", incomplete: true };
+  if (phase === "entry")
+    return { error: "automation disabled (kill switch)", incomplete: false };
+  return { error: `kill switch engaged ${phase}`, incomplete: true };
+}
 function ancestryStatus(repo, sha, ref) {
   let full = sha;
   if (typeof sha !== "string" || !OID.test(sha)) { const rp = resolveTrustCommit(repo, sha); if (!rp) return "unmeasurable"; full = rp; }
@@ -3303,12 +3374,17 @@ function authorizeScopesEvidence(card, policy) {
 // not be a symlink, hardlink, FIFO/device, oversized file, invalid UTF-8, or mutate
 // while it is being read. Path replacement after open cannot redirect the held fd.
 function readRegularUtf8NoFollow(path, max = MAX_CARD_BYTES) {
-  let fd;
+  let fd, pathBefore;
+  try { pathBefore = lstatSync(path); }
+  catch (e) { return { error: e.code === "ENOENT" ? "missing" : `lstat ${e.code || e.message}` }; }
+  if (!pathBefore.isFile() || pathBefore.isSymbolicLink() || pathBefore.nlink !== 1)
+    return { error: "not a private regular file" };
   try { fd = openSync(path, FS.O_RDONLY | FS.O_NOFOLLOW | FS.O_NONBLOCK); }
   catch (e) { return { error: e.code === "ENOENT" ? "missing" : `open ${e.code || e.message}` }; }
   try {
     const before = fstatSync(fd);
     if (!before.isFile() || before.nlink !== 1) return { error: "not a private regular file" };
+    if (!sameFileIdentity(pathBefore, before)) return { error: "file changed while opening" };
     if (before.size > max) return { error: "file too large" };
     const buf = Buffer.alloc(before.size); let off = 0;
     while (off < buf.length) {
@@ -3319,6 +3395,11 @@ function readRegularUtf8NoFollow(path, max = MAX_CARD_BYTES) {
     const after = fstatSync(fd);
     if (after.dev !== before.dev || after.ino !== before.ino || after.nlink !== 1 ||
         after.size !== before.size || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs)
+      return { error: "file changed while reading" };
+    let pathAfter;
+    try { pathAfter = lstatSync(path); } catch { return { error: "file changed while reading" }; }
+    if (!pathAfter.isFile() || pathAfter.isSymbolicLink() || pathAfter.nlink !== 1 ||
+        !sameFileIdentity(after, pathAfter))
       return { error: "file changed while reading" };
     const text = decodeUtf8Strict(buf);
     return text === null ? { error: "invalid UTF-8" } : { text };
@@ -3417,17 +3498,29 @@ function installCard(dir, cardId, content) {
 export function withPublishLock(repo, fn) {
   let common; try { common = gitRaw(repo, ["rev-parse", "--git-common-dir"]).trim(); } catch { return { __lock: "error", error: "not a git repository" }; }
   const lockDir = join(isAbsolute(common) ? common : join(realpathSync(repo), common), "logbook-publish.lock");
-  const start = process.hrtime.bigint(), budget = 5_000_000_000n;
+  const start = process.hrtime.bigint(), budget = 5_000_000_000n, transientBudget = 250_000_000n;
+  let transientSince = null;
   for (;;) {
     try { mkdirSync(lockDir); break; }
     catch (e) {
-      if (e.code !== "EEXIST") return { __lock: "error", error: `cannot acquire publication lock: ${e.code || e.message}` }; // EACCES/EPERM/etc => structured, never escape the contract
-      if (process.hrtime.bigint() - start > budget) return { __lock: "timeout", error: "publication lock held — if no logbook process is running, remove logbook-publish.lock from the git common dir manually" };
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+      const state = lockCreateState(e, lockDir), now = process.hrtime.bigint();
+      if (state === "error")
+        return { __lock: "error", error: `cannot acquire publication lock: ${e.code || e.message}` }; // EACCES/EPERM/etc => structured, never escape the contract
+      if (state === "transient") {
+        transientSince ??= now;
+        if (now - transientSince > transientBudget)
+          return { __lock: "error", error: `cannot acquire publication lock after bounded retries: ${e.code || e.message}` };
+      } else transientSince = null;
+      if (now - start > budget) {
+        if (state === "held")
+          return { __lock: "timeout", error: "publication lock held — if no logbook process is running, remove logbook-publish.lock from the git common dir manually" };
+        return { __lock: "error", error: `cannot acquire publication lock after bounded retries: ${e.code || e.message}` };
+      }
+      waitSync(20);
     }
   }
   let out, cleanupFailed = false;
-  try { out = fn(); } finally { try { rmdirSync(lockDir); } catch { cleanupFailed = true; } }
+  try { out = fn(); } finally { cleanupFailed = !removeEmptyLockDir(lockDir); }
   if (cleanupFailed && out && typeof out === "object") {
     out.incomplete = true;
     out.cleanupWarning = "publication lock not released; remove logbook-publish.lock from the git common dir manually";
@@ -3570,12 +3663,6 @@ export function publishPolicyLeads(repo, candidates, { trustRef = "HEAD" } = {})
   const counts = { published: 0, idempotent: 0, conflicts: 0, unmeasurable: 0, skipped: [], incomplete: false };
   // every path returns counts + exitCode; nonzero when anything is unfinished.
   const done = (extra = {}) => { const r = { ...counts, ...extra }; r.exitCode = (r.error || r.incomplete || r.unmeasurable > 0 || r.conflicts > 0) ? 1 : 0; return r; };
-  // tri-state kill switch: an UNMEASURABLE marker (state we could not determine) is
-  // incomplete + explicitly unmeasurable; a DEFINITIVELY engaged marker is the
-  // ordinary disabled result. Never collapse "unmeasurable" into "engaged".
-  const killResult = (state, engagedMsg) => state === "unmeasurable"
-    ? done({ error: "kill switch state unmeasurable", incomplete: true })
-    : done({ error: engagedMsg });
   if (!Array.isArray(candidates)) return done({ error: "candidates must be an array" }); // a Set/iterable would bypass the .length cap
   if (candidates.length > MAX_CANDIDATES) return done({ error: `too many candidates (>${MAX_CANDIDATES})` });
   const worktrees = publicationWorktreeCount(repo);
@@ -3589,7 +3676,7 @@ export function publishPolicyLeads(repo, candidates, { trustRef = "HEAD" } = {})
   const pol = loadTrustedPolicy(repo, commit);
   if (pol.error) return done({ error: pol.error, incomplete: Boolean(pol.unmeasurable) });
   const policy = pol.policy;
-  { const ks = killSwitchEngaged(repo, commit); if (ks) return killResult(ks, "automation disabled (kill switch)"); }
+  { const stop = publicationKillFailure(killSwitchEngaged(repo, commit), "entry"); if (stop) return done(stop); }
   // ---- pure evaluation (no writes) ----
   const byId = new Map(), ordered = [];
   for (const cand of candidates) {
@@ -3619,7 +3706,7 @@ export function publishPolicyLeads(repo, candidates, { trustRef = "HEAD" } = {})
   const installable = ordered.filter((r) => !r.conflict);
   // ---- locked: revalidate, count union, install atomically ----
   const locked = withPublishLock(repo, () => {
-    { const ks = killSwitchEngaged(repo, commit); if (ks) return ks === "unmeasurable" ? done({ error: "kill switch state unmeasurable", incomplete: true }) : done({ error: "kill switch engaged before install", incomplete: true }); }
+    { const stop = publicationKillFailure(killSwitchEngaged(repo, commit), "before install"); if (stop) return done(stop); }
     const pol2 = loadTrustedPolicy(repo, commit);
     if (pol2.error || pol2.text !== pol.text) return done({ error: "policy changed mid-run", incomplete: true });
     const pin = pinPlaneDir(repo, LEAD_PLANE);
@@ -3658,7 +3745,7 @@ export function publishPolicyLeads(repo, candidates, { trustRef = "HEAD" } = {})
     for (const rec of installable) {
       const card = rec.card;
       let content = rec.content;
-      { const ks = killSwitchEngaged(repo, commit); if (ks) return done({ error: ks === "unmeasurable" ? "kill switch state unmeasurable" : "kill switch engaged during install", incomplete: true }); } // mid-run: stop, report the partial subset with an explicit reason
+      { const stop = publicationKillFailure(killSwitchEngaged(repo, commit), "during install"); if (stop) return done(stop); } // mid-run: stop, report the partial subset with an explicit reason
       if (dispositioned.has(card.cardId)) { counts.skipped.push({ reason: "already-dispositioned" }); continue; }
       const existingLead = union.has(card.cardId);
       if (existingLead) {
@@ -3797,17 +3884,38 @@ export function migrateLegacyToDrafts(repo, dir = repo) {
   return { drafted, skipped };
 }
 
-// Append one line to a private append-only file without a leaf TOCTOU window:
-// O_NOFOLLOW refuses a symlinked leaf at open time, and we fstat the FD we hold
-// (not the path) so the file cannot be swapped between check and write.
+// Append one line through a held regular-file descriptor. O_NOFOLLOW rejects a
+// symlinked leaf where supported; explicit path/descriptor identity checks
+// cover other platforms and fail closed if the path changes during the write.
 export function appendPrivateLine(path, line, maxBytes = null) {
   // O_NONBLOCK so a FIFO planted at `path` cannot block the open indefinitely;
-  // then require a regular, single-link file (no hardlink aliasing).
-  const fd = openSync(path, FS.O_WRONLY | FS.O_APPEND | FS.O_CREAT | FS.O_NOFOLLOW | FS.O_NONBLOCK, 0o600);
+  // then require a regular, single-link file (no hardlink aliasing). O_NOFOLLOW
+  // is not effective on Windows, so existing files are lstat-pinned before
+  // open; absent files use O_EXCL; both paths bind the held descriptor back to
+  // the final lstat identity before any bytes are written.
+  let pathBefore = null, creating = false;
+  try { pathBefore = lstatSync(path); }
+  catch (error) {
+    if (error.code !== "ENOENT") throw error;
+    creating = true;
+  }
+  if (pathBefore && (!pathBefore.isFile() || pathBefore.isSymbolicLink() || pathBefore.nlink !== 1))
+    throw new Error(`refusing append through non-private regular file: ${path}`);
+  const flags = FS.O_WRONLY | FS.O_APPEND | FS.O_NOFOLLOW | FS.O_NONBLOCK |
+    (creating ? FS.O_CREAT | FS.O_EXCL : 0);
+  const fd = openSync(path, flags, 0o600);
   try {
     const st = fstatSync(fd);
     if (!st.isFile() || st.nlink !== 1)
       throw new Error(`refusing append through non-private regular file: ${path}`);
+    if (pathBefore && !sameFileIdentity(pathBefore, st))
+      throw new Error(`refusing append through a replaced file: ${path}`);
+    let pathAfterOpen;
+    try { pathAfterOpen = lstatSync(path); }
+    catch { throw new Error(`refusing append through a replaced file: ${path}`); }
+    if (!pathAfterOpen.isFile() || pathAfterOpen.isSymbolicLink() || pathAfterOpen.nlink !== 1 ||
+        !sameFileIdentity(st, pathAfterOpen))
+      throw new Error(`refusing append through a replaced file: ${path}`);
     const buf = Buffer.from(line, "utf8");
     if (maxBytes !== null && (st.size > maxBytes || buf.length > maxBytes - st.size))
       throw new Error(`append would exceed ${maxBytes} byte limit: ${path}`);
@@ -3816,6 +3924,12 @@ export function appendPrivateLine(path, line, maxBytes = null) {
       if (!(n > 0)) throw new Error(`short write appending to ${path}`);
       off += n;
     }
+    let pathAfterWrite;
+    try { pathAfterWrite = lstatSync(path); }
+    catch { throw new Error(`append target changed while writing: ${path}`); }
+    if (!pathAfterWrite.isFile() || pathAfterWrite.isSymbolicLink() || pathAfterWrite.nlink !== 1 ||
+        !sameFileIdentity(st, pathAfterWrite))
+      throw new Error(`append target changed while writing: ${path}`);
   } finally { closeSync(fd); }
 }
 
@@ -3887,11 +4001,10 @@ function loadDigestNotesStable(dir) {
 // Compatibility export for integrations that used the 0.8 array loader.
 export function loadAnnotations(dir) { return loadDigestNotes(dir).notes; }
 
-// Serialize only the tiny load -> semantic-dedup -> bounded-append note
-// transaction. Grounding and digest regeneration remain outside this lock.
-// Like Git's index.lock, it is deliberately non-stealable: a crashed holder
-// fails closed with one explicit cleanup path instead of letting waiters fork
-// the append journal or race its size cap.
+// Serialize the load -> semantic-dedup -> bounded-append transaction and each
+// final note snapshot -> digest-bundle replacement. Expensive grounding and
+// history analysis stay outside. Like Git's index.lock, this is deliberately
+// non-stealable: a crashed holder fails closed with one explicit cleanup path.
 function withNoteLock(repo, fn) {
   let common;
   try { common = gitRaw(repo, ["rev-parse", "--git-common-dir"]).trim(); }
@@ -3902,27 +4015,42 @@ function withNoteLock(repo, fn) {
     commonDir = realpathSync(candidate);
   } catch { return { error: "Git common directory is unreadable" }; }
   const lockDir = join(commonDir, "logbook-notes.lock");
-  const start = process.hrtime.bigint(), budget = 5_000_000_000n;
+  const start = process.hrtime.bigint(), budget = 5_000_000_000n, transientBudget = 250_000_000n;
+  let transientSince = null;
   for (;;) {
     try { mkdirSync(lockDir); break; }
     catch (error) {
-      if (error.code !== "EEXIST")
+      const state = lockCreateState(error, lockDir), now = process.hrtime.bigint();
+      if (state === "error")
         return { error: `cannot acquire note lock: ${error.code || error.message}` };
-      if (process.hrtime.bigint() - start > budget)
-        return { error: "note lock held — if no logbook process is running, remove logbook-notes.lock from the Git common directory manually" };
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+      if (state === "transient") {
+        transientSince ??= now;
+        if (now - transientSince > transientBudget)
+          return { error: `cannot acquire note lock after bounded retries: ${error.code || error.message}` };
+      } else transientSince = null;
+      if (now - start > budget) {
+        if (state === "held")
+          return { error: "note lock held — if no logbook process is running, remove logbook-notes.lock from the Git common directory manually" };
+        return { error: `cannot acquire note lock after bounded retries: ${error.code || error.message}` };
+      }
+      waitSync(20);
     }
   }
   let out, cleanupFailed = false;
   try { out = fn(); }
   catch (error) { out = { error: error.code || error.message }; }
-  finally { try { rmdirSync(lockDir); } catch { cleanupFailed = true; } }
+  finally { cleanupFailed = !removeEmptyLockDir(lockDir); }
   if (cleanupFailed && out && typeof out === "object") {
     const warning = "note lock not released; remove logbook-notes.lock from the Git common directory manually";
     if (out.error) out.error = `${out.error}; ${warning}`;
     else out.cleanupWarning = warning;
   }
   return out;
+}
+function withStableNoteSnapshot(repo, fn) {
+  const result = withNoteLock(repo, () => fn(loadDigestNotesStable(repo)));
+  if (result?.cleanupWarning) return { ...result, error: result.cleanupWarning };
+  return result;
 }
 
 export function saveAnnotation(repo, dir, { sha, why, by, span, side, evidenceFile }) {
@@ -3979,9 +4107,11 @@ export function refreshDigestNotes(repo, opts = {}) {
     capped: Boolean(capped), sha256: sha256(ledgerText) };
   const journey = readRegularUtf8NoFollow(join(repo, "JOURNEY.md"), 4 << 20);
   const compare = !journey.error && journey.text.includes("_Percentiles vs the top 2,500 repos on GitHub");
-  for (let attempt = 0; attempt < 8; attempt++) {
-    const notes = loadDigestNotesStable(repo);
-    if (notes.error === "file changed while reading") continue;
+  // The note transaction itself is short and releases this lock before refresh.
+  // Reacquire it only around the final notes snapshot -> artifact write ->
+  // signature check. Concurrent analyzers may run in parallel, but their final
+  // folds serialize, so the last writer always sees the complete note set.
+  const result = withStableNoteSnapshot(repo, (notes) => {
     if (notes.error) return { error: `note store became unreadable during refresh: ${notes.error}` };
     const signature = noteStateDigest(notes);
     try {
@@ -3991,10 +4121,11 @@ export function refreshDigestNotes(repo, opts = {}) {
     } catch (error) {
       return { error: `digest artifacts could not be replaced safely: ${error.code || error.message}` };
     }
-    if (noteStateDigest(loadDigestNotesStable(repo)) === signature)
-      return { refreshed: true, notes: notes.notes.length };
-  }
-  return { error: "note store kept changing; note saved but digest refresh did not converge" };
+    if (noteStateDigest(loadDigestNotesStable(repo)) !== signature)
+      return { error: "note store changed while its lock was held; digest refresh did not converge" };
+    return { refreshed: true, notes: notes.notes.length };
+  });
+  return result;
 }
 
 // Local (uncommitted) changes vs an IMMUTABLE captured commit OID, RAW (no replace/graft):
@@ -4088,7 +4219,7 @@ export function writeCheckMetrics(target, metrics) {
       off += n;
     }
     closeSync(fd); fd = undefined;
-    renameSync(tmp, canonical);
+    renameReplacingSync(tmp, canonical);
   } catch (e) {
     if (fd !== undefined) { try { closeSync(fd); } catch { /* ignore */ } }
     try { unlinkSync(tmp); } catch { /* ignore */ }
@@ -5035,7 +5166,6 @@ async function main() {
   mkdirSync(outDir, { recursive: true });
   // Digest notes remain a separate, explicitly unreviewed recall channel.
   // They are never auto-migrated into the human-review queue.
-  const notes = loadDigestNotes(repo);
   const headSha = git(repo, ["rev-parse", "HEAD"]).trim();
   const ledgerText = events.map((event) => JSON.stringify(event)).join("\n") + "\n";
   const record = {
@@ -5047,10 +5177,14 @@ async function main() {
   };
   // A failed scan may render its explicit warning, but must not persist the
   // partial ledger: the next run could otherwise accept it as clean.
-  writeArtifactBundle(outDir, {
-    name, A, shallow, capped, notes, headSha, record,
-    ledgerText: scanOk ? ledgerText : null, compare: o.compare,
+  const written = withStableNoteSnapshot(repo, (notes) => {
+    writeArtifactBundle(outDir, {
+      name, A, shallow, capped, notes, headSha, record,
+      ledgerText: scanOk ? ledgerText : null, compare: o.compare,
+    });
+    return { written: true };
   });
+  if (written.error) throw new Error(`digest artifacts could not be replaced safely: ${written.error}`);
   // A normal refresh updates exact released wiring too; otherwise LOGBOOK.md
   // would lose LMH while AGENTS.md continued telling the agent to branch on it.
   if (!o.out) refreshReleasedWiring(repo, o.quiet);

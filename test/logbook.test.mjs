@@ -6,8 +6,8 @@ import {
   symlinkSync, linkSync, readdirSync, chmodSync, statSync, utimesSync,
 } from "node:fs";
 import { join, dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-import { tmpdir } from "node:os";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { devNull, tmpdir } from "node:os";
 
 import {
   SUPPRESS_PAT, classifyFile, parseArgs, collectEvents, diffScan, hotspots, analyze,
@@ -677,7 +677,10 @@ test("concurrent distinct CLI drafts preserve every independently-addressed card
     g(["commit", "-q", "-m", "annotation target"]);
     const sha = g(["rev-parse", "HEAD"]).trim();
     const writers = 16;
-    await Promise.all(Array.from({ length: writers }, (_, index) => runAnnotation(sha, index)));
+    const outcomes = await Promise.allSettled(
+      Array.from({ length: writers }, (_, index) => runAnnotation(sha, index)));
+    assert.deepEqual(outcomes.filter((outcome) => outcome.status === "rejected"), [],
+      "all concurrent draft writers complete before fixture cleanup");
 
     const draftDir = join(d, ".logbook", "drafts");
     const rows = readdirSync(draftDir).filter((file) => file.endsWith(".json"))
@@ -714,7 +717,10 @@ test("concurrent note writers preserve every logical note and leave the digest a
       shas.push(g("rev-parse", "HEAD").trim());
     }
     execFileSync(process.execPath, [CLI, d, "-q"], { env });
-    await Promise.all(shas.map((sha, i) => run(sha, `reason-${i}`, `writer-${i}`)));
+    let outcomes = await Promise.allSettled(
+      shas.map((sha, i) => run(sha, `reason-${i}`, `writer-${i}`)));
+    assert.deepEqual(outcomes.filter((outcome) => outcome.status === "rejected"), [],
+      "all concurrent note writers complete before fixture cleanup");
     const state = loadDigestNotes(d);
     assert.equal(state.error, null); assert.equal(state.malformed, 0); assert.equal(state.notes.length, 8);
     const digest = readFileSync(join(d, "LOGBOOK.md"), "utf8");
@@ -726,7 +732,10 @@ test("concurrent note writers preserve every logical note and leave the digest a
     const padSha = "f".repeat(40);
     const pad = (JSON.stringify({ sha: padSha, why: "p".repeat(400), by: "pad", date: "2026-07-15" }) + "\n").repeat(6000);
     writeFileSync(store, Buffer.concat([readFileSync(store), Buffer.from(pad)]));
-    await Promise.all(Array.from({ length: 8 }, () => run(shas[0], "reason-0", "writer-0")));
+    outcomes = await Promise.allSettled(
+      Array.from({ length: 8 }, () => run(shas[0], "reason-0", "writer-0")));
+    assert.deepEqual(outcomes.filter((outcome) => outcome.status === "rejected"), [],
+      "all concurrent retry writers complete before fixture cleanup");
     assert.equal(loadDigestNotes(d).notes.length, 9, "concurrent identical retries remain one logical note");
     const physical = readFileSync(store, "utf8").split("\n").filter(Boolean)
       .map((line) => JSON.parse(line)).filter((row) => row.sha === shas[0] && row.why === "reason-0");
@@ -1946,7 +1955,7 @@ test("scope matching is exact: directory prefix works, duplicate basenames do no
   rmSync;
 });
 
-test("appendPrivateLine refuses a symlinked target (O_NOFOLLOW)", () => {
+test("appendPrivateLine refuses a symlinked target on every platform", () => {
   const d = mkdtempSync(join(tmpdir(), "logbook-nofollow-"));
   const outside = join(d, "outside.txt");
   const link = join(d, "managed.txt");
@@ -2038,7 +2047,11 @@ test("unsafe or corrupt note stores never block history rendering or redirect a 
     assert.match(saveAnnotation(r, r, { sha: [sha], why: "type confusion", by: "codex" }).error, /string/);
     rmSync(r, { recursive: true, force: true });
   }
-  const variants = ["symlink", "hardlink", "fifo", "directory"];
+  // Windows has no mkfifo fixture; the symlink, hardlink, and directory cases
+  // still exercise its native path/descriptor boundary.
+  const variants = process.platform === "win32"
+    ? ["symlink", "hardlink", "directory"]
+    : ["symlink", "hardlink", "fifo", "directory"];
   for (const variant of variants) {
     const { r, sha } = mkHistoryRepo();
     const notePath = join(r, "annotations.jsonl");
@@ -2902,9 +2915,27 @@ test("gate12: a conflicting publish never corrupts the existing card; no temp le
 test("gate13: concurrent publish with max_total_cards=1 yields exactly one new card", async () => {
   const { d, sha } = policyRepo("g13-", 'enabled = true\nallowed_scopes = ["src/"]\nmax_cards_per_run = 5\nmax_total_cards = 1\n');
   const worker = join(d, "pub.mjs");
-  writeFileSync(worker, `import { publishPolicyLeads } from ${JSON.stringify(CLI)};\nconst [,, dir, i] = process.argv;\npublishPolicyLeads(dir, [{ sha: ${JSON.stringify(sha)}, claim: "c" + i, span: "createPool", side: "diff", evidenceFile: "src/db.js", scopes: ["src/db.js"] }]);\n`);
-  await Promise.all([0, 1, 2, 3, 4, 5].map((i) => new Promise((res) => spawn(process.execPath, [worker, d, String(i)], { stdio: "ignore" }).on("exit", () => res()))));
+  writeFileSync(worker, `import { publishPolicyLeads } from ${JSON.stringify(pathToFileURL(CLI).href)};\nconst [,, dir, i] = process.argv;\nconst result = publishPolicyLeads(dir, [{ sha: ${JSON.stringify(sha)}, claim: "c" + i, span: "createPool", side: "diff", evidenceFile: "src/db.js", scopes: ["src/db.js"] }]);\nprocess.stdout.write(JSON.stringify(result));\nprocess.exitCode = result.exitCode;\n`);
+  const results = await Promise.all([0, 1, 2, 3, 4, 5].map((i) =>
+    new Promise((resolvePromise, rejectPromise) => {
+      const child = spawn(process.execPath, [worker, d, String(i)], { stdio: ["ignore", "pipe", "pipe"] });
+      let stdout = "", stderr = "";
+      child.stdout.setEncoding("utf8"); child.stderr.setEncoding("utf8");
+      child.stdout.on("data", (chunk) => { stdout += chunk; });
+      child.stderr.on("data", (chunk) => { stderr += chunk; });
+      child.once("error", rejectPromise);
+      child.once("close", (code) => {
+        if (code !== 0) return rejectPromise(new Error(`publisher ${i} exited ${code}: ${stderr || stdout}`));
+        try { resolvePromise(JSON.parse(stdout)); }
+        catch (error) { rejectPromise(new Error(`publisher ${i} returned invalid JSON: ${error.message}: ${stdout}`)); }
+      });
+    })));
+  assert.equal(results.reduce((sum, result) => sum + result.published, 0), 1);
+  assert.equal(results.filter((result) => result.skipped.some((skip) => skip.reason === "total-cap")).length, 5);
+  assert.equal(results.every((result) => !result.incomplete && result.conflicts === 0), true);
   assert.equal(leadCount(d), 1, "expected exactly one card under max_total=1");
+  assert.equal(existsSync(join(d, ".git", "logbook-publish.lock")), false);
+  assert.equal(readdirSync(join(d, ".logbook", "leads")).some((file) => file.startsWith(".tmp.")), false);
   rmSync(d, { recursive: true, force: true });
 });
 
@@ -3186,7 +3217,11 @@ test("closure2: an unreadable trusted decision plane is unmeasurable at read (ne
   rmSync(d, { recursive: true, force: true });
 });
 
-test("closure2: a non-EEXIST lock-acquisition error returns the structured contract (never throws)", () => {
+test("closure2: a non-EEXIST lock-acquisition error returns the structured contract (never throws)", (t) => {
+  if (process.platform === "win32") {
+    t.skip("Windows chmod cannot construct a directory-search EACCES fixture");
+    return;
+  }
   const { d, sha } = policyRepo("clacc-", GOOD_TOML);
   const gitDir = join(d, ".git");
   chmodSync(gitDir, 0o500);                                     // deny creating the lock dir in the common dir => EACCES
@@ -3201,7 +3236,11 @@ test("closure2: a non-EEXIST lock-acquisition error returns the structured contr
   rmSync(d, { recursive: true, force: true });
 });
 
-test("closure2: an UNREADABLE worktree lead plane fails closed — no quota bypass via chmod (readdir EACCES)", () => {
+test("closure2: an UNREADABLE worktree lead plane fails closed — no quota bypass via chmod (readdir EACCES)", (t) => {
+  if (process.platform === "win32") {
+    t.skip("Windows chmod cannot construct an unreadable-directory fixture");
+    return;
+  }
   const { d, sha } = policyRepo("cwt-", 'enabled = true\nallowed_scopes = ["src/"]\nmax_cards_per_run = 5\nmax_total_cards = 1\n');
   const leads = join(d, ".logbook", "leads");
   assert.equal(publishPolicyLeads(d, [goodCand(sha)]).published, 1);           // 1 lead accrued in the worktree
@@ -3214,7 +3253,11 @@ test("closure2: an UNREADABLE worktree lead plane fails closed — no quota bypa
   rmSync(d, { recursive: true, force: true });
 });
 
-test("closure3: a kill switch that becomes UNMEASURABLE mid-run returns the partial subset WITH an explicit unmeasurable error", () => {
+test("closure3: a kill switch that becomes UNMEASURABLE mid-run returns the partial subset WITH an explicit unmeasurable error", (t) => {
+  if (process.platform === "win32") {
+    t.skip("Windows chmod cannot remove directory-search permission mid-run");
+    return;
+  }
   const N = 80;
   const { d, g, sha } = policyRepo("cmidu-", 'enabled = true\nallowed_scopes = ["src/"]\nmax_cards_per_run = ' + N + '\nmax_total_cards = ' + N + '\n');
   const dotlog = join(d, ".logbook");
@@ -3369,9 +3412,19 @@ test("closure4: a nested card (not exactly .logbook/<plane>/<id>.json) is malfor
 test("closure4: a symlink-mode card is malformed, never surfaces (regular-file mode required)", () => {
   const { d, g, sha } = poolRepo("csym-");
   const card = mkDecision({ sha, evidenceFile: "src/db.js", span: "createPool", scopes: ["src/db.js"] });
-  mkdirSync(join(d, ".logbook", "decisions"), { recursive: true });
-  symlinkSync(serializeDecisionCard(card), join(d, ".logbook", "decisions", card.cardId + ".json")); // git stores the card JSON as the symlink target blob
-  g("add", "-A"); g("commit", "-qm", "symlink card"); const base = g("rev-parse", "HEAD").trim();
+  // Construct mode 120000 in Git's index directly. A filesystem symlink target
+  // is a path, so Windows rejects the long JSON target before Git can test the
+  // trust reader; index plumbing expresses the exact repository attack on
+  // every platform.
+  const targetBytes = join(d, "symlink-target-bytes");
+  writeFileSync(targetBytes, serializeDecisionCard(card));
+  const blob = g("hash-object", "-w", targetBytes).trim();
+  rmSync(targetBytes);
+  const rel = `.logbook/decisions/${card.cardId}.json`;
+  g("update-index", "--add", "--cacheinfo", "120000", blob, rel);
+  assert.match(g("ls-files", "--stage", "--", rel), /^120000 /,
+    "fixture must carry the exact symlink mode before exercising the reader");
+  g("commit", "-qm", "symlink card"); const base = g("rev-parse", "HEAD").trim();
   writeFileSync(join(d, "src", "db.js"), "createPool({max:20})\n"); g("add", "-A"); g("commit", "-qm", "bump");
   const res = checkDecisions(d, { base, head: g("rev-parse", "HEAD").trim() });
   assert.equal(res.leads.length, 0);                           // old read the link-target blob as card content and surfaced it
@@ -3971,7 +4024,7 @@ test("atomic cutover installed CLI ignores legacy acceptances and surfaces only 
   rmSync(d, { recursive: true, force: true });
 });
 
-test("stage4b: `publish` installed-CLI — stdin parse, size bound, device rejection, exit codes", () => {
+test("stage4b: `publish` installed-CLI — input bounds, nonregular refusal, exit codes", () => {
   const { d, sha } = policyRepo("s4bpubcli-", GOOD_TOML);
   const run = (input, args = []) => spawnSync(process.execPath, [CLI, "publish", ...args, d], { input, encoding: "utf8", maxBuffer: 1 << 26 });
   const ok = run(JSON.stringify([goodCand(sha)]));
@@ -3982,9 +4035,25 @@ test("stage4b: `publish` installed-CLI — stdin parse, size bound, device rejec
   assert.equal(bad.status, 1); assert.match(bad.stderr, /must be a JSON array/);
   const nonArr = run(JSON.stringify({ not: "an array" }));       // structured error WITH counts shown, not a bare crash
   assert.equal(nonArr.status, 1); assert.match(nonArr.stdout, /0 published/); assert.match(nonArr.stdout, /must be an array/);
-  const dev = run("", ["--candidates", "/dev/zero"]);            // a device path is refused, no OOM/hang
-  assert.equal(dev.status, 1); assert.match(dev.stderr, /regular file/);
+  const directory = run("", ["--candidates", join(d, ".logbook")]);
+  assert.equal(directory.status, 1); assert.match(directory.stderr, /regular file/);
+  const outside = mkdtempSync(join(tmpdir(), "logbook-candidate-link-"));
+  const candidateTarget = join(outside, "candidates.json");
+  const candidateLink = join(d, "candidate-link.json");
+  writeFileSync(candidateTarget, JSON.stringify([{ ...goodCand(sha), claim: "must not follow candidate link" }]));
+  symlinkSync(candidateTarget, candidateLink);
+  const linked = run("", ["--candidates", candidateLink]);
+  assert.equal(linked.status, 1); assert.match(linked.stderr, /regular file|symlink|changed/);
+  assert.equal(leadCount(d), 1, "a symlinked candidate file publishes nothing");
+  rmSync(candidateLink);
+  linkSync(candidateTarget, candidateLink);
+  const hardlinked = run("", ["--candidates", candidateLink]);
+  assert.equal(hardlinked.status, 1); assert.match(hardlinked.stderr, /regular file|hardlink|changed/);
+  assert.equal(leadCount(d), 1, "a hardlinked candidate file publishes nothing");
+  const dev = run("", ["--candidates", devNull]);                  // canonical null-device path is refused without reading
+  assert.equal(dev.status, 1); assert.match(dev.stderr, /regular file|cannot open input/);
   rmSync(d, { recursive: true, force: true });
+  rmSync(outside, { recursive: true, force: true });
 });
 
 // ---------- OKF v0.1: deterministic, one-way reviewed-decision projection ---
