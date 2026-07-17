@@ -2101,18 +2101,34 @@ test("a note append error cannot hide a stuck-lock cleanup failure", async () =>
   rmSync(r, { recursive: true, force: true });
 });
 
-test("unsafe event cache cannot hang annotate after its note is saved", { skip: process.platform === "win32" }, () => {
+test("unsafe event cache cannot hang annotate after its note is saved", { skip: process.platform === "win32" }, async () => {
   const { r, sha } = mkHistoryRepo();
   execFileSync(process.execPath, [CLI, "init", r, "-q"], { encoding: "utf8" });
   rmSync(join(r, "events.jsonl"));
   execFileSync("mkfifo", [join(r, "events.jsonl")]);
   const started = Date.now();
-  const result = spawnSync("timeout", ["3", process.execPath, CLI, "annotate", sha,
-    "saved despite an unsafe cache", "--by", "codex", r], { encoding: "utf8" });
-  assert.notEqual(result.status, 124, "a FIFO cache cannot block the command indefinitely");
+  const child = spawn(process.execPath, [CLI, "annotate", sha,
+    "saved despite an unsafe cache", "--by", "codex", r],
+    { stdio: ["ignore", "ignore", "pipe"] });
+  child.stderr.setEncoding("utf8");
+  let stderr = "";
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  const result = await new Promise((resolveResult, rejectResult) => {
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, 3000);
+    child.once("error", rejectResult);
+    child.once("close", (status, signal) => {
+      clearTimeout(timer);
+      resolveResult({ status, signal, timedOut });
+    });
+  });
+  assert.equal(result.timedOut, false, "a FIFO cache cannot block the command indefinitely");
   assert.ok(Date.now() - started < 2900);
   assert.equal(result.status, 1, "unsafe managed output is reported instead of claimed as complete");
-  assert.match(result.stderr, /saved unreviewed note.*digest artifacts could not be replaced safely/s);
+  assert.match(stderr, /saved unreviewed note.*digest artifacts could not be replaced safely/s);
   assert.match(readFileSync(join(r, "annotations.jsonl"), "utf8"), /saved despite an unsafe cache/);
   rmSync(r, { recursive: true, force: true });
 });
@@ -2330,7 +2346,8 @@ test("raw grounding rejects content merely carried across an unpaired delete/add
 });
 
 test("invalid-byte Git paths make local/range checks and draft scoping unmeasurable", (t) => {
-  if (process.platform === "win32") return t.skip("Windows filenames cannot carry arbitrary byte sequences");
+  if (process.platform === "win32" || process.platform === "darwin")
+    return t.skip("this filesystem cannot create filenames with arbitrary invalid UTF-8 bytes");
   const { d, g, sha } = poolRepo("logbook-path-bytes-");
   const replacementPath = "src/bad-" + String.fromCharCode(0xfffd) + ".js";
   const bait = mkDecision({ sha, sourceType: "human_attestation", span: null, side: null, evidenceFile: null,
