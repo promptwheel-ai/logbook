@@ -15,7 +15,7 @@ description: >-
 npx -y @promptwheel/logbook@0.9.3              # refresh history and render any existing notes
 npx -y @promptwheel/logbook@0.9.3 journey      # the story, in color (writes nothing)
 npx -y @promptwheel/logbook@0.9.3 doctor       # read-only artifact/wiring/query health
-npx -y @promptwheel/logbook@0.9.3 --json       # events to stdout (writes nothing)
+npx -y @promptwheel/logbook@0.9.3 --json       # full JSONL, writes nothing; for tooling not agent context (use context, below)
 ```
 
 The CLI runs locally and never changes source or Git history. It writes its own
