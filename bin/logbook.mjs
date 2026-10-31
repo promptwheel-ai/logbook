@@ -775,7 +775,7 @@ export function renderLogbookMd(name, A, shallow, capped, noteInput = []) {
   for (const [k, c] of A.fragile) L.push(`- ×${c}: ${safeSubject(k.trim())}`);
   L.push(``);
   L.push(`---`);
-  L.push(`_Findings are leads, not verdicts — a suppression means "a human should look here," not misconduct. Generated read-only by [@promptwheel/logbook](https://github.com/promptwheel-ai/logbook); the logbook records, [the referee](https://github.com/promptwheel-ai/promptwheel) judges._`);
+  L.push(`_Findings are leads, not verdicts, a suppression means "a human should look here," not misconduct. Generated read-only by [@promptwheel/logbook](https://github.com/promptwheel-ai/logbook); the logbook records what happened, [the check](https://github.com/promptwheel-ai/promptwheel) verifies what holds._`);
   return L.join("\n") + "\n";
 }
 
@@ -798,7 +798,7 @@ export function journeyBeats(name, A, { markdown = true } = {}) {
   if (A.winter.days >= 14)
     B.push(["VI", "The Long Winter", `${A.winter.days} days of silence, ${A.winter.from} → ${A.winter.to}. the repo waited.`, "info"]);
   if (A.suspEvents.length)
-    B.push(["VII", "Whispered Bargains", `${A.suspEvents.length}× a test was skipped or a warning hushed. the logbook records; the referee judges.`, "bad"]);
+    B.push(["VII", "Whispered Bargains", `${A.suspEvents.length}× a test was skipped or a warning hushed. the logbook records; the check verifies.`, "bad"]);
   if (A.reverts.length)
     B.push(["VIII", "Paths Unwalked", `${A.reverts.length} roads taken then untaken — first: "${safeSubject(A.reverts[0].subject)}"`, "info"]);
   if (A.last)
@@ -4746,7 +4746,7 @@ function usage() {
     -q, --quiet        suppress the summary
     -v, --version      print version
 
-  The logbook records; the referee (promptwheel) judges.
+  The logbook records; the check (promptwheel) verifies.
 `);
 }
 

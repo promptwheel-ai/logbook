@@ -373,10 +373,10 @@ Selected benchmark evidence and its limits are documented in
 - Code maps explain where code is. Logbook focuses on what happened over time
   and what a reviewed team decision says about a touched scope.
 
-## The logbook records; the referee judges
+## The logbook records what happened; the check verifies what holds
 
 Logbook tells you what history and reviewed decisions say. [promptwheel](https://github.com/promptwheel-ai/promptwheel)
-is the referee that judges whether today's claimed improvement came from the
+is the check that verifies whether today's claimed improvement came from the
 code rather than moving the goalposts.
 
 MIT.

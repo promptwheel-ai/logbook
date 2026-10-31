@@ -72,4 +72,4 @@ a large repo can still hit the client's timeout — run the CLI once to
 create the ledger if that bites. Zero network calls; the analysis is git,
 running locally.
 
-MIT. The logbook records; the referee judges.
+MIT. The logbook records what happened; the check verifies what holds.
