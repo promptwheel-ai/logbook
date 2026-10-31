@@ -4,9 +4,9 @@
 git history as agent memory, for clients without a shell (Claude Desktop,
 Cursor, and any MCP client).
 
-> **0.5 instrumented alpha.** Install the exact preview version shown below;
-> unqualified npm commands continue to resolve the previous `latest` release
-> while `0.5.1` is staged through the `next` channel.
+> **0.5 instrumented alpha.** `0.5.1` is the current release on npm (the `latest`
+> tag); the setup blocks below pin it. The decision layer is an instrumented
+> alpha, not a lifecycle-complete platform.
 
 ## Tools
 
