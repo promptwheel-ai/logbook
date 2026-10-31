@@ -331,6 +331,25 @@ In a random 400-repo sample of the top 2,500 GitHub repositories, the median
 was 82× larger. See [context economics](docs/context-economics.md) and the
 [bounded context format](docs/context-format.md).
 
+## Integrate: CLI, MCP, or import
+
+Three surfaces over the same deterministic history layer:
+
+- **CLI + JSON.** `logbook query --json` and `logbook check --diff --json` emit structured
+  output you can shell from any language. The JSON is cache-invariant (byte-identical with and
+  without `LOGBOOK_NO_CACHE=1`), so it is safe to parse in CI.
+- **MCP.** [`@promptwheel/logbook-mcp`](mcp) (bin `logbook-mcp`) serves the history to an agent
+  over the Model Context Protocol: a Claude Code or other MCP client reads hotspots,
+  do-not-retry reverts, and suppression signals without shelling anything.
+- **Import.** The package is importable and importing it never runs the CLI. `queryEvents`,
+  `analyze`, `auditHead`, and `hotspots` are exported for advanced in-process use; the scan and
+  cache entry points take explicit options, so the CLI and MCP are the first-class surfaces for
+  most integrations.
+
+The paired check engine, [promptwheel](https://github.com/promptwheel-ai/promptwheel), has the
+matching surface. Both are described in its
+[INTEGRATE.md](https://github.com/promptwheel-ai/promptwheel/blob/main/INTEGRATE.md).
+
 ## Evidence status
 
 The earlier enrichment benchmark directionally favored immediate annotations:
