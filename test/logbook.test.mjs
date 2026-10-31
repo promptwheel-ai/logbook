@@ -1601,11 +1601,11 @@ test("init wires the repo once, idempotently, into existing agent files", () => 
   assert.match(agents, /accept-draft CARD_ID --by WHO/);
   assert.match(agents, /Never run accept, accept-draft, accept-lead, or reject-lead/);
   assert.match(agents, /check --diff.*NEXT.*--cursor TOKEN.*END complete/s);
-  assert.equal(PACKAGE_VERSION, "0.9.3");
-  assert.equal(NPX_COMMAND, "npx -y @promptwheel/logbook@0.9.3");
-  assert.match(agents, /npx -y @promptwheel\/logbook@0\.9\.3 context/,
+  assert.equal(PACKAGE_VERSION, "0.9.4");
+  assert.equal(NPX_COMMAND, "npx -y @promptwheel/logbook@0.9.4");
+  assert.match(agents, /npx -y @promptwheel\/logbook@0\.9\.4 context/,
     "generated workflow pins the package that authored it instead of npm latest");
-  assert.match(agents, /npx -y @promptwheel\/logbook@0\.9\.3 pending/,
+  assert.match(agents, /npx -y @promptwheel\/logbook@0\.9\.4 pending/,
     "the optional review handoff works even when the package is only invoked through npx");
   assert.doesNotMatch(agents, /Then run logbook pending/);
   assert.doesNotMatch(agents, /@promptwheel\/logbook context/);

@@ -276,8 +276,12 @@ function git(repo, args) {
 // scan uses this: a single mega-repo commit can emit a patch past V8's ~536 MB string ceiling
 // ("Cannot create a string longer than 0x1fffffe8"), which a utf8 read cannot hold at all, so the
 // scanner reads bytes and decodes only the short lines. The cap bounds the per-window buffer.
+// Per-window buffer cap for the -p scan. Operational, not a precision knob: it changes only how
+// the window is batched/retried (diffScan subdivides a window that overflows it), never which
+// events come out, so it is env-configurable with no cache-coherence impact. Default 2 GiB.
+const SCAN_MAX_BYTES = (() => { const e = Math.floor(Number(process.env.LOGBOOK_SCAN_MAX_BYTES)); return e >= (1 << 20) ? e : 2 * (1 << 30); })();
 function gitPatchBuf(repo, args) {
-  const r = spawnSync("git", ["-C", repo, ...args], { maxBuffer: 2 * (1 << 30) });
+  const r = spawnSync("git", ["-C", repo, ...args], { maxBuffer: SCAN_MAX_BYTES });
   if (r.error) throw r.error;
   if (r.status !== 0) {
     const err = new Error((r.stderr ? r.stderr.toString() : "").trim() || `git ${args[0]} failed`);
@@ -384,29 +388,33 @@ export function diffScan(repo, events, opts, onProgress) {
   const WINDOW = winEnv >= 1 ? winEnv : 500;
   const total = events.length;
   let scanned = 0;
-  const windows = [];
+  // Run each window; if its buffered patch overflows SCAN_MAX_BYTES, subdivide and retry rather
+  // than degrade the whole scan. The one unrecoverable case is a SINGLE commit whose patch exceeds
+  // the cap (then we degrade, honestly). So the scan completes at any repo scale, not just up to a
+  // window that happens to fit. No throw -> no subdivision, so the common path is unchanged.
+  const take = (buf) => { scanned = scanWindow(buf, bySha, scanned); if (onProgress) onProgress(Math.min(scanned, total), total); };
+  const tryBuf = (args) => { try { return gitPatchBuf(repo, args); } catch { return null; } };
   if (opts.shas) {
-    for (let offset = 0; offset < opts.shas.length; offset += WINDOW) {
-      windows.push(["show", "--no-walk=unsorted", "--pretty=%x1e%H", "-p", "--unified=0",
-        ...opts.shas.slice(offset, offset + WINDOW)]);
-    }
+    const FLAGS = ["show", "--no-walk=unsorted", "--pretty=%x1e%H", "-p", "--unified=0"];
+    const scanShas = (arr) => {
+      if (!arr.length) return true;
+      const buf = tryBuf([...FLAGS, ...arr]);
+      if (buf === null) { if (arr.length === 1) return false; const h = arr.length >> 1; return scanShas(arr.slice(0, h)) && scanShas(arr.slice(h)); }
+      take(buf); return true;
+    };
+    for (let o = 0; o < opts.shas.length; o += WINDOW) if (!scanShas(opts.shas.slice(o, o + WINDOW))) return false;
   } else if (opts.range) {
-    windows.push(["log", opts.range, "--no-merges", "--pretty=%x1e%H", "-p", "--unified=0"]);
+    const buf = tryBuf(["log", opts.range, "--no-merges", "--pretty=%x1e%H", "-p", "--unified=0"]);
+    if (buf === null) return false; // a range is a single unsplittable request
+    take(buf);
   } else {
-    for (let skip = 0; skip < total; skip += WINDOW) {
-      windows.push(["log", `-${Math.min(WINDOW, total - skip)}`, `--skip=${skip}`, "--no-merges",
-        ...eraArgs(opts), "--pretty=%x1e%H", "-p", "--unified=0"]);
-    }
-  }
-  for (const args of windows) {
-    let buf;
-    try {
-      buf = gitPatchBuf(repo, args);
-    } catch {
-      return false; // degrade to subject-level only
-    }
-    scanned = scanWindow(buf, bySha, scanned);
-    if (onProgress) onProgress(Math.min(scanned, total), total);
+    const scanSpan = (skip, count) => {
+      if (count <= 0) return true;
+      const buf = tryBuf(["log", `-${count}`, `--skip=${skip}`, "--no-merges", ...eraArgs(opts), "--pretty=%x1e%H", "-p", "--unified=0"]);
+      if (buf === null) { if (count === 1) return false; const h = count >> 1; return scanSpan(skip, h) && scanSpan(skip + h, count - h); }
+      take(buf); return true;
+    };
+    for (let skip = 0; skip < total; skip += WINDOW) if (!scanSpan(skip, Math.min(WINDOW, total - skip))) return false;
   }
   return scanned === total;
 }
