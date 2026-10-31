@@ -82,7 +82,7 @@ logbook doctor
 ```
 
 When an agent investigates why a prior change happened during real work, it can
-preserve the result immediately—no prompt or human gate:
+preserve the result immediately, with no prompt or human gate:
 
 ```bash
 logbook annotate <commit> "why this approach was rejected" --by codex
@@ -140,13 +140,13 @@ later cards have not been checked yet; only `END complete` can finish cleanly.
 
 Logbook never converts model confidence into authority.
 
-- **Unreviewed digest note** — immediate machine-authored recall in
+- **Unreviewed digest note**: immediate machine-authored recall in
   `LOGBOOK.md`. It is outside the decision planes and never enters `check`.
-- **Draft** — local and inert. It cannot surface in `check --diff`.
-- **Policy-published lead** — machine-authored, grounded and admitted by a
+- **Draft**: local and inert. It cannot surface in `check --diff`.
+- **Policy-published lead**: machine-authored, grounded and admitted by a
   repository-owned policy. It surfaces as a conspicuous lead, not as a human
   decision.
-- **Human-reviewed decision** — the card bytes have a matching committed review
+- **Human-reviewed decision**: the card bytes have a matching committed review
   record on the trusted ref. Logbook treats it as reviewed within its explicit
   path scopes; review does not prove semantic truth or continued applicability.
 
@@ -226,7 +226,7 @@ reviews them.
 
 Decision memory can steer future agents. If generated rationale is mistaken,
 repeated model agreement can make one correlated interpretation look like
-independent confirmation—a self-reinforcing hallucination with repository
+independent confirmation, a self-reinforcing hallucination with repository
 authority attached.
 
 Logbook therefore separates three claims: source bytes exist, a machine

@@ -52,7 +52,7 @@ function pipeline(repoArg, onProgress) {
     capped = events.capped;
     // a failed scan must surface as an error, not as a zero-suppression record
     if (!diffScan(repo, events, DEFAULTS, onProgress))
-      throw new Error("diff scan failed (git log -p errored) — history record incomplete; refusing to answer from partial data");
+      throw new Error("diff scan failed (git log -p errored) - history record incomplete; refusing to answer from partial data");
   }
   const A = analyze(events, hotspots(repo, DEFAULTS));
   const entry = { head, events, A, capped };
@@ -112,7 +112,7 @@ server.registerTool(
     const refreshed = refreshDigestNotes(repo, DEFAULTS);
     if (refreshed.error) return { content: [{ type: "text", text: `saved unreviewed note ${note.sha.slice(0, 8)}, but digest refresh failed: ${sanitizeContextText(refreshed.error, 700)}` }], isError: true };
     if (note.cleanupWarning) return { content: [{ type: "text", text: `saved unreviewed note ${note.sha.slice(0, 8)} and refreshed LOGBOOK.md, but ${sanitizeContextText(note.cleanupWarning, 700)}` }], isError: true };
-    return { content: [{ type: "text", text: `saved unreviewed note ${note.sha.slice(0, 8)} (recorded by ${sanitizeContextText(by || "agent", 512)}) — visible in LOGBOOK.md; never accepted or consumed by check --diff` }] };
+    return { content: [{ type: "text", text: `saved unreviewed note ${note.sha.slice(0, 8)} (recorded by ${sanitizeContextText(by || "agent", 512)}) - visible in LOGBOOK.md; never accepted or consumed by check --diff` }] };
   }
 );
 
@@ -137,7 +137,7 @@ server.registerTool(
       ? "diff evidence requires evidenceFile" : "message evidence must not name evidenceFile" }], isError: true };
     const draft = annotateDraft(repo, { sha, why, span, side, evidenceFile, by });
     if (draft.error) return { content: [{ type: "text", text: sanitizeContextText(draft.error, 700) }], isError: true };
-    return { content: [{ type: "text", text: `drafted ${draft.cardId} for ${draft.sha.slice(0, 8)} (proposed by ${sanitizeContextText(by || "agent", 512)}) — local and inert; a human may run logbook accept-draft ${draft.cardId} --by WHO` }] };
+    return { content: [{ type: "text", text: `drafted ${draft.cardId} for ${draft.sha.slice(0, 8)} (proposed by ${sanitizeContextText(by || "agent", 512)}) - local and inert; a human may run logbook accept-draft ${draft.cardId} --by WHO` }] };
   },
 );
 
@@ -153,7 +153,7 @@ server.registerTool(
     const live = auditHead(rootOf(repo), events);
     const lines = live.slice(0, 40).map((x) =>
       `${sanitizeContextText(x.kind, 256)}  ${sanitizeContextText(x.file, 1024)}:${x.line}  since ${x.since || "?"}${x.resilenced ? `  re-silenced x${x.resilenced} (${sanitizeContextText(x.fight, 256)})` : ""}`);
-    return { content: [{ type: "text", text: lines.length ? `${live.length} live suppressions\n` + lines.join("\n") : "clean — no live suppressions in src/test/config files" }] };
+    return { content: [{ type: "text", text: lines.length ? `${live.length} live suppressions\n` + lines.join("\n") : "clean - no live suppressions in src/test/config files" }] };
   }
 );
 
@@ -181,11 +181,11 @@ server.registerTool(
     const all = queryEvents(events, f);
     const hits = all.slice(0, f.limit ?? 100);
     const capNote = capped
-      ? ` — ANALYSIS CAPPED at ${DEFAULTS.max} commits: use the CLI with -n for a larger window or --since/--until for another era`
+      ? ` - ANALYSIS CAPPED at ${DEFAULTS.max} commits: use the CLI with -n for a larger window or --since/--until for another era`
       : "";
     // never truncate silently: the count line is the contract
     const note = `${all.length} matching event${all.length === 1 ? "" : "s"}, returned ${hits.length}` +
-      (all.length > hits.length ? " — TRUNCATED: narrow with file/revert/date filters or pass a higher limit before concluding" : "");
+      (all.length > hits.length ? " - TRUNCATED: narrow with file/revert/date filters or pass a higher limit before concluding" : "");
     // Keep every line after the count/status line as JSON: existing MCP
     // consumers parse rows that way, so cap metadata belongs on line one.
     return { content: [{ type: "text", text: note + capNote + (hits.length ? "\n" + hits.map((e) => JSON.stringify(e)).join("\n") : "") }] };

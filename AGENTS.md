@@ -1,17 +1,17 @@
-# logbook — agent notes
+# logbook - agent notes
 
 Single-file zero-dep CLI (`bin/logbook.mjs`) + MCP wrapper (`mcp/server.mjs`).
 Run tests: `npm test` (root) and `cd mcp && npm test` (behavioral, drives the
 real server over stdio). Inside this repo use `node bin/logbook.mjs`, not
-npx — npm prefers the same-name local package and shadows the registry.
+npx - npm prefers the same-name local package and shadows the registry.
 
-## Release invariants (regression-tested — keep all of them green)
+## Release invariants (regression-tested - keep all of them green)
 
 1. A fresh self-run on THIS repo reports **0 suppression events**. The
    detector must never flag its own regex tables or comments about skip
    APIs (diff `+/-` prefix is stripped before `isMention`; call-syntax
    idioms inside comments are prose).
-2. Bump `EXTRACTOR_VERSION` whenever detector precision changes — the
+2. Bump `EXTRACTOR_VERSION` whenever detector precision changes - the
    events.jsonl cache is rejected on mismatch, so old ledgers can't mask a
    fix. Verify fresh and upgraded-cache self-runs agree.
 3. Public JSON is cache-invariant: `--json` (and MCP `logbook_query`)
@@ -25,7 +25,7 @@ npx — npm prefers the same-name local package and shadows the registry.
    workflow with neutral `--by MODEL` attribution and creates the CLAUDE.md
    `@AGENTS.md` bridge; exact released blocks migrate, user-edited blocks are
    never touched.
-6. `DEFAULT_MAX` is the single source for the commit window — the ledger
+6. `DEFAULT_MAX` is the single source for the commit window - the ledger
    cache gate in `loadEvents` depends on it.
 7. Never turn "unmeasurable" into clean: a failed diff scan sets
    `A.degraded` (surfaced in LOGBOOK.md); a failed `git grep` in audit
@@ -43,8 +43,8 @@ npx — npm prefers the same-name local package and shadows the registry.
     recall channel: render it in the digest, never consume it as authority.
 11. In range mode, `check --diff` reads authority from the pinned base commit;
     local mode pins `HEAD`. A PR must never approve its own card. Malformed,
-    missing, non-ancestral, or unverifiable trust data is unmeasurable—not
-    clean—and exits nonzero.
+    missing, non-ancestral, or unverifiable trust data is unmeasurable, not
+    clean, and exits nonzero.
 12. Grounding proves evidence bytes exist at the named commit side/path. It
     never proves the model's interpretation, causality, or current
     applicability. Policy publication creates a labeled machine lead, never a

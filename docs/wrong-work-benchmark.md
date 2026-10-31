@@ -6,10 +6,10 @@ map / LOGBOOK.md / both), identical planning tasks per repo, Sonnet agents,
 context supplied only via files. The tasks were deliberately history-dense:
 each repo was chosen because its history contains a revert, a finished
 migration, or a rejected approach that a plan could collide with.
-Scoring: pre-registered 6-item checklists per repo — 3 history items
+Scoring: pre-registered 6-item checklists per repo - 3 history items
 (cites the relevant reverts; distrusts green where the ledger says to;
 avoids re-attempting reverted or already-finished work), 2 structure items,
-1 plan-quality item — graded against ground truth verified with
+1 plan-quality item - graded against ground truth verified with
 git blame / pickaxe on the actual repos.
 
 ## Results
@@ -38,9 +38,9 @@ With LOGBOOK.md in context: 0 of 6, at ~4.7k additional plan tokens.
 This is a summary of an internal experiment, not a reproducible benchmark
 release: the raw transcripts, per-repo prompts, checklists, and scoring
 artifacts are not currently published. n=6 repos, planning tasks (not
-merged code), tasks selected for history density — a repo without collisions
+merged code), tasks selected for history density - a repo without collisions
 in its history has nothing here to catch. All six are famous repos; whether
-the effect transfers to private repos is unknown — models have fewer priors
+the effect transfers to private repos is unknown - models have fewer priors
 about them (which should favor the history file), but their histories may
 also be thinner or noisier (which should weaken it). Structure arm is a
 deterministic surrogate for structure-mapping tools. Single grader against
@@ -56,7 +56,7 @@ primary-success plans vs 3/12 for raw-git archaeology and 4/12 for a
 model-written memo, with zero wrong-work plans). A better-designed
 held-out screen (sealed fixtures, blinded raters, intention-to-treat)
 then found NO advantage over a strong raw-git instruction on ten new
-planning tasks — and traced the gap to retrieval, not the index: the
+planning tasks - and traced the gap to retrieval, not the index: the
 ledgers contained every sealed lineage item, but task-facing queries
 delivered none of them before agents fell back to raw git.
 

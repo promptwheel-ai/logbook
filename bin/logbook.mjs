@@ -671,20 +671,20 @@ export function renderLogbookMd(name, A, shallow, capped, noteInput = []) {
   L.push(``, `_${UNTRUSTED_EVIDENCE_WARNING}_`);
   {
     const inventory = historyInventory(A);
-    L.push(``, `_History inventory: ${inventory.parts}${inventory.empty ? " — no extracted decision-history leads in this window; the digest is mostly a hotspot map" : ""}._`);
+    L.push(``, `_History inventory: ${inventory.parts}${inventory.empty ? " - no extracted decision-history leads in this window; the digest is mostly a hotspot map" : ""}._`);
   }
   L.push(``);
   L.push(`_${fmt(A.n)} commit${A.n === 1 ? "" : "s"} (${A.spanStart} → ${A.spanEnd}), ${fmt(A.filesTouched)} file${A.filesTouched === 1 ? "" : "s"} touched, ${plural(A.authors, "author")}._`);
-  if (shallow) L.push(`\n> ⚠️ Shallow clone — history is truncated. Run \`git fetch --unshallow\` for the full record.`);
+  if (shallow) L.push(`\n> ⚠️ Shallow clone - history is truncated. Run \`git fetch --unshallow\` for the full record.`);
   if (capped) L.push(`\n> ⚠️ Analysis capped at ${fmt(A.n)} commits (the repo has more). Re-run with \`-n <bigger>\` for the full record.`);
-  if (A.degraded) L.push(`\n> ⚠️ Diff-level scan FAILED (git log -p errored) — suppression and assertion columns are unmeasured, not clean. Subject-level signals only.`);
+  if (A.degraded) L.push(`\n> ⚠️ Diff-level scan FAILED (git log -p errored) - suppression and assertion columns are unmeasured, not clean. Subject-level signals only.`);
   L.push(``);
   L.push(`## What a fresh session should know`);
   if (A.srcHot.length)
     L.push(`- The action lives in: ${A.srcHot.slice(0, 3).map(([f, c]) => `${safePath(f)} (${c})`).join(", ")}`);
   L.push(`- Dominant author: ${safePerson(A.topAuthor[0])} (${A.topAuthor[1]}/${A.n})`);
   if (A.reverts.length)
-    L.push(`- ${A.reverts.length} reverted approaches — check the do-not-retry list before proposing big changes`);
+    L.push(`- ${A.reverts.length} reverted approaches - check the do-not-retry list before proposing big changes`);
   if (A.fragile.length)
     L.push(`- Fragile areas (fixed 2+ times): ${A.fragile.slice(0, 3).map(([k]) => safeSubject(k.trim())).join("; ")}`);
   L.push(`- Oversight ledger: ${plural(A.suspEvents.length, "suppression commit")}, ${plural(A.weaken.length, "assertion-weakening commit")}`);
@@ -703,7 +703,7 @@ export function renderLogbookMd(name, A, shallow, capped, noteInput = []) {
       const rawShow = process.platform === "win32"
         ? `set "GIT_GRAFT_FILE=${devNull}" && git --no-replace-objects show ${verifySha}`
         : `GIT_GRAFT_FILE=${devNull} git --no-replace-objects show ${verifySha}`;
-      const rows = [`- ${safePerson(note.sha)} — ${safeNote(note.why)}`,
+      const rows = [`- ${safePerson(note.sha)} - ${safeNote(note.why)}`,
         `  - unreviewed; recorded by ${safePerson(note.by)} on ${safePerson(note.date)}; verify without replace refs or grafts: \`${rawShow}\``];
       if (note.span) {
         const where = note.side === "diff" && note.evidenceFile
@@ -728,7 +728,7 @@ export function renderLogbookMd(name, A, shallow, capped, noteInput = []) {
       if (e.suppressions.length >= 3) tags.push(`${e.suppressions.length} suppressions`);
       L.push(`- ${e.date} ${e.sha} [${tags.join(", ")}] ${safeSubject(e.subject)}`);
     }
-    if (A.notableMore > 0) L.push(`- …and ${A.notableMore} more — full record in events.jsonl`);
+    if (A.notableMore > 0) L.push(`- …and ${A.notableMore} more - full record in events.jsonl`);
   }
   if (A.perFile.length) {
     L.push(``);
@@ -742,23 +742,23 @@ export function renderLogbookMd(name, A, shallow, capped, noteInput = []) {
           `-${e.del_asserts} asserts`;
         L.push(`- ${e.date} ${e.sha} [${tag}] ${safeSubject(e.subject)}`);
       }
-      if (pf.more) L.push(`- …and ${pf.more} more — full record in events.jsonl`);
+      if (pf.more) L.push(`- …and ${pf.more} more - full record in events.jsonl`);
     }
   }
   L.push(``);
-  L.push(`## Hotspots — most frequently changed source files`);
-  for (const [f, c] of A.srcHot) L.push(`- ${safePath(f)} — ${plural(c, "commit")}`);
+  L.push(`## Hotspots - most frequently changed source files`);
+  for (const [f, c] of A.srcHot) L.push(`- ${safePath(f)} - ${plural(c, "commit")}`);
   L.push(``);
-  L.push(`## Hotspots — all files (incl. config/docs churn)`);
-  for (const [f, c] of A.allHot) L.push(`- ${safePath(f)} — ${plural(c, "commit")}`);
+  L.push(`## Hotspots - all files (incl. config/docs churn)`);
+  for (const [f, c] of A.allHot) L.push(`- ${safePath(f)} - ${plural(c, "commit")}`);
   L.push(``);
   L.push(`## Do-not-retry: reverts / rollbacks (${A.reverts.length})`);
   // truncate the OLD end — the recent reverts are the ones a session must see
-  if (A.reverts.length > 20) L.push(`- …${A.reverts.length - 20} earlier — full record in events.jsonl`);
+  if (A.reverts.length > 20) L.push(`- …${A.reverts.length - 20} earlier - full record in events.jsonl`);
   for (const e of A.reverts.slice(-20)) L.push(`- ${e.date} ${e.sha} ${safeSubject(e.subject)}`);
   L.push(``);
   L.push(`## Suppression ledger (${plural(A.suspEvents.length, "commit")})`);
-  if (A.suspEvents.length > 20) L.push(`- …${A.suspEvents.length - 20} earlier — full record in events.jsonl`);
+  if (A.suspEvents.length > 20) L.push(`- …${A.suspEvents.length - 20} earlier - full record in events.jsonl`);
   for (const e of A.suspEvents.slice(-20))
     L.push(`- ${e.date} ${e.sha} [${e.suppressions.slice(0, 3).map(safeSubject).join(" + ")}] ${safeSubject(e.subject)}`);
   L.push(``);
@@ -766,10 +766,10 @@ export function renderLogbookMd(name, A, shallow, capped, noteInput = []) {
   for (const e of A.weaken.slice(0, 15)) {
     const tag =
       e.dels > 4 * Math.max(e.adds, 1) && e.dels > 150
-        ? " [large removal — likely feature/module deletion]" : "";
+        ? " [large removal - likely feature/module deletion]" : "";
     L.push(`- ${e.date} ${e.sha} (-${e.del_asserts}/+${e.add_asserts})${tag} ${safeSubject(e.subject)}`);
   }
-  if (A.weaken.length > 15) L.push(`- …and ${A.weaken.length - 15} more — full record in events.jsonl`);
+  if (A.weaken.length > 15) L.push(`- …and ${A.weaken.length - 15} more - full record in events.jsonl`);
   L.push(``);
   L.push(`## Fragile areas (same fix subject 2+ times)`);
   for (const [k, c] of A.fragile) L.push(`- ×${c}: ${safeSubject(k.trim())}`);
@@ -784,25 +784,25 @@ export function journeyBeats(name, A, { markdown = true } = {}) {
   // sanitization is a render-layer hardening change, not an expansion of it.
   const safeSubject = (value) => sanitizeContextText(String(value).slice(0, 64), 1024, { markdown });
   const B = [];
-  if (A.first) B.push(["I", "The Call", `${A.first.date} — "${safeSubject(A.first.subject)}"`, "good"]);
+  if (A.first) B.push(["I", "The Call", `${A.first.date} - "${safeSubject(A.first.subject)}"`, "good"]);
   if (A.threshold && A.threshold.sha !== A.first?.sha)
-    B.push(["II", "The Threshold", `${A.threshold.date} — the repo accepts a gate: "${safeSubject(A.threshold.subject)}"`, "info"]);
+    B.push(["II", "The Threshold", `${A.threshold.date} - the repo accepts a gate: "${safeSubject(A.threshold.subject)}"`, "info"]);
   if (A.mentor)
-    B.push(["III", "The Mentor", `${A.mentor.date} — "${safeSubject(A.mentor.subject)}"`, "info"]);
+    B.push(["III", "The Mentor", `${A.mentor.date} - "${safeSubject(A.mentor.subject)}"`, "info"]);
   if (A.trials.length) {
     const t = A.trials.slice(0, 2).map(([k, c]) => `${c}× "${safeSubject(k.trim())}"`).join("; ");
     B.push(["IV", "The Road of Trials", `the same battles, fought and re-fought: ${t}`, "odd"]);
   }
   if (A.abyss && A.abyss.dels > 100)
-    B.push(["V", "The Abyss", `${A.abyss.date} — ${fmt(A.abyss.dels)} lines unmade in one stroke: "${safeSubject(A.abyss.subject)}"`, "bad"]);
+    B.push(["V", "The Abyss", `${A.abyss.date} - ${fmt(A.abyss.dels)} lines unmade in one stroke: "${safeSubject(A.abyss.subject)}"`, "bad"]);
   if (A.winter.days >= 14)
     B.push(["VI", "The Long Winter", `${A.winter.days} days of silence, ${A.winter.from} → ${A.winter.to}. the repo waited.`, "info"]);
   if (A.suspEvents.length)
     B.push(["VII", "Whispered Bargains", `${A.suspEvents.length}× a test was skipped or a warning hushed. the logbook records; the check verifies.`, "bad"]);
   if (A.reverts.length)
-    B.push(["VIII", "Paths Unwalked", `${A.reverts.length} roads taken then untaken — first: "${safeSubject(A.reverts[0].subject)}"`, "info"]);
+    B.push(["VIII", "Paths Unwalked", `${A.reverts.length} roads taken then untaken - first: "${safeSubject(A.reverts[0].subject)}"`, "info"]);
   if (A.last)
-    B.push(["IX", "The Road Goes On", `${A.last.date} — "${safeSubject(A.last.subject)}". ${fmt(A.n)} commit${A.n === 1 ? "" : "s"} and counting.`, "good"]);
+    B.push(["IX", "The Road Goes On", `${A.last.date} - "${safeSubject(A.last.subject)}". ${fmt(A.n)} commit${A.n === 1 ? "" : "s"} and counting.`, "good"]);
   return B;
 }
 
@@ -845,7 +845,7 @@ export function renderJourneyMd(name, A, compare) {
   for (const [num, title, body] of journeyBeats(name, A)) L.push(`**${num}. ${title}.** ${body}`, ``);
   L.push(`---`);
   const pcts = compare ? almanacPcts(A) : {};
-  L.push(`_The Logbook Almanac_ — ` + almanacStats(A).map(([k, v]) =>
+  L.push(`_The Logbook Almanac_ - ` + almanacStats(A).map(([k, v]) =>
     `${k} ${v}${pcts[k] != null ? ` (p${pcts[k]})` : ""}`).join(" · "));
   if (compare) L.push(`_Percentiles vs the top 2,500 repos on GitHub (size-fair, per 1k commits)._`);
   return L.join("\n") + "\n";
@@ -945,7 +945,7 @@ export function auditHead(repo, events) {
   } catch (e) {
     // exit 1 = no matches: genuinely clean. Anything else (git without PCRE
     // support, corrupt repo) must SURFACE — "unmeasurable" is not "clean".
-    if (e?.status !== 1) throw new Error(`audit: git grep failed — ${String(e?.message).split("\n")[0]}`);
+    if (e?.status !== 1) throw new Error(`audit: git grep failed - ${String(e?.message).split("\n")[0]}`);
   }
   for (const row of grep.split("\n")) {
     if (!row) continue;
@@ -1087,7 +1087,7 @@ function renderAudit(name, live) {
   W.push(`\n  ${C.gold}${C.bold}⚓ Suppression audit of ${safe(name)}${C.r}`);
   W.push(`  ${C.dim}what is still silenced in HEAD, and since when${C.r}\n`);
   if (!live.length) {
-    W.push(`  ${C.good}clean — no live suppressions in src/test/config files${C.r}\n`);
+    W.push(`  ${C.good}clean - no live suppressions in src/test/config files${C.r}\n`);
     return W.join("\n");
   }
   for (const x of live.slice(0, 30)) {
@@ -1356,7 +1356,7 @@ function contextItemLine(event, fileFilter) {
   const displayed = contextDisplayPath(event, fileFilter);
   const path = sanitizeContextText(displayed.path, 320);
   const suffix = displayed.otherPaths ? ` (+${displayed.otherPaths} other paths)` : "";
-  const line = `- ${sha} ${date} <code>${subject}</code> — <code>${path}</code>${suffix}\n`;
+  const line = `- ${sha} ${date} <code>${subject}</code> - <code>${path}</code>${suffix}\n`;
   if (Buffer.byteLength(line) > CONTEXT_ITEM_MAX_BYTES)
     throw new Error(`serialized context item exceeds ${CONTEXT_ITEM_MAX_BYTES} bytes`);
   return line;
@@ -1378,7 +1378,7 @@ export function formatContextPage({ repo, head, events, filters = {}, capped = f
     "# Logbook context",
     UNTRUSTED_EVIDENCE_WARNING,
     `${count} · HEAD ${binding.head.slice(0, 12)} · query ${binding.queryDigest.slice(0, 12)}`,
-    ...(capped ? [`ANALYSIS CAPPED at ${binding.scope.max} commits — use -n for a larger window or --since/--until for another era.`] : []),
+    ...(capped ? [`ANALYSIS CAPPED at ${binding.scope.max} commits - use -n for a larger window or --since/--until for another era.`] : []),
     "",
   ].join("\n");
   const selectedShas = [];
@@ -2097,16 +2097,16 @@ function decodeCheckCursor(cursor, binding) {
 function renderDecisionRow(lead, { reserve = false } = {}) {
   const s = (v, n) => sanitizeContextText(String(v ?? ""), n, { markdown: false });
   const tierTag = lead.tier === "human-reviewed"
-    ? (reserve || !lead.reviewVerified ? "[decision file — human review unverified]"
-      : (lead.authoritative ? "[human-reviewed]" : "[decision file — not authoritative]"))
-    : "[policy-published — machine lead, not a human decision]";
+    ? (reserve || !lead.reviewVerified ? "[decision file - human review unverified]"
+      : (lead.authoritative ? "[human-reviewed]" : "[decision file - not authoritative]"))
+    : "[policy-published - machine lead, not a human decision]";
   const scope = s(lead.match.scope, 256);
   const other = lead.match.otherScopes ? ` (+${lead.match.otherScopes} other matching scope${lead.match.otherScopes === 1 ? "" : "s"})` : "";
   const proposer = reserve ? "x".repeat(128) : s(lead.card.by, 128);
   const reviewer = reserve ? "x".repeat(128) : s(lead.review?.reviewedBy, 128);
   const reviewedAt = reserve ? "0000-00-00" : s(lead.review?.reviewedAt, 32);
   const demote = reserve || !lead.authoritative
-    ? `\n  ! NOT authoritative (${reserve ? "x".repeat(200) : s((lead.reasons || []).join("; "), 200)}) — re-review`
+    ? `\n  ! NOT authoritative (${reserve ? "x".repeat(200) : s((lead.reasons || []).join("; "), 200)}) - re-review`
     : "";
   return `\n${scope}${other} ${tierTag}` +
     `\n  Decision: ${s(lead.card.claim, 512)}` +
@@ -2123,7 +2123,7 @@ function checkPreamble(mode, offset, count, total) {
 
 function checkTail(malformedCount, hasRows, nextCursor) {
   let out = "";
-  if (malformedCount) out += `\nunmeasurable: ${malformedCount} malformed card/review relation(s) in the trusted planes (exit nonzero — not "clean").`;
+  if (malformedCount) out += `\nunmeasurable: ${malformedCount} malformed card/review relation(s) in the trusted planes (exit nonzero - not "clean").`;
   if (hasRows) out += `\nLead, not verdict: scope overlap proves relevance only. Verify the source and confirm the decision still applies.`;
   if (nextCursor) out += `\nincomplete: more matching cards remain; follow NEXT before concluding (exit nonzero).`;
   return out + `\n${contextFooter(nextCursor)}`;
@@ -2249,7 +2249,7 @@ export function checkDecisions(repo, { base, head, cursor = null } = {}) {
 export function renderDecisionLeads(res) {
   if (res.result === "unmeasurable") return `${res.message || "unmeasurable"}\nEND incomplete\n`;
   if (res.result === "not-configured")
-    return `logbook check (${res.mode}): no accepted decisions or policy-published leads are configured at the trusted ref — no decision-layer conclusion is possible (this is not "clean").\nEND complete\n`;
+    return `logbook check (${res.mode}): no accepted decisions or policy-published leads are configured at the trusted ref - no decision-layer conclusion is possible (this is not "clean").\nEND complete\n`;
   let text = checkPreamble(res.mode, res.pageOffset || 0, res.leads.length, res.matchedCount || 0);
   for (const lead of res.leads) text += renderDecisionRow(lead);
   text += checkTail(res.malformedCount || 0, res.leads.length > 0, res.nextCursor || null);
@@ -2301,7 +2301,7 @@ function dispositionLeadUnlocked(repo, cardId, dest, transform, by) {
     return { error: "lead source is missing but its exact reviewed terminal state is not present" };
   }
   if (serializeDecisionCard(wtLead) !== sourceBytes)
-    return { error: "worktree lead has local edits — commit or discard them first" }; // never silently discard
+    return { error: "worktree lead has local edits - commit or discard them first" }; // never silently discard
   const staged = [];
   if (t) {
     if (wtDecision) {
@@ -2326,7 +2326,7 @@ function dispositionLeadUnlocked(repo, cardId, dest, transform, by) {
   try { git(repo, ["rm", "--cached", "--ignore-unmatch", "--", `.logbook/${LEAD_PLANE}/${cardId}.json`]); }
   catch (e) { return { error: `git index removal failed; source retained for retry: ${e.message}` }; }
   try { unlinkSync(leadFile); }
-  catch (e) { return { error: `${dest || "review"} staged but lead not removed (${e.code}) — re-run to complete` }; }
+  catch (e) { return { error: `${dest || "review"} staged but lead not removed (${e.code}) - re-run to complete` }; }
   return { cardId, disposition: t ? t.disposition : "rejected", reviewedBy: by };
 }
 function dispositionLead(repo, cardId, dest, transform, by) {
@@ -2355,7 +2355,7 @@ export function rejectLead(repo, cardId, { by } = {}) { return dispositionLead(r
 // disappearance without a review remains unmeasurable rather than becoming rejection.
 const OUTCOMES_MAX_LEADS = 20000;
 export function computeReviewOutcomes(repo, { ref = "HEAD" } = {}) {
-  try { lstatSync(join(realpathSync(repo), ".git", "shallow")); return { error: "shallow clone — history incomplete (git fetch --unshallow)", exitCode: 1 }; }
+  try { lstatSync(join(realpathSync(repo), ".git", "shallow")); return { error: "shallow clone - history incomplete (git fetch --unshallow)", exitCode: 1 }; }
   catch (e) { if (e.code !== "ENOENT") return { error: `cannot check history: ${e.code}`, exitCode: 1 }; }
   const commit = resolveTrustCommit(repo, ref);
   if (!commit) return { error: `cannot resolve trust ref ${ref}`, exitCode: 1 };
@@ -2430,11 +2430,11 @@ export function computeReviewOutcomes(repo, { ref = "HEAD" } = {}) {
     historyIncomplete, exitCode: historyIncomplete ? 1 : 0 };
 }
 export function renderReviewOutcomes(res) {
-  if (res.error) return `logbook outcomes: unmeasurable — ${res.error} (exit nonzero, not "clean")`;
+  if (res.error) return `logbook outcomes: unmeasurable - ${res.error} (exit nonzero, not "clean")`;
   const pct = (v) => v == null ? "n/a" : `${(v * 100).toFixed(0)}%`;
   const lines = [
-    "logbook review outcomes — fate of policy-published (machine) leads",
-    "(REVIEW OUTCOMES, not semantic claim precision — that needs an explicit correctness verdict)",
+    "logbook review outcomes - fate of policy-published (machine) leads",
+    "(REVIEW OUTCOMES, not semantic claim precision - that needs an explicit correctness verdict)",
     `  published:             ${res.published}`,
     `  pending (unreviewed):  ${res.pending}`,
     `  kept (in decisions):   ${res.kept}   [accepted-as-is ${res.acceptedAsIs}, edited ${res.edited}]`,
@@ -2444,8 +2444,8 @@ export function renderReviewOutcomes(res) {
     `  kept rate (of reviewed):          ${pct(res.keptRate)}`,
     `  unchanged-accept rate (of kept):  ${pct(res.unchangedAcceptRate)}`,
   ];
-  if (res.historyIncomplete) lines.push("", "  warning: some lead history was missing/malformed — outcomes are degraded (exit nonzero).");
-  if (res.reviewed < 20) lines.push("", `  note: only ${res.reviewed} reviewed — too few to assess automatic-lead usefulness; machine authority remains lower regardless of sample size.`);
+  if (res.historyIncomplete) lines.push("", "  warning: some lead history was missing/malformed - outcomes are degraded (exit nonzero).");
+  if (res.reviewed < 20) lines.push("", `  note: only ${res.reviewed} reviewed - too few to assess automatic-lead usefulness; machine authority remains lower regardless of sample size.`);
   return lines.join("\n");
 }
 // ---- Plane human authoring: annotate-draft -> accept-draft -> decision ---------
@@ -3157,7 +3157,7 @@ function acceptDraftUnlocked(repo, cardId, { scopes, by } = {}) {
   if (rev.error) return { error: rev.error };
   // Stage the exact review/result before consuming the local recovery source.
   try { git(repo, ["add", "--", `.logbook/${DECISION_PLANE}/${cardId}.json`, `.logbook/${REVIEW_PLANE}/${cardId}.json`]); } catch (e) { return { error: `git add failed: ${e.message}` }; }
-  try { unlinkSync(draftFile); } catch (e) { if (e.code !== "ENOENT") return { error: `decision staged but local draft not removed: ${e.code} — re-run to complete` }; }
+  try { unlinkSync(draftFile); } catch (e) { if (e.code !== "ENOENT") return { error: `decision staged but local draft not removed: ${e.code} - re-run to complete` }; }
   return { cardId, disposition: "accepted", reviewedBy: by };
 }
 export function acceptDraft(repo, cardId, opts = {}) {
@@ -3214,8 +3214,8 @@ function readBoundedInput(source, max) {
 export function renderPublish(r) {
   const s = (v) => sanitizeContextText(String(v ?? ""), 300, { markdown: false });
   const counts = `${r.published || 0} published, ${r.idempotent || 0} unchanged, ${r.conflicts || 0} conflict(s), ${r.unmeasurable || 0} unmeasurable, ${(r.skipped || []).length} skipped`;
-  if (r.error) return `logbook publish: ${counts} — ${s(r.error)} (exit nonzero, not "clean")`;
-  return `logbook publish: ${counts}${r.incomplete ? " — INCOMPLETE (exit nonzero)" : ""}` +
+  if (r.error) return `logbook publish: ${counts} - ${s(r.error)} (exit nonzero, not "clean")`;
+  return `logbook publish: ${counts}${r.incomplete ? " - INCOMPLETE (exit nonzero)" : ""}` +
     (r.published ? "\n  commit .logbook/leads/ to record them; they surface as machine LEADS (lower authority), reviewed via accept-lead." : "");
 }
 
@@ -3267,7 +3267,7 @@ export function parsePolicy(text) {
     const m = line.match(/^([a-z_]+)\s*=\s*(.+)$/);
     if (!m) return { error: `malformed line: ${raw.slice(0, 60)}` };
     const key = m[1], val = m[2].trim();
-    if (seen.has(key)) return { error: `duplicate key: ${key}` };   // strict — no duplicate keys
+    if (seen.has(key)) return { error: `duplicate key: ${key}` };   // strict - no duplicate keys
     seen.add(key);
     if (key === "enabled") { if (val !== "true" && val !== "false") return { error: "enabled must be true|false" }; p.enabled = val === "true"; }
     else if (key === "max_cards_per_run") { const n = parseBoundedInt(val, 1, HARD_MAX_PER_RUN); if (n.error) return { error: `max_cards_per_run ${n.error}` }; p.maxPerRun = n.value; }
@@ -3294,7 +3294,7 @@ function loadTrustedPolicy(repo, commit) {
   const ls = gitBuf(repo, ["ls-tree", "-z", commit, "--", path]);
   if (ls.status !== 0 || ls.error) return { error: `cannot read committed policy tree at ${commit.slice(0, 12)} (unmeasurable)`, unmeasurable: true };
   const rows = ls.stdout.toString("latin1").split("\0").filter(Boolean);
-  if (!rows.length) return { error: `no committed ${path} at ${commit.slice(0, 12)} — autonomous mode is opt-in` };
+  if (!rows.length) return { error: `no committed ${path} at ${commit.slice(0, 12)} - autonomous mode is opt-in` };
   if (rows.length !== 1) return { error: "committed policy path is ambiguous (unmeasurable)" };
   const tab = rows[0].indexOf("\t"), meta = tab < 0 ? [] : rows[0].slice(0, tab).split(" ");
   if (tab < 0 || rows[0].slice(tab + 1) !== path ||
@@ -3314,7 +3314,7 @@ function loadTrustedPolicy(repo, commit) {
   if (parsed.error) return { error: `policy.toml: ${parsed.error}` };
   const p = parsed.policy;
   if (p.enabled !== true) return { error: "automation not enabled (enabled != true)" };
-  if (!p.allowedScopes || !p.allowedScopes.length) return { error: "no allowed_scopes — nothing may be published" };
+  if (!p.allowedScopes || !p.allowedScopes.length) return { error: "no allowed_scopes - nothing may be published" };
   if (!(p.maxPerRun >= 1) || !(p.maxTotal >= 1)) return { error: "missing/invalid caps" };
   return { policy: p, text };
 }
@@ -3513,7 +3513,7 @@ export function withPublishLock(repo, fn) {
       } else transientSince = null;
       if (now - start > budget) {
         if (state === "held")
-          return { __lock: "timeout", error: "publication lock held — if no logbook process is running, remove logbook-publish.lock from the git common dir manually" };
+          return { __lock: "timeout", error: "publication lock held - if no logbook process is running, remove logbook-publish.lock from the git common dir manually" };
         return { __lock: "error", error: `cannot acquire publication lock after bounded retries: ${e.code || e.message}` };
       }
       waitSync(20);
@@ -3720,26 +3720,26 @@ export function publishPolicyLeads(repo, candidates, { trustRef = "HEAD" } = {})
     const trustedReviews = readReviewPlane(repo, commit);
     if (trustedLeads.unreadable || trustedDecisions.unreadable || trustedReviews.unreadable ||
         trustedLeads.malformed.length || trustedDecisions.malformed.length || trustedReviews.malformed.length)
-      return done({ error: "malformed/missing trusted lead, decision, or review — unmeasurable", incomplete: true });
+      return done({ error: "malformed/missing trusted lead, decision, or review - unmeasurable", incomplete: true });
     const trustedState = validateDispositionState(trustedDecisions.cards, trustedLeads.cards, trustedReviews.reviews);
     if (!trustedState.valid)
-      return done({ error: "inconsistent trusted disposition state — unmeasurable", incomplete: true });
+      return done({ error: "inconsistent trusted disposition state - unmeasurable", incomplete: true });
     const wt = worktreePlaneState(pin.dir);
-    if (wt.malformed) return done({ error: "malformed/unsafe worktree lead — unmeasurable", incomplete: true });
+    if (wt.malformed) return done({ error: "malformed/unsafe worktree lead - unmeasurable", incomplete: true });
     const wtDecisions = worktreePlaneState(decisionPin.dir);
     const wtReviews = worktreePlaneState(reviewPin.dir, parseReview);
     if (wtDecisions.malformed || wtReviews.malformed)
-      return done({ error: "malformed/unsafe worktree decision or review — unmeasurable", incomplete: true });
+      return done({ error: "malformed/unsafe worktree decision or review - unmeasurable", incomplete: true });
     const effectiveLeads = overlayPlaneEntries(trustedLeads.cards, wt, "card", serializeDecisionCard);
     const effectiveDecisions = overlayPlaneEntries(trustedDecisions.cards, wtDecisions, "card", serializeDecisionCard);
     const effectiveReviews = overlayPlaneEntries(trustedReviews.reviews, wtReviews, "review", serializeReview);
     if (effectiveLeads.issues.length || effectiveDecisions.issues.length || effectiveReviews.issues.length)
-      return done({ error: "worktree mutates immutable trust-plane bytes — unmeasurable", incomplete: true });
+      return done({ error: "worktree mutates immutable trust-plane bytes - unmeasurable", incomplete: true });
     const effectiveState = validateDispositionState(effectiveDecisions.entries, effectiveLeads.entries, effectiveReviews.entries);
     if (!effectiveState.valid)
-      return done({ error: "inconsistent effective disposition state — unmeasurable", incomplete: true });
+      return done({ error: "inconsistent effective disposition state - unmeasurable", incomplete: true });
     if (effectiveState.leadById.size > policy.maxTotal)
-      return done({ error: `effective policy lead plane exceeds max_total_cards=${policy.maxTotal} — unmeasurable`, incomplete: true });
+      return done({ error: `effective policy lead plane exceeds max_total_cards=${policy.maxTotal} - unmeasurable`, incomplete: true });
     const union = new Set(effectiveState.leadById.keys());                // committed + worktree; a local delete cannot restore quota
     const dispositioned = new Set([...effectiveState.decisionById.keys(), ...effectiveState.reviewById.keys()]);
     for (const rec of installable) {
@@ -3878,7 +3878,7 @@ export function migrateLegacyToDrafts(repo, dir = repo) {
     const res = installCard(pin.dir, card.cardId, serializeDecisionCard(card)); // atomic, no-replace, symlink-safe
     if (res.error) { skipped.push({ reason: "unsafe-target", sha: ann.sha, detail: res.error }); continue; }
     if (res.idempotent) { skipped.push({ reason: "already-drafted", sha: ann.sha, cardId: card.cardId }); continue; }
-    if (res.conflict) { skipped.push({ reason: "conflict", sha: ann.sha }); continue; } // existing edited draft — don't clobber
+    if (res.conflict) { skipped.push({ reason: "conflict", sha: ann.sha }); continue; } // existing edited draft - don't clobber
     drafted.push(card);
   }
   return { drafted, skipped };
@@ -4030,7 +4030,7 @@ function withNoteLock(repo, fn) {
       } else transientSince = null;
       if (now - start > budget) {
         if (state === "held")
-          return { error: "note lock held — if no logbook process is running, remove logbook-notes.lock from the Git common directory manually" };
+          return { error: "note lock held - if no logbook process is running, remove logbook-notes.lock from the Git common directory manually" };
         return { error: `cannot acquire note lock after bounded retries: ${error.code || error.message}` };
       }
       waitSync(20);
@@ -4682,7 +4682,7 @@ function refreshReleasedWiring(repo, quiet) {
 // ---------- CLI ----------
 function usage() {
   console.log(`
-  ${C.bold}logbook${C.r} — turn git history into memory an agent can use
+  ${C.bold}logbook${C.r} - turn git history into memory an agent can use
 
   usage:
     logbook init [path]           analyze + wire AGENTS.md/CLAUDE.md/.cursorrules
@@ -4725,7 +4725,7 @@ function usage() {
                                   commit the review record
     logbook outcomes [path]       REVIEW OUTCOMES of machine leads across plane history
                                   (accepted as-is / edited / rejected / pending /
-                                  vanished unreviewed) — NOT semantic claim precision;
+                                  vanished unreviewed) - NOT semantic claim precision;
                                   exits nonzero when history is untrustworthy
     logbook export [path] --format okf --out DIR [--ref REF]
                                   generate a deterministic OKF v0.1 projection of
@@ -5012,7 +5012,7 @@ async function main() {
     const drafts = state.cards.map(({ card }) => card);
     if (!drafts.length) { if (!o.quiet) console.log("  no draft decisions awaiting acceptance"); return; }
     if (!o.quiet) {
-      console.log(`  ${C.bold}${drafts.length}${C.r} draft decision${drafts.length === 1 ? "" : "s"} awaiting human acceptance ${C.dim}(local + inert — never surface in check --diff until accepted)${C.r}\n`);
+      console.log(`  ${C.bold}${drafts.length}${C.r} draft decision${drafts.length === 1 ? "" : "s"} awaiting human acceptance ${C.dim}(local + inert - never surface in check --diff until accepted)${C.r}\n`);
       for (const card of drafts.slice(0, 50)) {
         console.log(`  ${card.cardId}  ${card.sha.slice(0, 8)}  ${sanitizeContextText(card.claim, 160, { markdown: false })}`);
         console.log(`    ${C.dim}proposed by ${sanitizeContextText(card.by, 64, { markdown: false })} on ${card.at}; accept: logbook accept-draft ${card.cardId} --by <who>${C.r}`);
@@ -5042,12 +5042,12 @@ async function main() {
   let scanOk = true;
   if (!reused) scanOk = diffScan(repo, events, o);
   if (!scanOk) {
-    console.error("  ⚠ diff scan failed — suppression/assertion columns are unmeasured, not clean");
+    console.error("  ⚠ diff scan failed - suppression/assertion columns are unmeasured, not clean");
   }
 
   if (o.json) {
     if (!scanOk) {
-      console.error("logbook: diff scan failed — the record would be incomplete, refusing to emit it as data");
+      console.error("logbook: diff scan failed - the record would be incomplete, refusing to emit it as data");
       process.exit(1);
     }
     for (const e of events) console.log(JSON.stringify(e));
@@ -5059,7 +5059,7 @@ async function main() {
     // the agent then investigates each and writes cite-or-abstain DRAFTS. This
     // is the lazy loop run deliberately, not blind bulk generation.
     if (!scanOk) {
-      console.error("logbook: diff scan failed — suppression/weakening rows are unmeasured; refusing a partial worklist");
+      console.error("logbook: diff scan failed - suppression/weakening rows are unmeasured; refusing a partial worklist");
       process.exit(1);
     }
     if (o.out) { console.error("logbook: refine does not support --out"); process.exit(1); }
@@ -5084,22 +5084,22 @@ async function main() {
       !represented.has(e.fullSha));
     notable.sort((a, b) => Number(b.revert) - Number(a.revert)); // do-not-retry first; events already newest-first
     const limit = o.limit ?? 50;
-    console.log(`  ${C.bold}${notable.length}${C.r} un-annotated notable decision${notable.length === 1 ? "" : "s"} in the last ${fmt(o.max)} commits ${C.dim}(investigate each with git show before annotating — never annotate a guess)${C.r}\n`);
+    console.log(`  ${C.bold}${notable.length}${C.r} un-annotated notable decision${notable.length === 1 ? "" : "s"} in the last ${fmt(o.max)} commits ${C.dim}(investigate each with git show before annotating - never annotate a guess)${C.r}\n`);
     for (const e of notable.slice(0, limit)) {
       const kind = e.revert ? "revert" : (e.suppressions?.length ? "suppression" : "weakening");
       const f = (e.files || [])[0] || "";
       console.log(`  ${e.sha}  ${C.dim}[${kind}]${C.r}  ${sanitizeContextText(e.subject || "", 120, { markdown: false })}`);
-      console.log(`    ${C.dim}${sanitizeContextText(f, 200, { markdown: false })} — verify: git show ${e.fullSha}${C.r}`);
+      console.log(`    ${C.dim}${sanitizeContextText(f, 200, { markdown: false })} - verify: git show ${e.fullSha}${C.r}`);
       console.log(`    ${C.dim}then preserve: logbook annotate ${e.fullSha} "verified why" --span "exact quote" --side diff --evidence-file ${sanitizeContextText(f, 200, { markdown: false })} --by MODEL${C.r}`);
     }
     if (notable.length > limit) console.log(`\n  ${C.dim}… and ${notable.length - limit} more (raise with --limit)${C.r}`);
-    if (capped) console.error(`  analysis capped at ${fmt(o.max)} commits — use -n for a larger window`);
+    if (capped) console.error(`  analysis capped at ${fmt(o.max)} commits - use -n for a larger window`);
     return;
   }
   if (o.cmd === "audit") return console.log(renderAudit(name, auditHead(repo, events)));
   if (o.cmd === "query") {
     if (!scanOk) {
-      console.error("logbook: diff scan failed — the record would be incomplete, refusing to query it");
+      console.error("logbook: diff scan failed - the record would be incomplete, refusing to query it");
       process.exit(1);
     }
     const limit = o.limit ?? 200;
@@ -5112,16 +5112,16 @@ async function main() {
     for (const e of hits) console.log(JSON.stringify(e));
     const count = `${all.length} matching event${all.length === 1 ? "" : "s"}, returned ${hits.length}`;
     const truncated = all.length > hits.length
-      ? " — TRUNCATED: narrow with --file/--revert or pass a higher --limit before concluding"
+      ? " - TRUNCATED: narrow with --file/--revert or pass a higher --limit before concluding"
       : "";
     console.error(`  ${count}${truncated}`);
     if (capped)
-      console.error(`  analysis capped at ${fmt(o.max)} commits — use -n for a larger window or --since/--until for another era`);
+      console.error(`  analysis capped at ${fmt(o.max)} commits - use -n for a larger window or --since/--until for another era`);
     return;
   }
   if (o.cmd === "context") {
     if (!scanOk) {
-      console.error("logbook: diff scan failed — the record would be incomplete, refusing to format context");
+      console.error("logbook: diff scan failed - the record would be incomplete, refusing to format context");
       process.exit(1);
     }
     if (o.limit != null) {
@@ -5144,7 +5144,7 @@ async function main() {
       try {
         managedWriteFile(repo, join(repo, "events.jsonl"), events.map((event) => JSON.stringify(event)).join("\n") + "\n");
       } catch {
-        if (!o.quiet) console.error("  context cache unavailable — NEXT will rescan history");
+        if (!o.quiet) console.error("  context cache unavailable - NEXT will rescan history");
       }
     }
     process.stdout.write(page.text);
@@ -5237,7 +5237,7 @@ async function main() {
   }
   if (!o.quiet) {
     const inventory = historyInventory(A);
-    console.log(`  ${fmt(A.n)} commit${A.n === 1 ? "" : "s"}${capped ? ` (capped — use -n for more)` : ""} · ${fmt(A.filesTouched)} file${A.filesTouched === 1 ? "" : "s"} · ${spanHuman(A.spanDays)} · ${plural(A.authors, "author")}`);
+    console.log(`  ${fmt(A.n)} commit${A.n === 1 ? "" : "s"}${capped ? ` (capped - use -n for more)` : ""} · ${fmt(A.filesTouched)} file${A.filesTouched === 1 ? "" : "s"} · ${spanHuman(A.spanDays)} · ${plural(A.authors, "author")}`);
     console.log(`  history inventory: ${C.dim}(${inventory.parts})${C.r}\n`);
     if (inventory.empty && o.cmd === "init")
       console.log(`  ${C.dim}note: no extracted decision-history leads in this window; use the digest as a hotspot map${C.r}\n`);
@@ -5247,7 +5247,7 @@ async function main() {
     else
       console.log(`  ${C.bad}⚠${C.r} did not write ${C.bold}events.jsonl${C.r}   ${C.dim}diff scan incomplete; any existing ledger was left untouched${C.r}`);
     console.log(`  ${C.good}✓${C.r} wrote ${C.bold}JOURNEY.md${C.r}     ${C.dim}the repo's story, told back to you${C.r}\n`);
-    if (shallow) console.log(`  ${C.bad}⚠${C.r} ${C.dim}shallow clone — run git fetch --unshallow for the full record${C.r}\n`);
+    if (shallow) console.log(`  ${C.bad}⚠${C.r} ${C.dim}shallow clone - run git fetch --unshallow for the full record${C.r}\n`);
     console.log(`  ${C.dim}next:${C.r} logbook journey   ${C.dim}(see it in color)${C.r}\n`);
   }
   if (!scanOk) process.exitCode = 1;

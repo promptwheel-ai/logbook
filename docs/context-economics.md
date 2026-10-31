@@ -5,7 +5,7 @@ Measured across a random 400-repo sample of the top-2,500 GitHub repos
 
 | source | median tokens | ratio of aggregate medians vs logbook |
 |---|---|---|
-| LOGBOOK.md (v0.2, incl. per-file history) | **1,019** | — |
+| LOGBOOK.md (v0.2, incl. per-file history) | **1,019** | - |
 | `git log --oneline` | 16,133 | 16× |
 | `git log` (full messages) | 83,279 | 82× |
 
@@ -17,7 +17,7 @@ Measured across a random 400-repo sample of the top-2,500 GitHub repos
 - A session that would otherwise ingest the full history avoids that context
   difference. Over 100 such sessions, the estimate is ~8M tokens.
 
-And the raw log is not just bigger — it is missing the analysis. The
+And the raw log is not just bigger - it is missing the analysis. The
 suppression ledger and assertion-weakening events come from reading DIFFS
 (`git log -p`, typically 1,000×+ the logbook's size); no token budget spent
 on `--oneline` can surface them. The logbook is a table of contents that
@@ -26,8 +26,8 @@ also did the reading.
 ## Potential context avoided over a month / a year
 
 Per session that would otherwise ingest history: ~15.1k tokens saved vs
-`--oneline`, ~82.3k vs the full log (median repo). Every fresh context —
-including every subagent — pays it again.
+`--oneline`, ~82.3k vs the full log (median repo). Every fresh context -
+including every subagent - pays it again.
 
 | hypothetical usage | sessions/mo ingesting history | potential avoided/mo (oneline → full) | potential avoided/yr |
 |---|---|---|---|
@@ -35,7 +35,7 @@ including every subagent — pays it again.
 | solo, heavy (20/day incl. subagents) | ~440 | 6.7M → 36M | 81M → 436M |
 | team of 5, heavy | ~2,200 | 34M → 181M | 405M → 2.2B |
 
-Honest framing: in our baseline runs, agents often read no history — for those
+Honest framing: in our baseline runs, agents often read no history - for those
 sessions the logbook ADDS the knowledge for ~1k tokens rather than saving 82k.
 The savings apply to sessions that would have pulled the log; the deeper point
 is context pressure (raw logs crowd out code) and impossibility (for 34% of

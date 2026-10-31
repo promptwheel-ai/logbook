@@ -1,19 +1,19 @@
 # AST exploration (2026-07-10)
 
 Question: does upgrading detection to AST give real capability or a viral
-edge — and what do we adopt now vs later?
+edge - and what do we adopt now vs later?
 
 ## The three plays
 
-1. **Full AST via tree-sitter-class parsers** — REJECTED for core. Kills the
+1. **Full AST via tree-sitter-class parsers** - REJECTED for core. Kills the
    zero-dependency single-file constitution (the thing that makes `npx` cold
    trust possible), adds per-language grammars, and precision is invisible in
    a demo. If ever shipped: as an opt-in enrichment pack that deepens
    events.jsonl; core stays single-file.
-2. **A larger AST+dataflow pattern engine** from earlier work — the real
+2. **A larger AST+dataflow pattern engine** from earlier work - the real
    deep-analysis asset. If it ships, it ships as an opt-in pack that
    enriches events.jsonl; never into the zero-dep core.
-3. **AST-grade checks that don't need an AST** — ADOPTED NOW. The canonical
+3. **AST-grade checks that don't need an AST** - ADOPTED NOW. The canonical
    "regex can't see this" case is semantic assertion weakening:
    `expect(x).toEqual(y)` → `expect(x).toBeTruthy()`. Same line count,
    assertion gutted. But it IS visible to paired diff analysis: a STRONG
@@ -35,7 +35,7 @@ construction: requires both sides in the same commit and file class
 
 ## Python stdlib-AST (v0.3 candidate, not now)
 
-Python ships `ast` in the stdlib — an opt-in deep mode could shell out to
+Python ships `ast` in the stdlib - an opt-in deep mode could shell out to
 python3 (as we already shell to git) and parse test files pre/post commit for
 true semantic diffs, no npm deps. Priced at: per-commit `git show` pairs +
 parse = 10-50x slower; needs its own caps and fleet pass. Explore after
@@ -51,7 +51,7 @@ packs, funded by demand, never into the zero-dep core.
 
 The night's real finding, one level above "regex vs AST": **git itself is the
 tool.** Git is already a content-addressed database with a C-speed query
-engine — log, grep, blame, pickaxe (-S), numstat, diff. The logbook is thin
+engine - log, grep, blame, pickaxe (-S), numstat, diff. The logbook is thin
 layers over that substrate:
 
 1. **git plumbing = the database** (log/numstat/-p for events; grep for

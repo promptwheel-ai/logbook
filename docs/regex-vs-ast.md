@@ -18,10 +18,10 @@ commits, stratified by era.
 | pre-2025 control | 1,325 | 92% | 1 | 14 |
 | ALL | 3,993 | **93%** | 1 | 22 |
 
-**Direction agreement was IDENTICAL across all four ruler versions** — the
+**Direction agreement was IDENTICAL across all four ruler versions** - the
 number is stable when the instrument improves, which is what a real
 measurement looks like. And calibration is BEST exactly where the tool's
-users live: on machine-authored commits the median error is zero —
+users live: on machine-authored commits the median error is zero -
 machine-formatted code is what pattern-matching reads most reliably.
 
 | metric | result |
@@ -31,12 +31,12 @@ machine-formatted code is what pattern-matching reads most reliably.
 | assert-delta error, median | 2 |
 | assert-delta error, p90 | 21 |
 | commits AST-flagged for downgrade, v1 heuristic | 7 (~0.4%) |
-| …surviving a wrapper-aware, ambiguous-excluding v2 heuristic | **1** (~0.06%) — detector catches 1/1 |
+| …surviving a wrapper-aware, ambiguous-excluding v2 heuristic | **1** (~0.06%) - detector catches 1/1 |
 | …dissolved as heuristic artifacts (np.all wrappers, or-widening, .startswith) | 6 |
 | commits with AST-confirmed test-skips added | 14 |
 
 The 92% direction agreement and error distribution were IDENTICAL under both
-ground-truth heuristics — the calibration is stable when the ruler improves.
+ground-truth heuristics - the calibration is stable when the ruler improves.
 
 ## Honest reading
 
@@ -44,16 +44,16 @@ ground-truth heuristics — the calibration is stable when the ruler improves.
   logbook flags "this commit weakened assertions" as a lead; leads need
   direction, not exact counts.
 - **Magnitude has a tail** (p90 error = 21): regex counts lines, AST counts
-  nodes — multi-assert lines and reformat-heavy commits diverge. This is why
+  nodes - multi-assert lines and reformat-heavy commits diverge. This is why
   every number in LOGBOOK.md is a lead, not a verdict, and why the agent
   reading it is instructed to `git show` before acting.
 - **True assertion downgrades are outlier-rare** (~1 in 1,600
-  assert-touching commits under the strict v2 ground truth) — which makes
+  assert-touching commits under the strict v2 ground truth) - which makes
   the tripwire MORE valuable per firing, like the security-revert tag. The
   detector ships in 0.2.0 scoped to the precisely-judgeable named-matcher
   class; recall on confirmed cases: 1/1 (v2), 2/2 (v1).
 - **The sharpest finding cuts the other way:** hand-reviewing the AST flags
-  showed even real parsers can't cheaply judge bare-assert strength —
+  showed even real parsers can't cheaply judge bare-assert strength -
   `np.all()` wrappers and or-widened conditions read as "weakening" to a
   syntax heuristic and are nothing of the sort. Precision there needs
   semantics beyond syntax. We deliberately do not claim that class.

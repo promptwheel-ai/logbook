@@ -57,10 +57,10 @@ it as a refresh.
 
 Logbook has four storage planes:
 
-- `.logbook/drafts/` — local, gitignored, inert proposals;
-- `.logbook/leads/` — committed policy-published machine leads;
-- `.logbook/decisions/` — committed human-reviewed decisions; and
-- `.logbook/reviews/` — committed reviewer provenance bound to exact bytes.
+- `.logbook/drafts/`: local, gitignored, inert proposals;
+- `.logbook/leads/`: committed policy-published machine leads;
+- `.logbook/decisions/`: committed human-reviewed decisions; and
+- `.logbook/reviews/`: committed reviewer provenance bound to exact bytes.
 
 `check --diff` labels machine leads as lower authority. A decision is
 `human-reviewed` only when its exact card bytes have a matching review record

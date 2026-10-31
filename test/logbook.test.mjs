@@ -784,7 +784,7 @@ test("--since scopes the era", () => {
 
 test("-n cap is surfaced, not silent", () => {
   const out = execFileSync(process.execPath, [CLI, repo, "-n", "5"], { encoding: "utf8" });
-  assert.match(out, /capped — use -n for more/);
+  assert.match(out, /capped - use -n for more/);
   assert.match(readFileSync(join(repo, "LOGBOOK.md"), "utf8"), /Analysis capped at 5 commits/);
 });
 
@@ -1396,7 +1396,7 @@ test("query counts all matches and gives actionable truncation recovery", () => 
   assert.equal(truncated.status, 0);
   assert.equal(truncated.stdout.trim().split("\n").length, 2, "stdout honors the requested limit");
   assert.match(truncated.stderr,
-    /\d+ matching events, returned 2 — TRUNCATED: narrow with --file\/--revert or pass a higher --limit before concluding/);
+    /\d+ matching events, returned 2 - TRUNCATED: narrow with --file\/--revert or pass a higher --limit before concluding/);
 
   const exact = spawnSync(process.execPath, [CLI, "query", repo, "--revert", "--limit", "1"], { encoding: "utf8" });
   assert.equal(exact.status, 0);
@@ -1893,7 +1893,7 @@ test("audit on a suppression-free repo is clean, not an error", () => {
   writeFileSync(join(d, "a.js"), "let x = 1;\n");
   g(["add", "-A"]); g(["commit", "-q", "-m", "base"]);
   const out = execFileSync(process.execPath, [CLI, "audit", d], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-  assert.match(out, /clean — no live suppressions/);
+  assert.match(out, /clean - no live suppressions/);
   rmSync(d, { recursive: true, force: true });
 });
 
@@ -2480,7 +2480,7 @@ test("gitfiles stage2: a policy-published lead is surfaced but labeled as a mach
   writeFileSync(join(d, "src", "db.js"), "createPool({max:20})\n"); g("add", "-A"); g("commit", "-qm", "bump");
   const res = checkDecisions(d, { base, head: g("rev-parse", "HEAD").trim() });
   assert.equal(res.leads[0].tier, "policy-published");
-  assert.match(renderDecisionLeads(res), /policy-published — machine lead, not a human decision/);
+  assert.match(renderDecisionLeads(res), /policy-published - machine lead, not a human decision/);
   rmSync(d, { recursive: true, force: true });
 });
 
@@ -3713,7 +3713,7 @@ test("trust closure: a decision file without an exact review is visibly unreview
   writeFileSync(join(d, "src", "db.js"), "createPool({max:20})\n"); g("add", "-A"); g("commit", "-qm", "touch");
   const res = checkDecisions(d, { base, head: g("rev-parse", "HEAD").trim() });
   assert.equal(res.exitCode, 1); assert.equal(res.leads[0].authoritative, false);
-  assert.match(renderDecisionLeads(res), /decision file — human review unverified/);
+  assert.match(renderDecisionLeads(res), /decision file - human review unverified/);
   assert.doesNotMatch(renderDecisionLeads(res), /\[human-reviewed\]/);
   rmSync(d, { recursive: true, force: true });
 });

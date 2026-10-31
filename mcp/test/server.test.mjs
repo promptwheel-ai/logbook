@@ -69,7 +69,7 @@ test("handshake and tool inventory", async () => {
 test("fresh query (no ledger on disk): events carry xv, truncation is announced", async () => {
   const text = await callTool("logbook_query", { repo });
   const [note, ...rows] = text.split("\n");
-  assert.match(note, /^105 matching events, returned 100 — TRUNCATED/, "count line is the contract");
+  assert.match(note, /^105 matching events, returned 100 - TRUNCATED/, "count line is the contract");
   assert.equal(rows.length, 100);
   for (const r of rows) {
     const e = JSON.parse(r);
@@ -214,7 +214,7 @@ test("digest renders through the same pipeline", async () => {
 
 test("audit on the clean fixture reports clean, not an error", async () => {
   const text = await callTool("logbook_audit", { repo });
-  assert.match(text, /clean — no live suppressions/);
+  assert.match(text, /clean - no live suppressions/);
 });
 
 test("context cursor is rejected after repository HEAD changes", async () => {

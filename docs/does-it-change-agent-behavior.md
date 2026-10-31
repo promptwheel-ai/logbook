@@ -2,13 +2,13 @@
 
 An A/B test, 2026-07-10. Two fresh agent sessions (same model, same prompt),
 asked to plan a refactor of `useShallow` in zustand. One received zustand's
-4.4KB LOGBOOK.md in context. Neither had tools or repo access — planning only.
+4.4KB LOGBOOK.md in context. Neither had tools or repo access - planning only.
 
 Relevant fact both could have used: zustand merged a useShallow refactor in
 PR #2701 and **reverted it** in #2703 (2024-09-15). The logbook's
 do-not-retry list records this.
 
-## Control (no logbook) — competent and blind
+## Control (no logbook) - competent and blind
 
 > Before touching any code, I'd read `src/react/shallow.ts`,
 > `src/vanilla/shallow.ts` [...] extract that caching pattern into one small
@@ -19,16 +19,16 @@ do-not-retry list records this.
 Good engineering hygiene. Zero awareness that this exact refactor was tried
 and rolled back. It would have re-attempted #2701.
 
-## Treatment (with logbook) — starts from the failure that already happened
+## Treatment (with logbook) - starts from the failure that already happened
 
 > Before touching anything, I'd pull up PR #2701 and its revert #2703
-> (2024-09-15, "revert useShallow refactor") — that's a direct prior attempt
+> (2024-09-15, "revert useShallow refactor") - that's a direct prior attempt
 > at this exact task that failed, so understanding what broke is the
 > precondition for not repeating it, not an optional nice-to-have. [...]
 > Given the do-not-retry precedent, I'd favor a narrow, additive refactor
 > [...] since #817 shows overload removal in similar context-adjacent code
-> was also reverted for breaking types. I'd also check the oversight ledger —
-> 9 assertion-weakening commits — to see if any touched useShallow's existing
+> was also reverted for breaking types. I'd also check the oversight ledger -
+> 9 assertion-weakening commits - to see if any touched useShallow's existing
 > tests, since a refactor that passes a weakened test suite could be hiding
 > the same regression that caused the 2024 revert. [...] type-level
 > regressions are the pattern here, not runtime bugs, so I'd weight TS
@@ -53,13 +53,13 @@ change adjacent to a reverted one, with and without LOGBOOK.md in context.
 
 # Round 2: generic tasks, no revert priming (same day)
 
-Four more runs — onboarding brief on flask, modernization risk assessment on
+Four more runs - onboarding brief on flask, modernization risk assessment on
 express. Tasks never mention history. These famous repos give the control
 agent unusually strong training priors.
 
 ## What the controls got right
 
-Both controls were genuinely strong — training data covers famous repos
+Both controls were genuinely strong - training data covers famous repos
 (flask's sansio split and Werkzeug coupling; express's path-to-regexp CVE
 history and prototype monkey-patching). On world-famous code, a fresh agent
 is not blind.
@@ -80,7 +80,7 @@ express treatment:
 > Response.js carries a security scar: the open-redirect allow-list fix
 > needed a second pass [...] it already fooled one round of review. [...]
 > the 2017 Buffer.from-when-available swap [was] already tried and rolled
-> back — so before touching buffer handling, confirm the new approach
+> back - so before touching buffer handling, confirm the new approach
 > differs materially from what was already reverted. [...] re-enable/tighten
 > [the weakened assertions] first so you have a real regression net.
 
@@ -112,12 +112,12 @@ that code.
 ## What the extra ~2k tokens bought (verbatim)
 
 > response.js (392 commits, 5 reverts) is the single riskiest file to touch:
-> reverted fixes there — infinite loop on `res.send(status)`, JSON charset
-> removal, error messaging for null/undefined `res.status` — all show that
+> reverted fixes there - infinite loop on `res.send(status)`, JSON charset
+> removal, error messaging for null/undefined `res.status` - all show that
 > content-negotiation and status-handling code has non-obvious behavioral
 > contracts that "obvious" cleanups keep breaking. [...] The single most
 > alarming data point is the 2025-12-01 revert of the CVE-2024-51999
-> security patch, which also stripped 9 assertions — meaning a real
+> security patch, which also stripped 9 assertions - meaning a real
 > vulnerability class was reintroduced with the tests that would have caught
 > it removed in the same commit [...] treat any diff that removes or weakens
 > assertions as a hard stop [...] given how normalized that anti-pattern
@@ -133,4 +133,4 @@ file-keyed revert history and (2) notable-event highlighting, not longer
 flat lists. The 800-token digest is the right default (context economics);
 the promising design example is per-file sections + a notable-events section
 at ~2-4k tokens. Honest scope: n=1 per arm, one repo, deep variant
-hand-curated—not validation of the current product format.
+hand-curated, not validation of the current product format.
