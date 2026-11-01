@@ -991,36 +991,51 @@ export function renderJourneyAnsi(name, A, compare) {
 }
 
 // ---------- audit: what is STILL suppressed today, and since when ----------
-export function auditHead(repo, events) {
+// scanSuppressions: the live-suppression scan at a ref, with line content. The shared core behind
+// `auditHead` (full HEAD audit) and the `audit --json` modes. Keeps detection + gating in ONE place
+// so external consumers (Sawbuck) never import the pattern or the gating. It does NOT date or
+// blame-refine (that is auditHead's job). gate:false is the raw pattern grep (used for the delta base,
+// which compares against a past ref where tree-shape gating does not apply).
+export function scanSuppressions(repo, { ref = "HEAD", paths = null, gate = true } = {}) {
   const live = [];
   let grep = "";
+  const args = ["grep", "-nP", SUPPRESS_PAT.source, ref];
+  if (paths && paths.length) args.push("--", ...paths);
   try {
-    // one C-speed pass over the whole tree; PCRE shares the JS pattern source
-    grep = git(repo, ["grep", "-nP", SUPPRESS_PAT.source, "HEAD"]);
+    // one C-speed pass; PCRE shares the JS pattern source
+    grep = git(repo, args);
   } catch (e) {
-    // exit 1 = no matches: genuinely clean. Anything else (git without PCRE
-    // support, corrupt repo) must SURFACE — "unmeasurable" is not "clean".
+    // exit 1 = no matches: genuinely clean. Anything else (git without PCRE support, corrupt repo,
+    // bad ref) must SURFACE, "unmeasurable" is not "clean".
     if (e?.status !== 1) throw new Error(`audit: git grep failed - ${String(e?.message).split("\n")[0]}`);
   }
+  const prefix = new RegExp("^" + ref.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + ":([^:]+):(\\d+):(.*)$");
   for (const row of grep.split("\n")) {
     if (!row) continue;
-    const m = /^HEAD:([^:]+):(\d+):(.*)$/.exec(row);
+    const m = prefix.exec(row);
     if (!m) continue;
     const [, file, lineNo, content] = m;
-    const cls = classifyFile(file);
-    if (cls === "doc" || cls === "gen") continue;
-    // example/demo corpora are exhibits, not debt — the audit is a to-do list
-    if (/(^|\/)(examples?|example_scripts|samples?|demos?)(\/|$)/i.test(file)) continue;
-    // vendored copies and test-framework sources DEFINE the skip API
-    // (jasmine's xit/xdescribe, mocha's describe.skip) — not debt either
-    if (/(^|\/)(third[-_]?party|externals?)(\/|$)/i.test(file)) continue;
-    if (/(^|\/)(jasmine|mocha|chai|qunit|sinon)([-.][\w.]+)?\.js$/i.test(file)) continue;
+    if (gate) {
+      const cls = classifyFile(file);
+      if (cls === "doc" || cls === "gen") continue;
+      // example/demo corpora are exhibits, not debt, the audit is a to-do list
+      if (/(^|\/)(examples?|example_scripts|samples?|demos?)(\/|$)/i.test(file)) continue;
+      // vendored copies and test-framework sources DEFINE the skip API
+      // (jasmine's xit/xdescribe, mocha's describe.skip), not debt either
+      if (/(^|\/)(third[-_]?party|externals?)(\/|$)/i.test(file)) continue;
+      if (/(^|\/)(jasmine|mocha|chai|qunit|sinon)([-.][\w.]+)?\.js$/i.test(file)) continue;
+    }
     for (const hit of content.matchAll(SUPPRESS_PAT)) {
-      if (isMention(content, hit.index, hit[0])) continue;
-      if (!kindAllowedInFile(hit[0], file)) continue;
-      live.push({ file, line: Number(lineNo), kind: hit[0].trim() });
+      if (gate && isMention(content, hit.index, hit[0])) continue;
+      if (gate && !kindAllowedInFile(hit[0], file)) continue;
+      live.push({ file, line: Number(lineNo), kind: hit[0].trim(), content });
     }
   }
+  return live;
+}
+
+export function auditHead(repo, events) {
+  const live = scanSuppressions(repo, { ref: "HEAD", gate: true });
   // join: heuristic-date everything from the ledger (cheap, approximate),
   // sort, then blame-refine the entries that will actually be displayed —
   // git blame gives the EXACT commit for each live line, at a bounded cost
@@ -4959,8 +4974,8 @@ async function main() {
       console.log(`  export: ${written.recordCount} reviewed decision${written.recordCount === 1 ? "" : "s"} → ${sanitizeContextText(written.out, 700, { markdown: false })} (OKF ${OKF_VERSION}; trust ${written.trustCommit.slice(0, 12)}; projection ${written.projectionDigest})`);
     return;
   }
-  if (o.format !== undefined || o.ref !== undefined) {
-    console.error("  --format and --ref are valid only with logbook export");
+  if (o.format !== undefined || (o.ref !== undefined && o.cmd !== "audit")) {
+    console.error("  --format and --ref are valid only with logbook export (--ref also with audit, for the delta base)");
     process.exit(1);
   }
 
@@ -5100,7 +5115,7 @@ async function main() {
     console.error("  ⚠ diff scan failed - suppression/assertion columns are unmeasured, not clean");
   }
 
-  if (o.json) {
+  if (o.json && o.cmd !== "audit") {
     if (!scanOk) {
       console.error("logbook: diff scan failed - the record would be incomplete, refusing to emit it as data");
       process.exit(1);
@@ -5151,7 +5166,25 @@ async function main() {
     if (capped) console.error(`  analysis capped at ${fmt(o.max)} commits - use -n for a larger window`);
     return;
   }
-  if (o.cmd === "audit") return console.log(renderAudit(name, auditHead(repo, events)));
+  if (o.cmd === "audit") {
+    if (o.json) {
+      const ref = o.ref || "HEAD";
+      if (ref !== "HEAD") {
+        // the delta base: raw (ungated) pattern grep at a past ref, {file,line,content}
+        const raw = scanSuppressions(repo, { ref, paths: o.files, gate: false });
+        return console.log(JSON.stringify(raw.map((x) => ({ file: x.file, line: x.line, content: x.content }))));
+      }
+      if (o.files && o.files.length) {
+        // scoped light audit (gated, no blame/dates, cheap enough for a per-turn hook)
+        const lite = scanSuppressions(repo, { ref: "HEAD", paths: o.files, gate: true });
+        return console.log(JSON.stringify(lite.map((x) => ({ file: x.file, line: x.line, kind: String(x.kind).trim(), content: x.content }))));
+      }
+      // full gated audit (blame-dated, re-silencing fight log), the whole-repo ledger
+      const live = auditHead(repo, events);
+      return console.log(JSON.stringify(live.map((x) => ({ file: x.file, line: x.line, kind: String(x.kind).trim(), content: x.content ?? "", since: x.since ?? null, sha: x.sha ?? null, resilenced: x.resilenced ?? 0 }))));
+    }
+    return console.log(renderAudit(name, auditHead(repo, events)));
+  }
   if (o.cmd === "query") {
     if (!scanOk) {
       console.error("logbook: diff scan failed - the record would be incomplete, refusing to query it");

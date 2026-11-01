@@ -967,6 +967,40 @@ test("audit tags re-silenced suppressions with the fight log", () => {
   assert.match(out, /re-silenced ×1 \(\+-\+\)/);
 });
 
+test("audit --json exposes live suppressions with content (full, scoped, and raw-ref modes)", () => {
+  const d = mkdtempSync(join(tmpdir(), "logbook-auditjson-"));
+  const g = (args, date) => execFileSync("git", ["-C", d, ...args], { env: { ...process.env,
+    GIT_AUTHOR_NAME: "H", GIT_AUTHOR_EMAIL: "h@x.io", GIT_COMMITTER_NAME: "H",
+    GIT_COMMITTER_EMAIL: "h@x.io", ...(date && { GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date }) } });
+  g(["init", "-q"]);
+  writeFileSync(join(d, "a.js"), "let x = 1;\n");
+  writeFileSync(join(d, "README.md"), "use eslint-disable to hush it\n");         // a doc MENTION, must be gated out
+  g(["add", "-A"]); g(["commit", "-q", "-m", "init"], "2024-01-01T12:00:00");     // base: a.js is clean here
+  writeFileSync(join(d, "a.js"), "/* eslint-disable no-unused-vars */\nlet x = 1;\n");
+  writeFileSync(join(d, "b.test.js"), "it.skip('flaky', () => {});\n");
+  g(["add", "-A"]); g(["commit", "-q", "-m", "hush + skip"], "2024-02-01T12:00:00");
+
+  // full: gated, blame-dated, carries line content; excludes the doc-file mention
+  const full = JSON.parse(execFileSync(process.execPath, [CLI, "audit", "--json", d], { encoding: "utf8" }));
+  const aHit = full.find((x) => x.file === "a.js");
+  assert.ok(aHit, "a.js eslint-disable is live");
+  assert.match(aHit.kind, /eslint-disable/);
+  assert.match(aHit.content, /eslint-disable no-unused-vars/);
+  assert.ok(aHit.since, "full mode is blame-dated");
+  assert.ok(full.some((x) => x.file === "b.test.js" && /it\.skip/.test(x.kind)), "the skipped test is live");
+  assert.ok(!full.some((x) => x.file === "README.md"), "a doc-file mention is gated out");
+
+  // scoped light: only the named path, carries content, no date refinement
+  const scoped = JSON.parse(execFileSync(process.execPath, [CLI, "audit", "--json", "--file", "a.js", d], { encoding: "utf8" }));
+  assert.ok(scoped.length >= 1 && scoped.every((x) => x.file === "a.js"), "scoped to a.js");
+  assert.ok(scoped.every((x) => x.since === undefined), "scoped light mode is undated");
+  assert.match(scoped[0].content, /eslint-disable/);
+
+  // raw-ref base (the delta base): grep at the clean base ref, a.js carries no suppression there
+  const base = JSON.parse(execFileSync(process.execPath, [CLI, "audit", "--json", "--ref", "HEAD~1", d], { encoding: "utf8" }));
+  assert.ok(!base.some((x) => x.file === "a.js"), "no a.js suppression at the base ref (it is what the branch added)");
+});
+
 test("suppressions inside string literals are mentions, not directives", () => {
   const d = mkdtempSync(join(tmpdir(), "logbook-mention-"));
   const g = (args, date) => execFileSync("git", ["-C", d, ...args], { env: { ...process.env,
@@ -1601,11 +1635,11 @@ test("init wires the repo once, idempotently, into existing agent files", () => 
   assert.match(agents, /accept-draft CARD_ID --by WHO/);
   assert.match(agents, /Never run accept, accept-draft, accept-lead, or reject-lead/);
   assert.match(agents, /check --diff.*NEXT.*--cursor TOKEN.*END complete/s);
-  assert.equal(PACKAGE_VERSION, "0.9.4");
-  assert.equal(NPX_COMMAND, "npx -y @promptwheel/logbook@0.9.4");
-  assert.match(agents, /npx -y @promptwheel\/logbook@0\.9\.4 context/,
+  assert.equal(PACKAGE_VERSION, "0.9.5");
+  assert.equal(NPX_COMMAND, "npx -y @promptwheel/logbook@0.9.5");
+  assert.match(agents, /npx -y @promptwheel\/logbook@0\.9\.5 context/,
     "generated workflow pins the package that authored it instead of npm latest");
-  assert.match(agents, /npx -y @promptwheel\/logbook@0\.9\.4 pending/,
+  assert.match(agents, /npx -y @promptwheel\/logbook@0\.9\.5 pending/,
     "the optional review handoff works even when the package is only invoked through npx");
   assert.doesNotMatch(agents, /Then run logbook pending/);
   assert.doesNotMatch(agents, /@promptwheel\/logbook context/);
