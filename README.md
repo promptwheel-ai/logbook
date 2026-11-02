@@ -24,7 +24,7 @@ objects for evidence checks, and never sends repository data anywhere.
 Node.js 18 or newer is required.
 
 ```bash
-npx -y @promptwheel/logbook@0.9.5 init
+npx -y @promptwheel/logbook@latest init
 ```
 
 `init` analyzes the repo, writes the history artifacts, and installs a compact
@@ -39,7 +39,7 @@ workflow in `AGENTS.md`, `CLAUDE.md`, or `.cursorrules`.
 ```
 
 The examples below use `logbook` as the binary name. Run them through the exact
-package above, or install `@promptwheel/logbook@0.9.5` locally or globally.
+package above, or install `@promptwheel/logbook@latest` locally or globally.
 
 ## What it stores
 
