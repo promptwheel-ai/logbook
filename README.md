@@ -396,4 +396,4 @@ Logbook tells you what history and reviewed decisions say. [promptwheel](https:/
 is the check that verifies whether today's claimed improvement came from the
 code rather than moving the goalposts.
 
-MIT.
+Apache 2.0.
