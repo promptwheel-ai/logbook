@@ -116,15 +116,22 @@ test("language-bound idioms only count in their own languages", () => {
   assert.ok(!kindAllowedInFile("[Ignore", "bin/logbook.mjs"));
   assert.ok(!kindAllowedInFile("#[ignore", "notes.md"));
   assert.ok(!kindAllowedInFile("t.Skip(", "scan.py"));
+  assert.ok(kindAllowedInFile("NOLINT", "src/parser.cpp"), "clang-tidy NOLINT counts in C++");
+  assert.ok(kindAllowedInFile("cppcheck-suppress", "lib/x.c"));
+  assert.ok(kindAllowedInFile("coverity[", "include/y.h"));
+  assert.ok(!kindAllowedInFile("NOLINT", "bin/logbook.mjs"), "C/C++ idiom in JS = prose");
+  assert.ok(!kindAllowedInFile("cppcheck-suppress", "notes.md"));
   assert.ok(kindAllowedInFile("eslint-disable", "weird.xyz"), "original set stays ungated");
 });
 
 test("suppression idioms across languages match directives, not lookalikes", () => {
   const yes = ['@Disabled("flaky")', '@Ignore("ci")', '[Ignore("db")]',
     '[Fact(Skip = "unstable")]', '#[ignore]', '$this->markTestSkipped("x");',
-    't.Skip("go")', '@pytest.mark.skip', '@unittest.skip'];
+    't.Skip("go")', '@pytest.mark.skip', '@unittest.skip',
+    'int x; // NOLINT(cppcoreguidelines)', '// cppcheck-suppress nullPointer', 'y = p; /* coverity[tainted_data] */'];
   const no = ['@pytest.mark.skipif(c, reason="r")', '@unittest.skipIf(c, "r")',
-    'input.Skip(3)', '[IgnoreAntiforgeryToken]', 'skipWaiting()', 'disabled=true'];
+    'input.Skip(3)', '[IgnoreAntiforgeryToken]', 'skipWaiting()', 'disabled=true',
+    'const noLintErrors = 0', 'discovery[idx]'];
   for (const s of yes) { SUPPRESS_PAT.lastIndex = 0; assert.ok(SUPPRESS_PAT.test(s), `matches: ${s}`); }
   for (const s of no) { SUPPRESS_PAT.lastIndex = 0; assert.ok(!SUPPRESS_PAT.test(s), `clean: ${s}`); }
 });

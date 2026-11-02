@@ -157,7 +157,7 @@ export const GEN_PAT =
 // (8: skip diff lines longer than MAX_SCAN_LINE - a suppression or assertion never
 //     lives on a multi-megabyte minified/generated/blob line, and scanning one is the
 //     mega-repo analyze ceiling: a single 24 MB line hung the SUPPRESS_PAT matchAll)
-export const EXTRACTOR_VERSION = 8;
+export const EXTRACTOR_VERSION = 9;
 // Default commit window (-n/--max). The ledger cache is only trusted at this
 // cap (or when it reaches a root commit), so the two sites must agree.
 export const DEFAULT_MAX = 20000;
@@ -194,7 +194,7 @@ export const MAX_SCAN_LINE = 4000;
 // anyway. This is what keeps a 24 MB minified/blob line from ever becoming a JS string.
 const DECODE_GATE = 1 << 16;
 export const SUPPRESS_PAT =
-  /@ts-nocheck|@ts-ignore|eslint-disable|# *noqa|# *type: *ignore|\bit\.skip\b|\btest\.skip\b|\bxit\(|\bxdescribe\(|describe\.skip\b|@pytest\.mark\.skip\b|@unittest\.skip\b|\bt\.Skip\(|@Disabled\b|@Ignore\b|\[Ignore\b|Skip\s*=\s*"|#\[ignore|markTestSkipped\(|markTestIncomplete\(|except[^:]*: *pass/g;
+  /@ts-nocheck|@ts-ignore|eslint-disable|# *noqa|# *type: *ignore|\bit\.skip\b|\btest\.skip\b|\bxit\(|\bxdescribe\(|describe\.skip\b|@pytest\.mark\.skip\b|@unittest\.skip\b|\bt\.Skip\(|@Disabled\b|@Ignore\b|\[Ignore\b|Skip\s*=\s*"|#\[ignore|markTestSkipped\(|markTestIncomplete\(|except[^:]*: *pass|NOLINT|cppcheck-suppress|coverity\[/g;
 export const ASSERT_PAT = /assert|expect\(|\.toBe|\.toEqual|t\.Error|t\.Fatal/;
 // Assertion strength (for downgrade detection): exact/behavioral vs existence/truthy.
 export const STRONG_ASSERT_PAT = /\.toStrictEqual\(|\.toEqual\(|\.toBe\(|\.toMatchObject\(|\.toThrow\([^)]|assertEqual\(|assertIs\(|assertRaises\([^)]/;
@@ -213,7 +213,7 @@ export const MENTOR_PAT = /claude\.md|\.claude|cursorrules|agents?\.md/i;
 // Directives that only function INSIDE a comment; every other idiom is call
 // or annotation syntax, so a match sitting after a comment opener is prose
 // ("// don't use describe.skip here"), not a live suppression.
-const COMMENT_DIRECTIVE = /@ts-nocheck|@ts-ignore|eslint-disable|noqa|type: *ignore/;
+const COMMENT_DIRECTIVE = /@ts-nocheck|@ts-ignore|eslint-disable|noqa|type: *ignore|NOLINT|cppcheck-suppress|coverity\[/;
 export function isMention(line, idx, kind) {
   let sq = 0, dq = 0, bt = 0;
   for (let i = 0; i < idx; i++) {
@@ -246,6 +246,10 @@ export function kindAllowedInFile(kind, file) {
   if (k === "#[ignore") return ext === "rs";
   if (k.startsWith("markTest")) return ["php", "phtml"].includes(ext);
   if (k === "t.Skip(") return ext === "go";
+  // C/C++ linter idioms (clang-tidy NOLINT, cppcheck, coverity) only count in C/C++ sources,
+  // so a `// NOLINT` quoted in prose or another language reads as a mention, not a suppression.
+  if (k === "NOLINT" || k === "cppcheck-suppress" || k.startsWith("coverity["))
+    return ["c", "cc", "cpp", "cxx", "c++", "h", "hh", "hpp", "hxx", "ipp", "inl", "cu", "cuh"].includes(ext);
   return true;
 }
 
