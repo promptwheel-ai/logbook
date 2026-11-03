@@ -335,9 +335,9 @@ was 82× larger. See [context economics](docs/context-economics.md) and the
 
 Three surfaces over the same deterministic history layer:
 
-- **CLI + JSON.** `logbook query --json` and `logbook check --diff --json` emit structured
-  output you can shell from any language. The JSON is cache-invariant (byte-identical with and
-  without `LOGBOOK_NO_CACHE=1`), so it is safe to parse in CI.
+- **CLI + JSON.** `logbook query --json` (filtered) and `logbook --json` (the full ledger)
+  emit JSONL you can shell from any language. The JSON is cache-invariant (byte-identical with
+  and without `LOGBOOK_NO_CACHE=1`), so it is safe to parse in CI.
 - **MCP.** [`@promptwheel/logbook-mcp`](mcp) (bin `logbook-mcp`) serves the history to an agent
   over the Model Context Protocol: a Claude Code or other MCP client reads hotspots,
   do-not-retry reverts, and suppression signals without shelling anything.

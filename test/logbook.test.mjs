@@ -783,6 +783,26 @@ test("CLI journey renders without writing; --json emits JSONL; bad path errors",
   assert.ok(failed, "non-repo exits nonzero");
 });
 
+test("query --json honors its filters instead of dumping the whole ledger", () => {
+  const all = execFileSync(process.execPath, [CLI, repo, "--json"], { encoding: "utf8" })
+    .trim().split("\n").map((line) => JSON.parse(line));
+  assert.equal(all.length, 10);
+  const run = (args) => execFileSync(process.execPath, [CLI, "query", repo, ...args],
+    { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  const filtered = run(["--json", "--file", "test/"]).trim().split("\n").map((line) => JSON.parse(line));
+  assert.ok(filtered.length > 0 && filtered.length < all.length, "the path filter narrows the output");
+  for (const event of filtered)
+    assert.ok(event.files.some((file) => file.includes("test/")), `${event.sha} touches test/`);
+  assert.equal(run(["--json", "--file", "test/"]), run(["--file", "test/"]),
+    "--json is the same JSONL query already emits");
+  const reverts = run(["--json", "--revert"]).trim().split("\n").map((line) => JSON.parse(line));
+  assert.equal(reverts.length, 1);
+  assert.ok(reverts.every((event) => event.revert));
+  const rejected = spawnSync(process.execPath, [CLI, "journey", repo, "--json"], { encoding: "utf8" });
+  assert.notEqual(rejected.status, 0, "commands without a JSON shape reject --json");
+  assert.match(rejected.stderr, /--json applies to/);
+});
+
 test("--since scopes the era", () => {
   const opts = { max: 5000, since: "2024-04-20", until: null };
   const events = collectEvents(repo, opts);

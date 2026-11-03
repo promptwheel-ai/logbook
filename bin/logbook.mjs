@@ -4982,6 +4982,10 @@ async function main() {
     console.error("  --format and --ref are valid only with logbook export (--ref also with audit, for the delta base)");
     process.exit(1);
   }
+  if (o.json && !["run", "query", "audit"].includes(o.cmd)) {
+    console.error("  --json applies to the default run (the full ledger), query (filtered), and audit");
+    process.exit(1);
+  }
 
   if (o.cmd === "doctor") {
     const report = doctorRepo(repo);
@@ -5119,7 +5123,10 @@ async function main() {
     console.error("  ⚠ diff scan failed - suppression/assertion columns are unmeasured, not clean");
   }
 
-  if (o.json && o.cmd !== "audit") {
+  // The unfiltered ledger dump belongs to the default run only. `query` keeps
+  // its filters under --json (it always emits JSONL), and `audit --json` has
+  // its own shapes below.
+  if (o.json && o.cmd === "run") {
     if (!scanOk) {
       console.error("logbook: diff scan failed - the record would be incomplete, refusing to emit it as data");
       process.exit(1);
