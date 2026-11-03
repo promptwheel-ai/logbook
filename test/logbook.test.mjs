@@ -1642,11 +1642,15 @@ test("init wires the repo once, idempotently, into existing agent files", () => 
   assert.match(agents, /accept-draft CARD_ID --by WHO/);
   assert.match(agents, /Never run accept, accept-draft, accept-lead, or reject-lead/);
   assert.match(agents, /check --diff.*NEXT.*--cursor TOKEN.*END complete/s);
-  assert.equal(PACKAGE_VERSION, "0.9.5");
-  assert.equal(NPX_COMMAND, "npx -y @promptwheel/logbook@0.9.5");
-  assert.match(agents, /npx -y @promptwheel\/logbook@0\.9\.5 context/,
+  // The pin is whatever package.json says, never a literal that goes stale at the next bump.
+  const pkgVersion = JSON.parse(readFileSync(join(dirname(CLI), "..", "package.json"), "utf8")).version;
+  assert.match(pkgVersion, /^\d+\.\d+\.\d+$/);
+  assert.equal(PACKAGE_VERSION, pkgVersion);
+  assert.equal(NPX_COMMAND, `npx -y @promptwheel/logbook@${pkgVersion}`);
+  const pinned = pkgVersion.replaceAll(".", "\\.");
+  assert.match(agents, new RegExp(`npx -y @promptwheel/logbook@${pinned} context`),
     "generated workflow pins the package that authored it instead of npm latest");
-  assert.match(agents, /npx -y @promptwheel\/logbook@0\.9\.5 pending/,
+  assert.match(agents, new RegExp(`npx -y @promptwheel/logbook@${pinned} pending`),
     "the optional review handoff works even when the package is only invoked through npx");
   assert.doesNotMatch(agents, /Then run logbook pending/);
   assert.doesNotMatch(agents, /@promptwheel\/logbook context/);
