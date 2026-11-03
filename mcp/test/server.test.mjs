@@ -142,8 +142,8 @@ test("release metadata requires the plane-native core", () => {
   const lock = JSON.parse(readFileSync(join(mcpRoot, "package-lock.json"), "utf8"));
   const listing = JSON.parse(readFileSync(join(mcpRoot, "server.json"), "utf8"));
   assert.equal(pkg.version, "0.6.0");
-  assert.equal(pkg.dependencies["@promptwheel/logbook"], "^0.9.1");
-  assert.equal(lock.packages[""].dependencies["@promptwheel/logbook"], "^0.9.1");
+  assert.equal(pkg.dependencies["@promptwheel/logbook"], "^0.9.7");   // logbook_query relies on query --json honoring filters (core 0.9.7+)
+  assert.equal(lock.packages[""].dependencies["@promptwheel/logbook"], "^0.9.7");
   assert.equal(lock.packages[".."].version, corePkg.version,
     "the development lock's linked core metadata follows the root package");
   assert.equal(listing.version, pkg.version);
