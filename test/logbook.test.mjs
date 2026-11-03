@@ -11,7 +11,7 @@ import { devNull, tmpdir } from "node:os";
 
 import {
   SUPPRESS_PAT, COMMENT_DIRECTIVE, IDIOMS, idiomFor, kindIsTestSkip,
-  classifyFile, parseArgs, collectEvents, diffScan, hotspots, analyze,
+  classifyFile, parseArgs, COMMANDS, commandFor, flagMisuse, collectEvents, diffScan, hotspots, analyze,
   renderLogbookMd, renderJourneyAnsi, journeyBeats, almanacStats,
   loadEvents, kindAllowedInFile, historyInventory,
   PACKAGE_VERSION, NPX_COMMAND, EXTRACTOR_VERSION, FORMAT_VERSION, CONTEXT_ORDER_VERSION,
@@ -183,6 +183,34 @@ test("parseArgs handles command, path, and flags", () => {
   assert.deepEqual(multi.files, ["src/a.js", "src/b.js"]);
   assert.equal(multi.file, "src/b.js", "the legacy scalar retains the previous last-flag behavior");
   assert.equal(parseArgs([]).cmd, "run");
+});
+
+test("the COMMANDS table drives parsing, the flag allowlist, and the generated help", () => {
+  const names = COMMANDS.map((command) => command.name);
+  assert.equal(new Set(names).size, names.length, "one entry per command");
+  const firstExperimental = COMMANDS.findIndex((command) => command.experimental);
+  assert.ok(firstExperimental > 0 && COMMANDS.slice(firstExperimental).every((command) => command.experimental),
+    "core commands come first, the experimental group second");
+  assert.equal(parseArgs(["accept", "cardid", "/r", "--by", "me"]).cmd, "accept-draft", "alias resolves to its command");
+  assert.deepEqual(parseArgs(["accept", "cardid", "/r", "--by", "me"])._given, ["--by"]);
+  assert.equal(flagMisuse(commandFor("query"), ["--file", "--json", "--quiet"]), "");
+  assert.match(flagMisuse(commandFor("journey"), ["--json"]), /logbook journey accepts only .*--json applies to/);
+  assert.match(flagMisuse(commandFor("doctor"), ["--ref"]), /valid only with logbook export/);
+  assert.match(flagMisuse(commandFor("export"), ["--revert"]), /logbook export accepts only .*--revert is valid only with logbook query, logbook context/);
+  const env = { ...process.env, NO_COLOR: "1" };
+  delete env.FORCE_COLOR;
+  const help = spawnSync(process.execPath, [CLI, "--help"], { encoding: "utf8", env }).stdout;
+  const experimentalAt = help.indexOf("experimental (reviewed decisions)");
+  assert.ok(experimentalAt > 0);
+  for (const command of COMMANDS) {
+    const label = command.default ? "logbook [path] " : `logbook ${command.aliases?.[0] ?? command.name} `;
+    const at = help.indexOf(label);
+    assert.ok(at >= 0, `help lists ${label.trim()}`);
+    assert.equal(at < experimentalAt, !command.experimental, `${label.trim()} sits in its group`);
+  }
+  const misuse = spawnSync(process.execPath, [CLI, "pending", ".", "-n", "5"], { encoding: "utf8", env });
+  assert.equal(misuse.status, 1);
+  assert.match(misuse.stderr, /logbook pending accepts only \[path\] and -q\/--quiet; -n\/--max is valid only with/);
 });
 
 // ---------- integration: the analysis pipeline on the fixture ----------

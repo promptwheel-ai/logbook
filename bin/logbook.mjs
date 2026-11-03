@@ -4450,65 +4450,185 @@ function refreshReleasedWiring(repo, quiet) {
 }
 
 // ---------- CLI ----------
+// Option table: how each flag consumes argv and lands on the parsed options.
+// `value` flags take one argument; `number` coerces it; `seen` runs as soon as
+// the flag appears (before its value is read); `set` replaces the plain `key`
+// assignment; `note` is the one-line explanation printed when the selected
+// command does not accept the flag. Short forms live in SHORT_FLAGS.
+const FLAGS = {
+  "--max": { key: "max", value: true, number: true, seen: (o) => { o.maxProvided = true; } },
+  "--since": { key: "since", value: true },
+  "--until": { key: "until", value: true },
+  "--json": { key: "json", note: "--json applies to the default run (the full ledger), query (filtered), and audit" },
+  "--out": { key: "out", value: true },
+  "--quiet": { key: "quiet" },
+  "--file": { value: true, set: (o, v) => { o.file = v; (o.files ||= []).push(v); } },
+  "--dir": { value: true, set: (o, d) => { if (d && !d.endsWith("/")) d += "/"; if (d) (o.files ||= []).push(d); } },
+  "--revert": { key: "revert" },
+  "--suppress": { key: "suppress" },
+  "--weaken": { key: "weaken", value: true, number: true },
+  "--downgrade": { key: "downgrade", value: true, number: true },
+  "--grep": { key: "grep", value: true },
+  "--limit": { key: "limit", value: true, number: true },
+  "--cursor": { key: "cursor", value: true, seen: (o) => { o.cursorProvided = true; } },
+  "--span": { key: "span", value: true },
+  "--side": { key: "side", value: true },
+  "--evidence-file": { key: "evidenceFile", value: true },
+  "--by": { key: "by", value: true },
+  "--ref": { key: "ref", value: true, note: "--ref is valid only with logbook export (and audit --json, for the delta base)" },
+  "--diff": { key: "diff" },
+  "--base": { key: "base", value: true },
+  "--head": { key: "head", value: true },
+  "--claim": { key: "claim", value: true },
+  "--candidates": { key: "candidates", value: true },
+  "--format": { key: "format", value: true, note: "--format is valid only with logbook export" },
+  "--help": { cmd: "help" },
+  "--version": { cmd: "version" },
+};
+const SHORT_FLAGS = { "-n": "--max", "-q": "--quiet", "-h": "--help", "-v": "--version" };
+// Accepted by every command.
+const GLOBAL_FLAGS = ["--quiet", "--help", "--version"];
+const WINDOW_FLAGS = ["--max", "--since", "--until"];
+const FILTER_FLAGS = ["--file", "--revert", "--suppress", "--weaken", "--downgrade", "--grep"];
+const EVIDENCE_FLAGS = ["--span", "--side", "--evidence-file", "--by"];
+const POSITIONAL_LABELS = { repo: "[path]", sha: "SHA", why: "\"WHY\"", cardId: "CARDID" };
+
+// Every command the CLI knows, core first and the opt-in reviewed-decision
+// layer second. The table drives parseArgs (positionals and the per-command
+// flag allowlist), usage() (generated from `usage` rows), and dispatch (`run`).
+// A flag outside a command's list is a usage error, so a command never
+// silently ignores an option that would have changed the result elsewhere.
+export const COMMANDS = [
+  {
+    name: "init", flags: [...WINDOW_FLAGS, "--out"], run: runDigest,
+    usage: [{ syntax: "logbook init [path]",
+      help: ["analyze + wire AGENTS.md/CLAUDE.md/.cursorrules", "so your agent is instructed to read history first"] }],
+  },
+  {
+    name: "run", default: true, flags: [...WINDOW_FLAGS, "--json", "--out"], run: runDigest,
+    usage: [
+      { syntax: "logbook [path]", help: "analyze repo → LOGBOOK.md, events.jsonl" },
+      { syntax: "logbook [path] --json", help: "structured events to stdout (writes nothing)" },
+    ],
+  },
+  {
+    name: "journey", flags: WINDOW_FLAGS, run: runDigest,
+    usage: [{ syntax: "logbook journey [path]", help: "the repo's story, in color (writes nothing)" }],
+  },
+  {
+    name: "audit", flags: [...WINDOW_FLAGS, "--json", "--file", "--ref"], run: runAudit,
+    usage: [{ syntax: "logbook audit [path] [--json [--file P ...] [--ref REF]]",
+      help: ["what is STILL suppressed in HEAD, and since when", "(--json: rows with kind, testSkip, content, since)"] }],
+  },
+  {
+    name: "doctor", flags: [], run: runDoctor,
+    usage: [{ syntax: "logbook doctor [path]", help: "read-only artifact/wiring/skill/query health check" }],
+  },
+  {
+    name: "query", flags: [...WINDOW_FLAGS, ...FILTER_FLAGS, "--limit", "--json"], run: runQuery,
+    usage: [{ syntax: ["logbook query [path] [--file S ...] [--revert] [--suppress] [--weaken N]",
+      "              [--downgrade N] [--grep S] [--since D] [--until D] [--limit N]"],
+      help: "filter the full event record (JSONL out)" }],
+  },
+  {
+    name: "context", flags: [...WINDOW_FLAGS, ...FILTER_FLAGS, "--limit", "--cursor"], run: runContext,
+    usage: [{ syntax: "logbook context [path] [query filters] [--file S ...] [--cursor TOKEN]",
+      help: "bounded context in query order (20 rows / 8KB)" }],
+  },
+  {
+    name: "annotate", positionals: ["sha", "why", "repo"], flags: [...WINDOW_FLAGS, ...EVIDENCE_FLAGS], run: runAnnotate,
+    usage: [{ syntax: ["logbook annotate SHA \"WHY\" [--span \"exact quote\" --side message|diff]",
+      "              [--evidence-file P] [--by WHO] [path]"],
+      help: ["persist an immediately visible UNREVIEWED digest note;", "grounded spans are optional and raw-verified"] }],
+  },
+  {
+    name: "refine", flags: [...WINDOW_FLAGS, "--limit"], run: runRefine,
+    usage: [{ syntax: "logbook refine [path] [--limit N]",
+      help: ["on-demand worklist: un-annotated notable decisions", "(reverts/suppressions) to investigate + annotate"] }],
+  },
+  {
+    name: "annotate-draft", experimental: true, positionals: ["sha", "why", "repo"], flags: EVIDENCE_FLAGS, run: runAnnotateDraft,
+    usage: [{ syntax: ["logbook annotate-draft SHA \"WHY\" [--span \"exact quote\" --side message|diff]",
+      "              [--evidence-file P] [--by WHO] [path]"],
+      help: ["create a local, inert card for the optional", "human-reviewed decision workflow"] }],
+  },
+  {
+    name: "pending", experimental: true, flags: [], run: runPending,
+    usage: [{ syntax: "logbook pending [path]",
+      help: ["local draft decisions awaiting human acceptance", "(inert until accept-draft + a trusted commit)"] }],
+  },
+  {
+    name: "accept-draft", aliases: ["accept"], experimental: true, positionals: ["cardId", "repo"], flags: ["--by", "--file", "--dir"], run: runAcceptDraft,
+    usage: [{ syntax: "logbook accept CARDID --by WHO [--file P ...] [--dir P/] [path]",
+      help: ["human-promote one exact local draft (compatibility", "alias: accept-draft); CARDID must be the full id"] }],
+  },
+  {
+    name: "check", experimental: true, flags: ["--diff", "--base", "--head", "--cursor"], run: runCheck,
+    usage: [{ syntax: "logbook check --diff [--base SHA --head SHA] [--cursor TOKEN] [path]",
+      help: ["bounded git-files decision preflight (20 rows / 8KB):", "human-reviewed decisions + policy-published leads",
+        "whose scope touches the diff; repeat NEXT cursors"] }],
+  },
+  {
+    name: "publish", experimental: true, flags: ["--candidates"], run: runPublish,
+    usage: [{ syntax: "logbook publish [--candidates FILE] [path]",
+      help: ["publish caller-proposed machine LEADS (JSON on stdin or", "--candidates FILE) under the committed .logbook/policy.toml",
+        "(grounding + ancestry + quota + kill switch enforced)"] }],
+  },
+  {
+    name: "accept-lead", experimental: true, positionals: ["cardId", "repo"], flags: ["--by", "--claim"], run: runLeadDisposition,
+    usage: [{ syntax: "logbook accept-lead CARDID --by WHO [--claim \"corrected text\"] [path]",
+      help: ["promote a policy-published machine LEAD to a", "human-reviewed decision (unchanged = accepted-as-is,",
+        "--claim = edited); commit .logbook/ to record it"] }],
+  },
+  {
+    name: "reject-lead", experimental: true, positionals: ["cardId", "repo"], flags: ["--by"], run: runLeadDisposition,
+    usage: [{ syntax: "logbook reject-lead CARDID --by WHO [path]",
+      help: ["explicitly reject and remove a machine lead;", "commit the review record"] }],
+  },
+  {
+    name: "outcomes", experimental: true, flags: [], run: runOutcomes,
+    usage: [{ syntax: "logbook outcomes [path]",
+      help: ["REVIEW OUTCOMES of machine leads across plane history", "(accepted as-is / edited / rejected / pending /",
+        "vanished unreviewed) - NOT semantic claim precision;", "exits nonzero when history is untrustworthy"] }],
+  },
+  {
+    name: "export", experimental: true, flags: ["--format", "--out", "--ref"], run: runExport,
+    usage: [{ syntax: "logbook export [path] --format okf --out DIR [--ref REF]",
+      help: ["generate a deterministic OKF v0.1 projection of", "byte-bound human-reviewed decisions at REF (default",
+        "HEAD); DIR must not already exist; never imported"] }],
+  },
+];
+const COMMAND_WORDS = new Map();
+for (const command of COMMANDS) {
+  if (!command.default) COMMAND_WORDS.set(command.name, command.name);
+  for (const alias of command.aliases || []) COMMAND_WORDS.set(alias, command.name);
+}
+export function commandFor(name) { return COMMANDS.find((command) => command.name === name); }
+
+function usageRows(commands) {
+  const L = [];
+  for (const command of commands) {
+    for (const row of command.usage) {
+      const syntax = [].concat(row.syntax), help = [].concat(row.help);
+      const last = syntax.length - 1;
+      const inline = syntax[last].length < 30;
+      syntax.forEach((line, i) => L.push(i === last && inline ? `    ${line.padEnd(30)}${help[0]}` : `    ${line}`));
+      for (const line of help.slice(inline ? 1 : 0)) L.push(`${" ".repeat(34)}${line}`);
+    }
+  }
+  return L.join("\n");
+}
+
 function usage() {
   console.log(`
   ${C.bold}logbook${C.r} - turn git history into memory an agent can use
 
   usage:
-    logbook init [path]           analyze + wire AGENTS.md/CLAUDE.md/.cursorrules
-                                  so your agent is instructed to read history first
-    logbook [path]                analyze repo → LOGBOOK.md, events.jsonl
-    logbook journey [path]        the repo's story, in color (writes nothing)
-    logbook audit [path]          what is STILL suppressed in HEAD, and since when
-    logbook doctor [path]         read-only artifact/wiring/skill/query health check
-    logbook query [path] [--file S ...] [--revert] [--suppress] [--weaken N]
-                  [--downgrade N] [--grep S] [--since D] [--until D] [--limit N]
-                                  filter the full event record (JSONL out)
-    logbook context [path] [query filters] [--file S ...] [--cursor TOKEN]
-                                  bounded context in query order (20 rows / 8KB)
-    logbook annotate SHA "WHY" [--span "exact quote" --side message|diff]
-                  [--evidence-file P] [--by WHO] [path]
-                                  persist an immediately visible UNREVIEWED digest note;
-                                  grounded spans are optional and raw-verified
-    logbook refine [path] [--limit N]
-                                  on-demand worklist: un-annotated notable decisions
-                                  (reverts/suppressions) to investigate + annotate
-    logbook [path] --json         structured events to stdout (writes nothing)
+${usageRows(COMMANDS.filter((command) => !command.experimental))}
 
   experimental (reviewed decisions): opt-in, see docs/reviewed-decisions.md
   and docs/okf-export.md
-    logbook annotate-draft SHA "WHY" [--span "exact quote" --side message|diff]
-                  [--evidence-file P] [--by WHO] [path]
-                                  create a local, inert card for the optional
-                                  human-reviewed decision workflow
-    logbook pending [path]        local draft decisions awaiting human acceptance
-                                  (inert until accept-draft + a trusted commit)
-    logbook accept CARDID --by WHO [--file P ...] [--dir P/] [path]
-                                  human-promote one exact local draft (compatibility
-                                  alias: accept-draft); CARDID must be the full id
-    logbook check --diff [--base SHA --head SHA] [--cursor TOKEN] [path]
-                                  bounded git-files decision preflight (20 rows / 8KB):
-                                  human-reviewed decisions + policy-published leads
-                                  whose scope touches the diff; repeat NEXT cursors
-    logbook publish [--candidates FILE] [path]
-                                  publish caller-proposed machine LEADS (JSON on stdin or
-                                  --candidates FILE) under the committed .logbook/policy.toml
-                                  (grounding + ancestry + quota + kill switch enforced)
-    logbook accept-lead CARDID --by WHO [--claim "corrected text"] [path]
-                                  promote a policy-published machine LEAD to a
-                                  human-reviewed decision (unchanged = accepted-as-is,
-                                  --claim = edited); commit .logbook/ to record it
-    logbook reject-lead CARDID --by WHO [path]
-                                  explicitly reject and remove a machine lead;
-                                  commit the review record
-    logbook outcomes [path]       REVIEW OUTCOMES of machine leads across plane history
-                                  (accepted as-is / edited / rejected / pending /
-                                  vanished unreviewed) - NOT semantic claim precision;
-                                  exits nonzero when history is untrustworthy
-    logbook export [path] --format okf --out DIR [--ref REF]
-                                  generate a deterministic OKF v0.1 projection of
-                                  byte-bound human-reviewed decisions at REF (default
-                                  HEAD); DIR must not already exist; never imported
+${usageRows(COMMANDS.filter((command) => command.experimental))}
 
   options:
     -n, --max N        commits to analyze (default ${DEFAULT_MAX})
@@ -4522,273 +4642,73 @@ function usage() {
 }
 
 export function parseArgs(argv) {
-  const o = { cmd: "run", repo: ".", max: DEFAULT_MAX, since: null, until: null, json: false, quiet: false, out: null };
+  const o = { cmd: "run", repo: ".", max: DEFAULT_MAX, since: null, until: null, json: false, quiet: false, out: null, _given: [] };
   const rest = [];
   for (let i = 0; i < argv.length; i++) {
-    const take = (flag) => {
-      if (i + 1 >= argv.length) { o._missing = flag; return undefined; }
-      return argv[++i];
-    };
     const a = argv[i];
-    if (a === "journey") o.cmd = "journey";
-    else if (a === "init") o.cmd = "init";
-    else if (a === "audit") o.cmd = "audit";
-    else if (a === "doctor") o.cmd = "doctor";
-    else if (a === "query") o.cmd = "query";
-    else if (a === "context") o.cmd = "context";
-    else if (a === "annotate") o.cmd = "annotate";
-    else if (a === "accept") o.cmd = "accept-draft";
-    else if (a === "check") o.cmd = "check";
-    else if (a === "pending") o.cmd = "pending";
-    else if (a === "refine") o.cmd = "refine";
-    else if (a === "outcomes") o.cmd = "outcomes";
-    else if (a === "export") o.cmd = "export";
-    else if (a === "publish") o.cmd = "publish";
-    else if (a === "annotate-draft") o.cmd = "annotate-draft";
-    else if (a === "accept-draft") o.cmd = "accept-draft";
-    else if (a === "accept-lead") o.cmd = "accept-lead";
-    else if (a === "reject-lead") o.cmd = "reject-lead";
-    else if (a === "--claim") o.claim = take("--claim");
-    else if (a === "--candidates") o.candidates = take("--candidates");
-    else if (a === "--format") o.format = take("--format");
-    else if (a === "--ref") o.ref = take("--ref");
-    else if (a === "--diff") o.diff = true;
-    else if (a === "--span") o.span = take("--span");
-    else if (a === "--side") o.side = take("--side");
-    else if (a === "--evidence-file") o.evidenceFile = take("--evidence-file");
-    else if (a === "--base") o.base = take("--base");
-    else if (a === "--head") o.head = take("--head");
-    else if (a === "--dir") {
-      let d = take("--dir");
-      if (d && !d.endsWith("/")) d += "/";
-      if (d) (o.files ||= []).push(d);
+    if (COMMAND_WORDS.has(a)) { o.cmd = COMMAND_WORDS.get(a); continue; }
+    const name = SHORT_FLAGS[a] || a;
+    const spec = Object.hasOwn(FLAGS, name) ? FLAGS[name] : null;
+    if (!spec) {
+      if (a.startsWith("-")) o._unknown ||= a;
+      else rest.push(a);
+      continue;
     }
-    else if (a === "--by") o.by = take("--by");
-    else if (a === "--file") {
-      o.file = take("--file");
-      if (o.file !== undefined) (o.files ||= []).push(o.file);
-    }
-    else if (a === "--revert") o.revert = true;
-    else if (a === "--suppress") o.suppress = true;
-    else if (a === "--weaken") { const v = take("--weaken"); if (v !== undefined) o.weaken = Number(v); }
-    else if (a === "--downgrade") { const v = take("--downgrade"); if (v !== undefined) o.downgrade = Number(v); }
-    else if (a === "--grep") o.grep = take("--grep");
-    else if (a === "--limit") { const v = take("--limit"); if (v !== undefined) o.limit = Number(v); }
-    else if (a === "--cursor") { o.cursorProvided = true; o.cursor = take("--cursor"); }
-    else if (a === "-n" || a === "--max") {
-      o.maxProvided = true;
-      const v = take(a); if (v !== undefined) o.max = Number(v);
-    }
-    else if (a === "--since") o.since = take("--since");
-    else if (a === "--until") o.until = take("--until");
-    else if (a === "--json") o.json = true;
-    else if (a === "-q" || a === "--quiet") o.quiet = true;
-    else if (a === "--out") o.out = take("--out");
-    else if (a === "-h" || a === "--help") o.cmd = "help";
-    else if (a === "-v" || a === "--version") o.cmd = "version";
-    else if (a.startsWith("-")) o._unknown ||= a;
-    else if (!a.startsWith("-")) rest.push(a);
+    o._given.push(name);
+    if (spec.cmd) { o.cmd = spec.cmd; continue; }
+    if (spec.seen) spec.seen(o);
+    if (!spec.value) { o[spec.key] = true; continue; }
+    if (i + 1 >= argv.length) { o._missing = a; continue; }
+    const v = argv[++i];
+    if (spec.set) spec.set(o, v);
+    else o[spec.key] = spec.number ? Number(v) : v;
   }
-  if (o.cmd === "accept-lead" || o.cmd === "reject-lead" || o.cmd === "accept-draft") {
-    // <cardId> [repo]: cardId positional; --claim edits the claim on accept-lead
-    o.cardId = rest[0];
-    if (rest[1]) o.repo = rest[1];
-  } else if (o.cmd === "annotate" || o.cmd === "annotate-draft") {
-    // <sha> "<why>" [repo]: sha + why positional
-    o.sha = rest[0]; o.why = rest[1];
-    if (rest[2]) o.repo = rest[2];
-  } else if (rest.length) {
-    o.repo = rest[0];
-    if (o.cmd === "export" && rest.length > 1) o._extraPositionals = rest.slice(1);
-  }
+  // help/version have no table entry and take the default positional shape
+  const positionals = commandFor(o.cmd)?.positionals || ["repo"];
+  positionals.forEach((field, index) => {
+    if (field === "repo") { if (rest[index]) o.repo = rest[index]; }
+    else o[field] = rest[index];
+  });
+  // recorded for every command; export rejects them, the rest ignore them as before
+  if (rest.length > positionals.length) o._extraPositionals = rest.slice(positionals.length);
   return o;
 }
 
-async function main() {
-  const o = parseArgs(process.argv.slice(2));
-  if (o.cmd === "help") return usage();
-  if (o.cmd === "version") return console.log(PACKAGE_VERSION);
-  if (o._missing) {
-    console.error(`  ${o._missing} requires a value`);
-    process.exit(1);
-  }
-  if (o._unknown) {
-    console.error(`  unknown option: ${o._unknown}`);
-    process.exit(1);
-  }
-  if (!Number.isInteger(o.max) || o.max < 1) {
-    console.error("logbook: --max must be a positive integer");
-    process.exit(1);
-  }
-  for (const [flag, value] of [["--limit", o.limit], ["--weaken", o.weaken], ["--downgrade", o.downgrade]]) {
-    if (value !== undefined && (!Number.isInteger(value) || value < 0 || (flag === "--limit" && value < 1))) {
-      console.error(`logbook: ${flag} must be ${flag === "--limit" ? "a positive" : "a non-negative"} integer`);
-      process.exit(1);
-    }
-  }
-  if (o.files?.some((file) => typeof file !== "string" || !file.length)) {
-    console.error("logbook: --file requires a non-empty path substring");
-    process.exit(1);
-  }
-  if (o.files?.length > 32 || o.files?.some((file) => Buffer.byteLength(file) > 1024)) {
-    console.error("logbook: at most 32 --file filters of at most 1024 bytes each are allowed");
-    process.exit(1);
-  }
+function flagLabel(name) {
+  const short = Object.keys(SHORT_FLAGS).find((key) => SHORT_FLAGS[key] === name);
+  return short ? `${short}/${name}` : name;
+}
+function commandLabel(command) { return command.default ? "logbook [path]" : `logbook ${command.name}`; }
+// "anything outside my allowlist": the one check that replaced the hand-enumerated guards.
+export function flagMisuse(command, given) {
+  const allowed = new Set([...GLOBAL_FLAGS, ...command.flags]);
+  const bad = given.find((name) => !allowed.has(name));
+  if (!bad) return "";
+  const accepted = [
+    ...(command.positionals || ["repo"]).map((field) => POSITIONAL_LABELS[field]),
+    ...command.flags.map(flagLabel), "-q/--quiet",
+  ];
+  const owners = COMMANDS.filter((other) => other.flags.includes(bad)).map(commandLabel);
+  const note = FLAGS[bad].note || `${flagLabel(bad)} is valid only with ${owners.join(", ")}`;
+  return `  ${commandLabel(command)} accepts only ${accepted.slice(0, -1).join(", ")} and ${accepted.at(-1)}; ${note}`;
+}
 
-  // resolve to the repo ROOT so running from a nested package dir works
-  // (and artifacts land at the root, where agents look for them)
-  let repo = resolve(o.repo);
-  {
-    const r = spawnSync("git", ["-C", repo, "rev-parse", "--show-toplevel"], { encoding: "utf8" });
-    if (r.status === 0 && r.stdout.trim()) repo = r.stdout.trim();
-    else if (!existsSync(join(repo, "HEAD"))) { // bare repos pass through
-      console.error(`  not a git repository: ${repo}`);
-      process.exit(1);
-    }
-  }
-  const name = basename(repo);
-  const shallow = existsSync(join(repo, ".git", "shallow"));
-
-  if (o.cmd === "export") {
-    if (o.format !== "okf" || !o.out || !String(o.out).trim() || !String(o.ref || "HEAD").trim() ||
-        o._extraPositionals?.length) {
-      console.error("  usage: logbook export [path] --format okf --out NEW_DIR [--ref REF]");
-      process.exit(1);
-    }
-    const incompatible = o.json || o.diff || o.cursorProvided ||
-      o.candidates || o.claim || o.by || o.span || o.side || o.evidenceFile ||
-      o.files?.length || o.since || o.until || o.limit !== undefined ||
-      o.weaken !== undefined || o.downgrade !== undefined || o.revert || o.suppress || o.grep ||
-      o.maxProvided;
-    if (incompatible) {
-      console.error("  export accepts only [path], --format okf, --out DIR, --ref REF, and --quiet");
-      process.exit(1);
-    }
-    const written = exportOkfProjection(repo, o.out, { ref: o.ref || "HEAD" });
-    if (written.error) {
-      console.error(`  export: ${sanitizeContextText(written.error, 700, { markdown: false })}`);
-      process.exit(1);
-    }
-    if (!o.quiet)
-      console.log(`  export: ${written.recordCount} reviewed decision${written.recordCount === 1 ? "" : "s"} → ${sanitizeContextText(written.out, 700, { markdown: false })} (OKF ${OKF_VERSION}; trust ${written.trustCommit.slice(0, 12)}; projection ${written.projectionDigest})`);
-    return;
-  }
-  if (o.format !== undefined || (o.ref !== undefined && o.cmd !== "audit")) {
-    console.error("  --format and --ref are valid only with logbook export (--ref also with audit, for the delta base)");
+// resolve to the repo ROOT so running from a nested package dir works
+// (and artifacts land at the root, where agents look for them)
+function resolveRepoRoot(path) {
+  let repo = resolve(path);
+  const r = spawnSync("git", ["-C", repo, "rev-parse", "--show-toplevel"], { encoding: "utf8" });
+  if (r.status === 0 && r.stdout.trim()) repo = r.stdout.trim();
+  else if (!existsSync(join(repo, "HEAD"))) { // bare repos pass through
+    console.error(`  not a git repository: ${repo}`);
     process.exit(1);
   }
-  if (o.json && !["run", "query", "audit"].includes(o.cmd)) {
-    console.error("  --json applies to the default run (the full ledger), query (filtered), and audit");
-    process.exit(1);
-  }
+  return repo;
+}
 
-  if (o.cmd === "doctor") {
-    const report = doctorRepo(repo);
-    console.log(renderDoctor(name, report));
-    if (report.status === "fail") process.exitCode = 1;
-    return;
-  }
-
-  if (o.cmd === "outcomes") {
-    const r = computeReviewOutcomes(repo);
-    console.log(renderReviewOutcomes(r));
-    process.exitCode = r.exitCode || (r.error ? 1 : 0);
-    return;
-  }
-  if (o.cmd === "publish") {
-    // candidates are caller-proposed (agent's job); publishPolicyLeads does ALL the
-    // authorization (committed policy, grounding, ancestry, quota, kill switch).
-    const inp = readBoundedInput(o.candidates ? resolve(o.candidates) : 0, PUBLISH_INPUT_MAX);
-    if (inp.error) { console.error(`  publish: cannot read candidates (${o.candidates ? "--candidates file" : "stdin"}): ${inp.error}`); process.exit(1); }
-    let cands; try { cands = JSON.parse(inp.text); } catch { console.error("  publish: candidates must be a JSON array of {sha, claim, span, side, evidenceFile, scopes}"); process.exit(1); }
-    const r = publishPolicyLeads(repo, cands, { trustRef: "HEAD" });
-    console.log(renderPublish(r));
-    process.exitCode = r.exitCode || (r.error ? 1 : 0);
-    return;
-  }
-  if (o.cmd === "annotate") {
-    if (o.out) { console.error("  annotate does not support --out; notes live at the repository root"); process.exit(1); }
-    if (!o.sha || !o.why) { console.error(`  usage: logbook annotate <sha> "<verified why>" [--span "quote" --side message|diff --evidence-file P] [--by WHO] [path]`); process.exit(1); }
-    const note = saveAnnotation(repo, repo, { sha: o.sha, why: o.why, span: o.span,
-      side: o.side, evidenceFile: o.evidenceFile, by: o.by });
-    if (note.error) { console.error(`  annotate: ${sanitizeContextText(note.error, 700, { markdown: false })}`); process.exit(1); }
-    const refreshed = refreshDigestNotes(repo, { max: o.max });
-    if (refreshed.error) {
-      console.error(`  annotate: saved unreviewed note ${note.sha.slice(0, 8)}, but ${sanitizeContextText(refreshed.error, 700, { markdown: false })}`);
-      process.exitCode = 1;
-      return;
-    }
-    if (note.cleanupWarning) {
-      console.error(`  annotate: ${sanitizeContextText(note.cleanupWarning, 700, { markdown: false })}`);
-      process.exitCode = 1;
-    }
-    if (!o.quiet) console.log(`  annotate: ${note.idempotent ? "kept" : "saved"} unreviewed note ${note.sha.slice(0, 8)} in annotations.jsonl + LOGBOOK.md (by ${sanitizeContextText(note.by, 128, { markdown: false })}; never accepted or consumed by check --diff)`);
-    return;
-  }
-  if (o.cmd === "annotate-draft") {
-    if (o.out) { console.error("  annotate-draft does not support --out; drafts live under the repo's .logbook/drafts/"); process.exit(1); }
-    if (!o.sha || !o.why) { console.error(`  usage: logbook annotate-draft <sha> "<why>" [--span "quote" --side message|diff --evidence-file P] [--by WHO] [path]`); process.exit(1); }
-    const r = annotateDraft(repo, { sha: o.sha, why: o.why, span: o.span, side: o.side, evidenceFile: o.evidenceFile, by: o.by });
-    if (r.error) { console.error(`  annotate-draft: ${r.error}`); process.exit(1); }
-    console.log(`  annotate-draft: drafted ${r.cardId} for ${r.sha.slice(0, 8)} (local + inert; run: logbook accept-draft ${r.cardId} --by WHO to promote)`);
-    return;
-  }
-  if (o.cmd === "accept-draft") {
-    if (o.out) { console.error("  accept-draft does not support --out; decisions/reviews must live under the repo's .logbook/"); process.exit(1); }
-    if (!o.cardId || !o.by) { console.error(`  usage: logbook accept-draft <cardId> --by WHO [--file P ...] [repo]`); process.exit(1); }
-    const r = acceptDraft(repo, o.cardId, { scopes: o.files, by: o.by });
-    if (r.error) { console.error(`  accept-draft: ${r.error}`); process.exit(1); }
-    console.log(`  accept-draft: ${o.cardId} → decision (reviewed by ${r.reviewedBy}); commit .logbook/ to record it`);
-    return;
-  }
-  if (o.cmd === "accept-lead" || o.cmd === "reject-lead") {
-    if (!o.cardId || !o.by) { console.error(`  usage: logbook ${o.cmd} <cardId> --by WHO [--claim "..."] [repo]`); process.exit(1); }
-    const r = o.cmd === "accept-lead"
-      ? acceptLead(repo, o.cardId, { editClaim: o.claim, by: o.by })
-      : rejectLead(repo, o.cardId, { by: o.by });
-    if (r.error) { console.error(`  ${o.cmd}: ${r.error}`); process.exit(1); }
-    console.log(`  ${o.cmd}: ${o.cardId.slice(0, 12)}… → ${r.disposition} (reviewed by ${r.reviewedBy}); commit .logbook/ to record it`);
-    return;
-  }
-  if (o.cmd === "check") {
-    if (!o.diff) {
-      console.error(`  usage: logbook check --diff [--base <sha> --head <sha>] [--cursor TOKEN] [repo]`);
-      process.exit(1);
-    }
-    if ((o.base && !o.head) || (!o.base && o.head)) {
-      console.error(`  check --diff range mode requires both --base and --head`);
-      process.exit(1);
-    }
-    if (o.cursorProvided && !o.cursor) {
-      console.error(`  check --diff --cursor requires the opaque token printed after NEXT`);
-      process.exit(1);
-    }
-    const r = checkDecisions(repo, { base: o.base, head: o.head, cursor: o.cursor });
-    process.stdout.write(renderDecisionLeads(r));
-    process.exitCode = r.exitCode;
-    return;
-  }
-
-  if (o.cmd === "pending") {
-    if (o.out) { console.error("  pending does not support --out"); process.exit(1); }
-    const state = readLocalDrafts(repo);
-    if (state.unreadable || state.malformed.length) {
-      console.error(`  pending: local draft plane is unreadable or malformed (${state.malformed.length} malformed)`);
-      process.exit(1);
-    }
-    const drafts = state.cards.map(({ card }) => card);
-    if (!drafts.length) { if (!o.quiet) console.log("  no draft decisions awaiting acceptance"); return; }
-    if (!o.quiet) {
-      console.log(`  ${C.bold}${drafts.length}${C.r} draft decision${drafts.length === 1 ? "" : "s"} awaiting human acceptance ${C.dim}(local + inert - never surface in check --diff until accepted)${C.r}\n`);
-      for (const card of drafts.slice(0, 50)) {
-        console.log(`  ${card.cardId}  ${card.sha.slice(0, 8)}  ${sanitizeContextText(card.claim, 160, { markdown: false })}`);
-        console.log(`    ${C.dim}proposed by ${sanitizeContextText(card.by, 64, { markdown: false })} on ${card.at}; accept: logbook accept-draft ${card.cardId} --by <who>${C.r}`);
-      }
-      if (drafts.length > 50) console.log(`  ${C.dim}… and ${drafts.length - 50} more${C.r}`);
-    }
-    return;
-  }
-
+// The event ledger every history command reads: cached when fresh, rebuilt
+// otherwise. A failed diff scan is reported, never treated as clean.
+function readLedger(o, repo) {
   if (!o.quiet && !o.json) console.error(`\n  ${C.dim}reading git history…${C.r}`);
   const reused = loadEvents(repo, o);
   let events, capped;
@@ -4811,137 +4731,252 @@ async function main() {
   if (!scanOk) {
     console.error("  ⚠ diff scan failed - suppression/assertion columns are unmeasured, not clean");
   }
+  return { events, capped, scanOk, reused };
+}
+function refuseUnmeasured(scanOk, what) {
+  if (scanOk) return;
+  console.error(`logbook: diff scan failed - ${what}`);
+  process.exit(1);
+}
 
+function runDoctor(o, { repo, name }) {
+  const report = doctorRepo(repo);
+  console.log(renderDoctor(name, report));
+  if (report.status === "fail") process.exitCode = 1;
+}
+
+function runOutcomes(o, { repo }) {
+  const r = computeReviewOutcomes(repo);
+  console.log(renderReviewOutcomes(r));
+  process.exitCode = r.exitCode || (r.error ? 1 : 0);
+}
+
+function runPublish(o, { repo }) {
+  // candidates are caller-proposed (agent's job); publishPolicyLeads does ALL the
+  // authorization (committed policy, grounding, ancestry, quota, kill switch).
+  const inp = readBoundedInput(o.candidates ? resolve(o.candidates) : 0, PUBLISH_INPUT_MAX);
+  if (inp.error) { console.error(`  publish: cannot read candidates (${o.candidates ? "--candidates file" : "stdin"}): ${inp.error}`); process.exit(1); }
+  let cands; try { cands = JSON.parse(inp.text); } catch { console.error("  publish: candidates must be a JSON array of {sha, claim, span, side, evidenceFile, scopes}"); process.exit(1); }
+  const r = publishPolicyLeads(repo, cands, { trustRef: "HEAD" });
+  console.log(renderPublish(r));
+  process.exitCode = r.exitCode || (r.error ? 1 : 0);
+}
+
+function runAnnotate(o, { repo }) {
+  if (!o.sha || !o.why) { console.error(`  usage: logbook annotate <sha> "<verified why>" [--span "quote" --side message|diff --evidence-file P] [--by WHO] [path]`); process.exit(1); }
+  const note = saveAnnotation(repo, repo, { sha: o.sha, why: o.why, span: o.span,
+    side: o.side, evidenceFile: o.evidenceFile, by: o.by });
+  if (note.error) { console.error(`  annotate: ${sanitizeContextText(note.error, 700, { markdown: false })}`); process.exit(1); }
+  const refreshed = refreshDigestNotes(repo, { max: o.max });
+  if (refreshed.error) {
+    console.error(`  annotate: saved unreviewed note ${note.sha.slice(0, 8)}, but ${sanitizeContextText(refreshed.error, 700, { markdown: false })}`);
+    process.exitCode = 1;
+    return;
+  }
+  if (note.cleanupWarning) {
+    console.error(`  annotate: ${sanitizeContextText(note.cleanupWarning, 700, { markdown: false })}`);
+    process.exitCode = 1;
+  }
+  if (!o.quiet) console.log(`  annotate: ${note.idempotent ? "kept" : "saved"} unreviewed note ${note.sha.slice(0, 8)} in annotations.jsonl + LOGBOOK.md (by ${sanitizeContextText(note.by, 128, { markdown: false })}; never accepted or consumed by check --diff)`);
+}
+
+function runAnnotateDraft(o, { repo }) {
+  if (!o.sha || !o.why) { console.error(`  usage: logbook annotate-draft <sha> "<why>" [--span "quote" --side message|diff --evidence-file P] [--by WHO] [path]`); process.exit(1); }
+  const r = annotateDraft(repo, { sha: o.sha, why: o.why, span: o.span, side: o.side, evidenceFile: o.evidenceFile, by: o.by });
+  if (r.error) { console.error(`  annotate-draft: ${r.error}`); process.exit(1); }
+  console.log(`  annotate-draft: drafted ${r.cardId} for ${r.sha.slice(0, 8)} (local + inert; run: logbook accept-draft ${r.cardId} --by WHO to promote)`);
+}
+
+function runAcceptDraft(o, { repo }) {
+  if (!o.cardId || !o.by) { console.error(`  usage: logbook accept-draft <cardId> --by WHO [--file P ...] [repo]`); process.exit(1); }
+  const r = acceptDraft(repo, o.cardId, { scopes: o.files, by: o.by });
+  if (r.error) { console.error(`  accept-draft: ${r.error}`); process.exit(1); }
+  console.log(`  accept-draft: ${o.cardId} → decision (reviewed by ${r.reviewedBy}); commit .logbook/ to record it`);
+}
+
+function runLeadDisposition(o, { repo }) {
+  if (!o.cardId || !o.by) { console.error(`  usage: logbook ${o.cmd} <cardId> --by WHO [--claim "..."] [repo]`); process.exit(1); }
+  const r = o.cmd === "accept-lead"
+    ? acceptLead(repo, o.cardId, { editClaim: o.claim, by: o.by })
+    : rejectLead(repo, o.cardId, { by: o.by });
+  if (r.error) { console.error(`  ${o.cmd}: ${r.error}`); process.exit(1); }
+  console.log(`  ${o.cmd}: ${o.cardId.slice(0, 12)}… → ${r.disposition} (reviewed by ${r.reviewedBy}); commit .logbook/ to record it`);
+}
+
+function runCheck(o, { repo }) {
+  if (!o.diff) {
+    console.error(`  usage: logbook check --diff [--base <sha> --head <sha>] [--cursor TOKEN] [repo]`);
+    process.exit(1);
+  }
+  if ((o.base && !o.head) || (!o.base && o.head)) {
+    console.error(`  check --diff range mode requires both --base and --head`);
+    process.exit(1);
+  }
+  if (o.cursorProvided && !o.cursor) {
+    console.error(`  check --diff --cursor requires the opaque token printed after NEXT`);
+    process.exit(1);
+  }
+  const r = checkDecisions(repo, { base: o.base, head: o.head, cursor: o.cursor });
+  process.stdout.write(renderDecisionLeads(r));
+  process.exitCode = r.exitCode;
+}
+
+function runPending(o, { repo }) {
+  const state = readLocalDrafts(repo);
+  if (state.unreadable || state.malformed.length) {
+    console.error(`  pending: local draft plane is unreadable or malformed (${state.malformed.length} malformed)`);
+    process.exit(1);
+  }
+  const drafts = state.cards.map(({ card }) => card);
+  if (!drafts.length) { if (!o.quiet) console.log("  no draft decisions awaiting acceptance"); return; }
+  if (!o.quiet) {
+    console.log(`  ${C.bold}${drafts.length}${C.r} draft decision${drafts.length === 1 ? "" : "s"} awaiting human acceptance ${C.dim}(local + inert - never surface in check --diff until accepted)${C.r}\n`);
+    for (const card of drafts.slice(0, 50)) {
+      console.log(`  ${card.cardId}  ${card.sha.slice(0, 8)}  ${sanitizeContextText(card.claim, 160, { markdown: false })}`);
+      console.log(`    ${C.dim}proposed by ${sanitizeContextText(card.by, 64, { markdown: false })} on ${card.at}; accept: logbook accept-draft ${card.cardId} --by <who>${C.r}`);
+    }
+    if (drafts.length > 50) console.log(`  ${C.dim}… and ${drafts.length - 50} more${C.r}`);
+  }
+}
+
+function runExport(o, { repo }) {
+  if (o.format !== "okf" || !o.out || !String(o.out).trim() || !String(o.ref || "HEAD").trim() ||
+      o._extraPositionals?.length) {
+    console.error("  usage: logbook export [path] --format okf --out NEW_DIR [--ref REF]");
+    process.exit(1);
+  }
+  const written = exportOkfProjection(repo, o.out, { ref: o.ref || "HEAD" });
+  if (written.error) {
+    console.error(`  export: ${sanitizeContextText(written.error, 700, { markdown: false })}`);
+    process.exit(1);
+  }
+  if (!o.quiet)
+    console.log(`  export: ${written.recordCount} reviewed decision${written.recordCount === 1 ? "" : "s"} → ${sanitizeContextText(written.out, 700, { markdown: false })} (OKF ${OKF_VERSION}; trust ${written.trustCommit.slice(0, 12)}; projection ${written.projectionDigest})`);
+}
+
+function runRefine(o, { repo }) {
+  const { events, capped, scanOk } = readLedger(o, repo);
+  // On-demand indexing: the un-annotated notable-decision worklist across the
+  // repo. The CLI is deterministic/offline; it names WHAT warrants a "why";
+  // the agent then investigates each and writes cite-or-abstain DRAFTS. This
+  // is the lazy loop run deliberately, not blind bulk generation.
+  refuseUnmeasured(scanOk, "suppression/weakening rows are unmeasured; refusing a partial worklist");
+  const drafts = readLocalDrafts(repo);
+  const digestNotes = loadDigestNotes(repo);
+  const trust = resolveTrustCommit(repo, "HEAD");
+  const decisions = trust ? readPlane(repo, trust, DECISION_PLANE) : { unreadable: true, cards: [], malformed: [] };
+  const leads = trust ? readPlane(repo, trust, LEAD_PLANE) : { unreadable: true, cards: [], malformed: [] };
+  if (digestNotes.error || drafts.unreadable || drafts.malformed.length || decisions.unreadable || decisions.malformed.length ||
+      leads.unreadable || leads.malformed.length) {
+    console.error("logbook: note/draft/decision/lead index is unreadable or malformed; refusing a partial refinement worklist");
+    process.exit(1);
+  }
+  const represented = new Set([
+    ...digestNotes.notes.map((note) => note.sha),
+    ...drafts.cards.map(({ card }) => card.sha),
+    ...decisions.cards.map(({ card }) => card.sha),
+    ...leads.cards.map(({ card }) => card.sha),
+  ]);
+  const notable = events.filter((e) =>
+    (e.revert || (e.suppressions && e.suppressions.length) || (e.del_asserts - e.add_asserts > 2)) &&
+    !represented.has(e.fullSha));
+  notable.sort((a, b) => Number(b.revert) - Number(a.revert)); // do-not-retry first; events already newest-first
+  const limit = o.limit ?? 50;
+  console.log(`  ${C.bold}${notable.length}${C.r} un-annotated notable decision${notable.length === 1 ? "" : "s"} in the last ${fmt(o.max)} commits ${C.dim}(investigate each with git show before annotating - never annotate a guess)${C.r}\n`);
+  for (const e of notable.slice(0, limit)) {
+    const kind = e.revert ? "revert" : (e.suppressions?.length ? "suppression" : "weakening");
+    const f = (e.files || [])[0] || "";
+    console.log(`  ${e.sha}  ${C.dim}[${kind}]${C.r}  ${sanitizeContextText(e.subject || "", 120, { markdown: false })}`);
+    console.log(`    ${C.dim}${sanitizeContextText(f, 200, { markdown: false })} - verify: git show ${e.fullSha}${C.r}`);
+    console.log(`    ${C.dim}then preserve: logbook annotate ${e.fullSha} "verified why" --span "exact quote" --side diff --evidence-file ${sanitizeContextText(f, 200, { markdown: false })} --by MODEL${C.r}`);
+  }
+  if (notable.length > limit) console.log(`\n  ${C.dim}… and ${notable.length - limit} more (raise with --limit)${C.r}`);
+  if (capped) console.error(`  analysis capped at ${fmt(o.max)} commits - use -n for a larger window`);
+}
+
+function runAudit(o, { repo, name }) {
+  const { events } = readLedger(o, repo);
+  if (o.json) {
+    const ref = o.ref || "HEAD";
+    if (ref !== "HEAD") {
+      // the delta base: raw (ungated) pattern grep at a past ref, {file,line,content}
+      const raw = scanSuppressions(repo, { ref, paths: o.files, gate: false });
+      return console.log(JSON.stringify(raw.map((x) => ({ file: x.file, line: x.line, content: x.content }))));
+    }
+    if (o.files && o.files.length) {
+      // scoped light audit (gated, no blame/dates, cheap enough for a per-turn hook)
+      const lite = scanSuppressions(repo, { ref: "HEAD", paths: o.files, gate: true });
+      return console.log(JSON.stringify(lite.map((x) => ({ file: x.file, line: x.line, kind: String(x.kind).trim(), testSkip: kindIsTestSkip(x.kind), content: x.content }))));
+    }
+    // full gated audit (blame-dated, re-silencing fight log), the whole-repo ledger.
+    // testSkip comes from the idiom table so consumers need not re-derive the skip idioms.
+    const live = auditHead(repo, events);
+    return console.log(JSON.stringify(live.map((x) => ({ file: x.file, line: x.line, kind: String(x.kind).trim(), testSkip: kindIsTestSkip(x.kind), content: x.content ?? "", since: x.since ?? null, sha: x.sha ?? null, resilenced: x.resilenced ?? 0 }))));
+  }
+  return console.log(renderAudit(name, auditHead(repo, events)));
+}
+
+function runQuery(o, { repo }) {
+  const { events, capped, scanOk } = readLedger(o, repo);
+  refuseUnmeasured(scanOk, "the record would be incomplete, refusing to query it");
+  const limit = o.limit ?? 200;
+  if (!Number.isInteger(limit) || limit < 1) {
+    console.error("logbook: --limit must be a positive integer");
+    process.exit(1);
+  }
+  const all = queryEvents(events, o);
+  const hits = all.slice(0, limit);
+  for (const e of hits) console.log(JSON.stringify(e));
+  const count = `${all.length} matching event${all.length === 1 ? "" : "s"}, returned ${hits.length}`;
+  const truncated = all.length > hits.length
+    ? " - TRUNCATED: narrow with --file/--revert or pass a higher --limit before concluding"
+    : "";
+  console.error(`  ${count}${truncated}`);
+  if (capped)
+    console.error(`  analysis capped at ${fmt(o.max)} commits - use -n for a larger window or --since/--until for another era`);
+}
+
+function runContext(o, { repo }) {
+  const { events, capped, scanOk, reused } = readLedger(o, repo);
+  refuseUnmeasured(scanOk, "the record would be incomplete, refusing to format context");
+  if (o.limit != null) {
+    console.error("logbook: context uses bounded cursor pages; --limit applies only to query");
+    process.exit(1);
+  }
+  if (o.cursorProvided && !o.cursor) {
+    console.error("logbook: --cursor requires the opaque token printed after NEXT");
+    process.exit(1);
+  }
+  const head = git(repo, ["rev-parse", "HEAD"]).trim();
+  const page = formatContextPage({ repo, head, events, filters: o, capped, cursor: o.cursor });
+  // A cursor crosses process boundaries. Persist a successful default-window
+  // build (including an incremental refresh) so page two reuses the ledger
+  // instead of repeating the cold diff scan. Non-default eras/windows and
+  // LOGBOOK_NO_CACHE stay explicitly uncached and can never poison the
+  // default ledger. Cache failure does not hide an otherwise valid page.
+  if (!process.env.LOGBOOK_NO_CACHE && o.max === DEFAULT_MAX && !o.since && !o.until &&
+      (!reused || reused.mode !== "cached")) {
+    try {
+      managedWriteFile(repo, join(repo, "events.jsonl"), events.map((event) => JSON.stringify(event)).join("\n") + "\n");
+    } catch {
+      if (!o.quiet) console.error("  context cache unavailable - NEXT will rescan history");
+    }
+  }
+  process.stdout.write(page.text);
+}
+
+// The default run, init, and journey: the digest aggregates need an additional
+// name-only history pass that the precision reads above never pay for.
+function runDigest(o, { repo, name, shallow }) {
+  const { events, capped, scanOk } = readLedger(o, repo);
   // The unfiltered ledger dump belongs to the default run only. `query` keeps
   // its filters under --json (it always emits JSONL), and `audit --json` has
-  // its own shapes below.
+  // its own shapes.
   if (o.json && o.cmd === "run") {
-    if (!scanOk) {
-      console.error("logbook: diff scan failed - the record would be incomplete, refusing to emit it as data");
-      process.exit(1);
-    }
+    refuseUnmeasured(scanOk, "the record would be incomplete, refusing to emit it as data");
     for (const e of events) console.log(JSON.stringify(e));
     return;
   }
-  if (o.cmd === "refine") {
-    // On-demand indexing: the un-annotated notable-decision worklist across the
-    // repo. The CLI is deterministic/offline; it names WHAT warrants a "why";
-    // the agent then investigates each and writes cite-or-abstain DRAFTS. This
-    // is the lazy loop run deliberately, not blind bulk generation.
-    if (!scanOk) {
-      console.error("logbook: diff scan failed - suppression/weakening rows are unmeasured; refusing a partial worklist");
-      process.exit(1);
-    }
-    if (o.out) { console.error("logbook: refine does not support --out"); process.exit(1); }
-    const drafts = readLocalDrafts(repo);
-    const digestNotes = loadDigestNotes(repo);
-    const trust = resolveTrustCommit(repo, "HEAD");
-    const decisions = trust ? readPlane(repo, trust, DECISION_PLANE) : { unreadable: true, cards: [], malformed: [] };
-    const leads = trust ? readPlane(repo, trust, LEAD_PLANE) : { unreadable: true, cards: [], malformed: [] };
-    if (digestNotes.error || drafts.unreadable || drafts.malformed.length || decisions.unreadable || decisions.malformed.length ||
-        leads.unreadable || leads.malformed.length) {
-      console.error("logbook: note/draft/decision/lead index is unreadable or malformed; refusing a partial refinement worklist");
-      process.exit(1);
-    }
-    const represented = new Set([
-      ...digestNotes.notes.map((note) => note.sha),
-      ...drafts.cards.map(({ card }) => card.sha),
-      ...decisions.cards.map(({ card }) => card.sha),
-      ...leads.cards.map(({ card }) => card.sha),
-    ]);
-    const notable = events.filter((e) =>
-      (e.revert || (e.suppressions && e.suppressions.length) || (e.del_asserts - e.add_asserts > 2)) &&
-      !represented.has(e.fullSha));
-    notable.sort((a, b) => Number(b.revert) - Number(a.revert)); // do-not-retry first; events already newest-first
-    const limit = o.limit ?? 50;
-    console.log(`  ${C.bold}${notable.length}${C.r} un-annotated notable decision${notable.length === 1 ? "" : "s"} in the last ${fmt(o.max)} commits ${C.dim}(investigate each with git show before annotating - never annotate a guess)${C.r}\n`);
-    for (const e of notable.slice(0, limit)) {
-      const kind = e.revert ? "revert" : (e.suppressions?.length ? "suppression" : "weakening");
-      const f = (e.files || [])[0] || "";
-      console.log(`  ${e.sha}  ${C.dim}[${kind}]${C.r}  ${sanitizeContextText(e.subject || "", 120, { markdown: false })}`);
-      console.log(`    ${C.dim}${sanitizeContextText(f, 200, { markdown: false })} - verify: git show ${e.fullSha}${C.r}`);
-      console.log(`    ${C.dim}then preserve: logbook annotate ${e.fullSha} "verified why" --span "exact quote" --side diff --evidence-file ${sanitizeContextText(f, 200, { markdown: false })} --by MODEL${C.r}`);
-    }
-    if (notable.length > limit) console.log(`\n  ${C.dim}… and ${notable.length - limit} more (raise with --limit)${C.r}`);
-    if (capped) console.error(`  analysis capped at ${fmt(o.max)} commits - use -n for a larger window`);
-    return;
-  }
-  if (o.cmd === "audit") {
-    if (o.json) {
-      const ref = o.ref || "HEAD";
-      if (ref !== "HEAD") {
-        // the delta base: raw (ungated) pattern grep at a past ref, {file,line,content}
-        const raw = scanSuppressions(repo, { ref, paths: o.files, gate: false });
-        return console.log(JSON.stringify(raw.map((x) => ({ file: x.file, line: x.line, content: x.content }))));
-      }
-      if (o.files && o.files.length) {
-        // scoped light audit (gated, no blame/dates, cheap enough for a per-turn hook)
-        const lite = scanSuppressions(repo, { ref: "HEAD", paths: o.files, gate: true });
-        return console.log(JSON.stringify(lite.map((x) => ({ file: x.file, line: x.line, kind: String(x.kind).trim(), testSkip: kindIsTestSkip(x.kind), content: x.content }))));
-      }
-      // full gated audit (blame-dated, re-silencing fight log), the whole-repo ledger.
-      // testSkip comes from the idiom table so consumers need not re-derive the skip idioms.
-      const live = auditHead(repo, events);
-      return console.log(JSON.stringify(live.map((x) => ({ file: x.file, line: x.line, kind: String(x.kind).trim(), testSkip: kindIsTestSkip(x.kind), content: x.content ?? "", since: x.since ?? null, sha: x.sha ?? null, resilenced: x.resilenced ?? 0 }))));
-    }
-    return console.log(renderAudit(name, auditHead(repo, events)));
-  }
-  if (o.cmd === "query") {
-    if (!scanOk) {
-      console.error("logbook: diff scan failed - the record would be incomplete, refusing to query it");
-      process.exit(1);
-    }
-    const limit = o.limit ?? 200;
-    if (!Number.isInteger(limit) || limit < 1) {
-      console.error("logbook: --limit must be a positive integer");
-      process.exit(1);
-    }
-    const all = queryEvents(events, o);
-    const hits = all.slice(0, limit);
-    for (const e of hits) console.log(JSON.stringify(e));
-    const count = `${all.length} matching event${all.length === 1 ? "" : "s"}, returned ${hits.length}`;
-    const truncated = all.length > hits.length
-      ? " - TRUNCATED: narrow with --file/--revert or pass a higher --limit before concluding"
-      : "";
-    console.error(`  ${count}${truncated}`);
-    if (capped)
-      console.error(`  analysis capped at ${fmt(o.max)} commits - use -n for a larger window or --since/--until for another era`);
-    return;
-  }
-  if (o.cmd === "context") {
-    if (!scanOk) {
-      console.error("logbook: diff scan failed - the record would be incomplete, refusing to format context");
-      process.exit(1);
-    }
-    if (o.limit != null) {
-      console.error("logbook: context uses bounded cursor pages; --limit applies only to query");
-      process.exit(1);
-    }
-    if (o.cursorProvided && !o.cursor) {
-      console.error("logbook: --cursor requires the opaque token printed after NEXT");
-      process.exit(1);
-    }
-    const head = git(repo, ["rev-parse", "HEAD"]).trim();
-    const page = formatContextPage({ repo, head, events, filters: o, capped, cursor: o.cursor });
-    // A cursor crosses process boundaries. Persist a successful default-window
-    // build (including an incremental refresh) so page two reuses the ledger
-    // instead of repeating the cold diff scan. Non-default eras/windows and
-    // LOGBOOK_NO_CACHE stay explicitly uncached and can never poison the
-    // default ledger. Cache failure does not hide an otherwise valid page.
-    if (!process.env.LOGBOOK_NO_CACHE && o.max === DEFAULT_MAX && !o.since && !o.until &&
-        (!reused || reused.mode !== "cached")) {
-      try {
-        managedWriteFile(repo, join(repo, "events.jsonl"), events.map((event) => JSON.stringify(event)).join("\n") + "\n");
-      } catch {
-        if (!o.quiet) console.error("  context cache unavailable - NEXT will rescan history");
-      }
-    }
-    process.stdout.write(page.text);
-    return;
-  }
-
-  // Digest aggregates require an additional name-only history pass. Query,
-  // context, audit, and --json return above so precision reads do not pay it.
   const touched = hotspots(repo, o);
   const A = analyze(events, touched);
   if (!scanOk) A.degraded = true;
@@ -4978,42 +5013,7 @@ async function main() {
   // would move on while AGENTS.md kept describing a workflow it no longer has.
   if (!o.out) refreshReleasedWiring(repo, o.quiet);
 
-  if (o.cmd === "init") {
-    const block = PLANE_REPO_MEMORY_BLOCK;
-    // AGENTS.md is the cross-tool convention: always ensure it exists;
-    // also wire tool-specific files that are present. AGENTS.override.md
-    // SHADOWS AGENTS.md in Codex, so it must be wired too when it exists.
-    const targets = ["AGENTS.override.md", "CLAUDE.md", ".cursorrules"].filter((f) => existsSync(join(repo, f)));
-    targets.unshift("AGENTS.md");
-    for (const f of targets) {
-      const p = join(repo, f);
-      const cur = existsSync(p) ? readFileSync(p, "utf8") : "";
-      // a CLAUDE.md that imports AGENTS.md is wired through the import;
-      // appending the block would duplicate it in Claude's context
-      if (f === "CLAUDE.md" && !cur.includes("## Repo memory") && /(^|\n)@AGENTS\.md\s*(\n|$)/.test(cur)) {
-        if (!o.quiet) console.log(`  ${C.dim}=${C.r} ${f} already wired (imports AGENTS.md)`);
-        continue;
-      }
-      if (cur.includes("## Repo memory")) {
-        const old = LEGACY_BLOCKS.find((b) => cur.includes(b));
-        if (old) {
-          managedWriteFile(repo, p, cur.replace(old, block));
-          if (!o.quiet) console.log(`  ${C.good}✓${C.r} updated ${C.bold}${f}${C.r}   ${C.dim}repo-memory workflow refreshed${C.r}`);
-        } else if (!o.quiet) console.log(`  ${C.dim}=${C.r} ${f} already wired`);
-      } else {
-        managedWriteFile(repo, p, cur + (cur && !cur.endsWith("\n") ? "\n" : "") + block);
-        if (!o.quiet) console.log(`  ${C.good}✓${C.r} wired ${C.bold}${f}${C.r}   ${C.dim}agent instructed to read history first${C.r}`);
-      }
-    }
-    // Claude Code reads CLAUDE.md, not AGENTS.md. A fresh repo gets the
-    // documented bridge (an @AGENTS.md import) so the wiring actually loads:
-    // https://docs.anthropic.com/en/docs/claude-code/memory
-    const claudePath = join(repo, "CLAUDE.md");
-    if (!existsSync(claudePath)) {
-      managedWriteFile(repo, claudePath, "@AGENTS.md\n");
-      if (!o.quiet) console.log(`  ${C.good}✓${C.r} wired ${C.bold}CLAUDE.md${C.r}   ${C.dim}bridges Claude Code to AGENTS.md${C.r}`);
-    }
-  }
+  if (o.cmd === "init") wireAgentFiles(repo, o.quiet);
   if (!o.quiet) {
     const inventory = historyInventory(A);
     console.log(`  ${fmt(A.n)} commit${A.n === 1 ? "" : "s"}${capped ? ` (capped - use -n for more)` : ""} · ${fmt(A.filesTouched)} file${A.filesTouched === 1 ? "" : "s"} · ${spanHuman(A.spanDays)} · ${plural(A.authors, "author")}`);
@@ -5030,6 +5030,83 @@ async function main() {
     console.log(`  ${C.dim}next:${C.r} logbook journey   ${C.dim}(see it in color)${C.r}\n`);
   }
   if (!scanOk) process.exitCode = 1;
+}
+
+function wireAgentFiles(repo, quiet) {
+  const block = PLANE_REPO_MEMORY_BLOCK;
+  // AGENTS.md is the cross-tool convention: always ensure it exists;
+  // also wire tool-specific files that are present. AGENTS.override.md
+  // SHADOWS AGENTS.md in Codex, so it must be wired too when it exists.
+  const targets = ["AGENTS.override.md", "CLAUDE.md", ".cursorrules"].filter((f) => existsSync(join(repo, f)));
+  targets.unshift("AGENTS.md");
+  for (const f of targets) {
+    const p = join(repo, f);
+    const cur = existsSync(p) ? readFileSync(p, "utf8") : "";
+    // a CLAUDE.md that imports AGENTS.md is wired through the import;
+    // appending the block would duplicate it in Claude's context
+    if (f === "CLAUDE.md" && !cur.includes("## Repo memory") && /(^|\n)@AGENTS\.md\s*(\n|$)/.test(cur)) {
+      if (!quiet) console.log(`  ${C.dim}=${C.r} ${f} already wired (imports AGENTS.md)`);
+      continue;
+    }
+    if (cur.includes("## Repo memory")) {
+      const old = LEGACY_BLOCKS.find((b) => cur.includes(b));
+      if (old) {
+        managedWriteFile(repo, p, cur.replace(old, block));
+        if (!quiet) console.log(`  ${C.good}✓${C.r} updated ${C.bold}${f}${C.r}   ${C.dim}repo-memory workflow refreshed${C.r}`);
+      } else if (!quiet) console.log(`  ${C.dim}=${C.r} ${f} already wired`);
+    } else {
+      managedWriteFile(repo, p, cur + (cur && !cur.endsWith("\n") ? "\n" : "") + block);
+      if (!quiet) console.log(`  ${C.good}✓${C.r} wired ${C.bold}${f}${C.r}   ${C.dim}agent instructed to read history first${C.r}`);
+    }
+  }
+  // Claude Code reads CLAUDE.md, not AGENTS.md. A fresh repo gets the
+  // documented bridge (an @AGENTS.md import) so the wiring actually loads:
+  // https://docs.anthropic.com/en/docs/claude-code/memory
+  const claudePath = join(repo, "CLAUDE.md");
+  if (!existsSync(claudePath)) {
+    managedWriteFile(repo, claudePath, "@AGENTS.md\n");
+    if (!quiet) console.log(`  ${C.good}✓${C.r} wired ${C.bold}CLAUDE.md${C.r}   ${C.dim}bridges Claude Code to AGENTS.md${C.r}`);
+  }
+}
+
+async function main() {
+  const o = parseArgs(process.argv.slice(2));
+  if (o.cmd === "help") return usage();
+  if (o.cmd === "version") return console.log(PACKAGE_VERSION);
+  if (o._missing) {
+    console.error(`  ${o._missing} requires a value`);
+    process.exit(1);
+  }
+  if (o._unknown) {
+    console.error(`  unknown option: ${o._unknown}`);
+    process.exit(1);
+  }
+  const command = commandFor(o.cmd);
+  const misuse = flagMisuse(command, o._given);
+  if (misuse) {
+    console.error(misuse);
+    process.exit(1);
+  }
+  if (!Number.isInteger(o.max) || o.max < 1) {
+    console.error("logbook: --max must be a positive integer");
+    process.exit(1);
+  }
+  for (const [flag, value] of [["--limit", o.limit], ["--weaken", o.weaken], ["--downgrade", o.downgrade]]) {
+    if (value !== undefined && (!Number.isInteger(value) || value < 0 || (flag === "--limit" && value < 1))) {
+      console.error(`logbook: ${flag} must be ${flag === "--limit" ? "a positive" : "a non-negative"} integer`);
+      process.exit(1);
+    }
+  }
+  if (o.files?.some((file) => typeof file !== "string" || !file.length)) {
+    console.error("logbook: --file requires a non-empty path substring");
+    process.exit(1);
+  }
+  if (o.files?.length > 32 || o.files?.some((file) => Buffer.byteLength(file) > 1024)) {
+    console.error("logbook: at most 32 --file filters of at most 1024 bytes each are allowed");
+    process.exit(1);
+  }
+  const repo = resolveRepoRoot(o.repo);
+  return command.run(o, { repo, name: basename(repo), shallow: existsSync(join(repo, ".git", "shallow")) });
 }
 
 // Entry-point gate that survives npm bin symlinks (Unix) and .cmd shims +
