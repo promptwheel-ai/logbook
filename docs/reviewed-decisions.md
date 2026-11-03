@@ -69,6 +69,11 @@ make its own newly added card authoritative. Local mode trusts the captured
 cursor when more candidates remain. A page with `NEXT` exits nonzero because
 later cards have not been checked yet; only `END complete` can finish cleanly.
 
+Running the check is opt-in. The `## Repo memory` block that `init` writes
+does not mention it, the agent skill does not require it, and no other
+command refuses to finish because it was skipped. A team that has adopted
+reviewed cards typically runs the range form in CI on each pull request.
+
 ## Authority tiers
 
 Logbook never converts model confidence into authority.

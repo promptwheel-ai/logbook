@@ -19,10 +19,12 @@ Cursor, and any MCP client).
   Pass `files` for a multi-path OR query; remaining filters stay AND constraints.
 - **logbook_annotate** - persist an immediately visible, explicitly unreviewed
   digest note after an agent investigates a change. Optional exact evidence is
-  raw-object verified. Notes never enter `check --diff` authority.
+  raw-object verified. Notes never become reviewed-decision authority.
 
-The opt-in reviewed-decision layer (drafts, leads, `check --diff`, OKF export)
-is CLI-only; see the core package's `docs/reviewed-decisions.md`.
+The reviewed-decision layer (drafts, leads, `check --diff`, OKF export) is
+experimental, opt-in, and CLI-only; see the core package's
+`docs/reviewed-decisions.md`. Nothing requires an agent to run `check --diff`
+before finishing work.
 
 ## Upgrading
 
