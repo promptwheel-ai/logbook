@@ -304,15 +304,11 @@ logbook accept-lead CARDID --by WHO [--claim "corrected text"]
 logbook reject-lead CARDID --by WHO
 logbook outcomes [path]
 logbook check --diff [--base SHA --head SHA] [--cursor TOKEN]
-                     [--metrics-out PATH]
 logbook export [path] --format okf --out NEW_DIR [--ref REF]
 ```
 
 `refine` is a deterministic worklist of unannotated notable history. It does
 not generate claims: the agent must inspect each commit and cite what it found.
-
-`--metrics-out` writes aggregate check counts only; it does not include repo
-names, paths, SHAs, prose, or authors, and nothing phones home.
 
 ## History queries and context economics
 
