@@ -20,7 +20,10 @@ npx -y @promptwheel/logbook@latest init
 
 `init` analyzes the repo, writes the history artifacts, and installs a compact
 workflow in `AGENTS.md`, `CLAUDE.md`, or `.cursorrules` so the agent reads
-history before it plans.
+history before it plans: read `LOGBOOK.md`, page each task path with
+`context --file`, verify leads with `git show`, refresh, `audit`, and
+`annotate` what it verified. The same workflow ships as an agent skill in
+[plugin/SKILL.md](plugin/SKILL.md).
 
 ```text
   1,326 commits · 322 files · 7.3 years · 354 authors
@@ -191,8 +194,15 @@ logbook export [path] --format okf --out NEW_DIR [--ref REF]
 - `JOURNEY.md` is no longer written by the default run, and `doctor` no
   longer requires it. `logbook journey` still prints the story; `--compare`
   and its bundled percentile table are gone.
-- A normal refresh now re-pins a `## Repo memory` block written by any
-  earlier 0.9.x release, so `doctor` passes again after an upgrade.
+- The `## Repo memory` block that `init` writes is now the deterministic
+  workflow only: read `LOGBOOK.md`, bounded `context --file` pages per task
+  path, verify with `git show`, refresh, `audit`, and `annotate` verified
+  why-notes. The `annotate-draft`, `pending`, `accept-draft`, and
+  `check --diff` lines left the block; that layer is opt-in and documented in
+  `docs/reviewed-decisions.md`. `doctor` requires exactly the lean lines.
+- A normal refresh re-pins and reshapes a `## Repo memory` block written by
+  any earlier 0.9.x release (or a 0.9.7 pre-release build), so `doctor`
+  passes again after an upgrade. User-edited blocks are never touched.
 - The npm tarball ships `bin/` only; the research memos under `docs/` stay in
   the repository. Developer-only smoke scripts were removed.
 - MCP server 0.6.0: the `logbook_annotate_draft` tool was removed (use the

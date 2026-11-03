@@ -21,10 +21,14 @@ npx - npm prefers the same-name local package and shadows the registry.
    “newest cached SHA is present.” Merges can introduce older-dated side
    commits; reuse rows by immutable full SHA, scan missing SHAs, then restore
    Git's canonical order.
-5. `init` writes the ordered read → bounded path-context → verify → diff-check
-   workflow with neutral `--by MODEL` attribution and creates the CLAUDE.md
-   `@AGENTS.md` bridge; exact released blocks migrate, user-edited blocks are
-   never touched.
+5. `init` writes the lean deterministic workflow only: read LOGBOOK.md →
+   bounded `context --file` pages per task path to END complete → verify with
+   `git show` → refresh, `audit`, and `annotate` with neutral `--by MODEL`
+   attribution; it creates the CLAUDE.md `@AGENTS.md` bridge. The opt-in
+   reviewed-decision commands (`annotate-draft`, `pending`, `accept*`,
+   `check --diff`) are never wired; `doctor` requires exactly the lean lines.
+   Exact released blocks migrate (every plane-template pin is in
+   `LEGACY_BLOCKS`), user-edited blocks are never touched.
 6. `DEFAULT_MAX` is the single source for the commit window - the ledger
    cache gate in `loadEvents` depends on it.
 7. Never turn "unmeasurable" into clean: a failed diff scan sets
@@ -86,12 +90,10 @@ Before planning or editing:
    confirm that the constraint still applies to the current tree.
 Refresh the record: node bin/logbook.mjs
 Check what is still silenced: node bin/logbook.mjs audit
-When you investigate WHY a listed commit happened and verify it in raw Git,
-persist an immediate unreviewed digest note (replace placeholders; never
-annotate guesses):
-node bin/logbook.mjs annotate SHA "one specific sentence" --span "exact bytes" --side diff --evidence-file path/to/file --by MODEL
-Only when the finding needs human authority, use `annotate-draft` instead, then
-run `node bin/logbook.mjs pending` and report the full card ID. Never run
-`accept`, `accept-draft`, `accept-lead`, or `reject-lead` for the human.
-Before finalizing work, run `node bin/logbook.mjs check --diff` and follow every
-NEXT cursor. Treat policy-published cards as machine leads, not human decisions.
+When you investigate WHY a listed commit happened and verify it in the diffs,
+persist it immediately as an unreviewed digest note (replace placeholders;
+never annotate guesses):
+node bin/logbook.mjs annotate SHA "one specific sentence" --by MODEL
+The reviewed-decision layer (`annotate-draft`, `pending`, `accept*`,
+`check --diff`) is opt-in and documented in docs/reviewed-decisions.md; never
+run the `accept*` or `reject-lead` commands for the human.

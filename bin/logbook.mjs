@@ -4033,18 +4033,18 @@ export function hasClaudeImport(text, target) {
 
 const DOCTOR_RANK = { pass: 0, warn: 1, fail: 2 };
 
-// Only the deterministic workflow is required: read the digest, page every
-// relevant path to END complete, verify leads in raw Git, and record verified
-// findings as unreviewed notes. The opt-in reviewed-decision lines
-// (annotate-draft, pending, accept-draft, check --diff) may be absent; a block
-// that hides the experimental layer is still current wiring.
+// The deterministic workflow is what REPO_MEMORY_BLOCK writes and all doctor
+// requires: read the digest, page every relevant path to END complete, verify
+// leads with git show, and record verified findings as unreviewed notes. The
+// opt-in reviewed-decision commands are never part of the wiring, so their
+// presence or absence is not a health signal.
 function currentWiringProblem(text) {
   const value = String(text);
   if (!value.includes("## Repo memory")) return "has no Repo memory block";
   if (!/Read LOGBOOK\.md at the repo root completely before any history query/.test(value) ||
       !value.includes(`${NPX_COMMAND} context --file path/to/file --revert`) ||
       !/If output says NEXT[\s\S]*until END complete/.test(value) ||
-      !/leads, not verdicts[\s\S]*raw Git evidence/.test(value) ||
+      !/leads, not verdicts[\s\S]*git show SHA/.test(value) ||
       !value.includes(`${NPX_COMMAND} annotate SHA "one specific sentence"`))
     return "is missing part of the current history workflow";
   return "";
@@ -4348,18 +4348,56 @@ Before finalizing work, run the decision preflight on the actual diff:
 npx -y @promptwheel/logbook check --diff
 If output says NEXT, repeat with --cursor TOKEN until END complete.
 `;
-const PLANE_REPO_MEMORY_BLOCK = UNPINNED_PLANE_REPO_MEMORY_BLOCK.replaceAll(
+// Every 0.9.x release from 0.9.1 to 0.9.6 wrote the plane template above
+// pinned to its own version, and pre-release 0.9.7 builds did too before the
+// lean block below replaced it. Each exact pinned block is a migration source,
+// so a refresh by a newer release re-pins the wiring instead of leaving doctor
+// to report it as stale forever.
+const PLANE_TEMPLATE_RELEASES = ["0.9.1", "0.9.2", "0.9.3", "0.9.4", "0.9.5", "0.9.6", "0.9.7"];
+const PINNED_PLANE_REPO_MEMORY_BLOCKS = PLANE_TEMPLATE_RELEASES
+  .map((version) => UNPINNED_PLANE_REPO_MEMORY_BLOCK.replaceAll(
+    "npx -y @promptwheel/logbook",
+    `npx -y @promptwheel/logbook@${version}`,
+  ));
+
+// The block `init` writes today: the deterministic history workflow only.
+// Read the digest, page every task path through bounded context, verify in
+// raw Git, refresh, audit what is still silenced, and record verified
+// why-notes. The opt-in reviewed-decision layer (annotate-draft, pending,
+// accept-draft, check --diff) is documented in docs/reviewed-decisions.md and
+// deliberately absent: an agent that never opts in should never be told to
+// run it. doctor's currentWiringProblem checks these exact lines.
+const UNPINNED_REPO_MEMORY_BLOCK = `
+## Repo memory
+Before planning or editing:
+1. Read LOGBOOK.md at the repo root completely before any history query.
+2. Use the raw history inventory as orientation, not a task-level risk score.
+   Inspect task-relevant do-not-retry and test-trust entries regardless of
+   repo-wide totals.
+3. For complete do-not-retry coverage, inspect all relevant paths:
+   npx -y @promptwheel/logbook context --file path/to/file --revert
+   Repeat --file for each other relevant path. If output says NEXT, repeat the
+   identical filters with --cursor TOKEN until END complete before concluding.
+4. Treat findings as leads, not verdicts. Verify claims with git show SHA and
+   confirm that the constraint still applies to the current tree.
+Refresh the record: npx -y @promptwheel/logbook
+Check what is still silenced: npx -y @promptwheel/logbook audit
+When you investigate WHY a listed commit happened and verify it in the diffs,
+persist it immediately as an unreviewed digest note (replace placeholders;
+never annotate guesses):
+npx -y @promptwheel/logbook annotate SHA "one specific sentence" --by MODEL
+`;
+export const REPO_MEMORY_BLOCK = UNPINNED_REPO_MEMORY_BLOCK.replaceAll(
   "npx -y @promptwheel/logbook",
   NPX_COMMAND,
 );
-// Every 0.9.x release since 0.9.1 wrote this same template pinned to its own
-// version. Each exact pinned block is a migration source, so a refresh by a
-// newer release re-pins the wiring instead of leaving doctor to report it as
-// stale forever. Append the version here when a release ships this template.
-const PLANE_TEMPLATE_RELEASES = ["0.9.1", "0.9.2", "0.9.3", "0.9.4", "0.9.5", "0.9.6"];
-const PINNED_PLANE_REPO_MEMORY_BLOCKS = PLANE_TEMPLATE_RELEASES
+// Releases that shipped the lean template pinned to their own version. Append
+// the version when a release ships it. The current version is excluded: the
+// block a release writes is never its own migration source.
+const LEAN_TEMPLATE_RELEASES = ["0.9.7"];
+const PINNED_LEAN_REPO_MEMORY_BLOCKS = LEAN_TEMPLATE_RELEASES
   .filter((version) => version !== PACKAGE_VERSION)
-  .map((version) => UNPINNED_PLANE_REPO_MEMORY_BLOCK.replaceAll(
+  .map((version) => UNPINNED_REPO_MEMORY_BLOCK.replaceAll(
     "npx -y @promptwheel/logbook",
     `npx -y @promptwheel/logbook@${version}`,
   ));
@@ -4370,6 +4408,8 @@ const PINNED_PLANE_REPO_MEMORY_BLOCKS = PLANE_TEMPLATE_RELEASES
 // rewritten, so the header alone is never permission to touch a block. The
 // literals are matched against files in users' repos; never reformat them.
 export const LEGACY_BLOCKS = [
+  UNPINNED_REPO_MEMORY_BLOCK,
+  ...PINNED_LEAN_REPO_MEMORY_BLOCKS,
   UNPINNED_V090_PLANE_REPO_MEMORY_BLOCK,
   V090_PLANE_REPO_MEMORY_BLOCK,
   UNPINNED_PLANE_REPO_MEMORY_BLOCK,
@@ -4444,7 +4484,7 @@ function refreshReleasedWiring(repo, quiet) {
     const current = readFileSync(path, "utf8");
     const old = LEGACY_BLOCKS.find((block) => current.includes(block));
     if (!old) continue;
-    managedWriteFile(repo, path, current.replace(old, PLANE_REPO_MEMORY_BLOCK));
+    managedWriteFile(repo, path, current.replace(old, REPO_MEMORY_BLOCK));
     if (!quiet) console.log(`  ${C.good}✓${C.r} updated ${C.bold}${file}${C.r}   ${C.dim}repo-memory workflow refreshed${C.r}`);
   }
 }
@@ -5033,7 +5073,7 @@ function runDigest(o, { repo, name, shallow }) {
 }
 
 function wireAgentFiles(repo, quiet) {
-  const block = PLANE_REPO_MEMORY_BLOCK;
+  const block = REPO_MEMORY_BLOCK;
   // AGENTS.md is the cross-tool convention: always ensure it exists;
   // also wire tool-specific files that are present. AGENTS.override.md
   // SHADOWS AGENTS.md in Codex, so it must be wired too when it exists.

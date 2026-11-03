@@ -1,192 +1,109 @@
 ---
 name: logbook
 description: >-
-  Turn a repo's git history into immediate agent memory plus optional reviewed
-  temporal decisions: hotspots, do-not-retry reverts, suppressions, fragile
-  areas, unreviewed notes, and path-scoped cards. Use when starting in an unfamiliar repo, before a
-  refactor or large change, when something keeps breaking, when asked what was
-  tried or why code is this way, or when deciding whether green tests can be
-  trusted.
+  Turn a repo's git history into memory an agent can use: hotspots,
+  do-not-retry reverts, suppressions, fragile areas, and assertion weakening.
+  Use whenever a repo contains LOGBOOK.md: after locating task-relevant files,
+  read and query its history before finalizing a plan or diagnosis or making
+  edits. Also use when starting in an unfamiliar repo, before a refactor or
+  large change, when something keeps breaking, when asked what was tried or why
+  code is this way, or when deciding whether green tests can be trusted.
 ---
 
 # Logbook
 
 ```bash
-npx -y @promptwheel/logbook@latest              # refresh history and render any existing notes
-npx -y @promptwheel/logbook@latest journey      # the story, in color (writes nothing)
-npx -y @promptwheel/logbook@latest doctor       # read-only artifact/wiring/query health
-npx -y @promptwheel/logbook@latest --json       # full JSONL, writes nothing; for tooling not agent context (use context, below)
+npx -y @promptwheel/logbook              # analyze current repo → 3 files
+npx -y @promptwheel/logbook journey      # the story, in color (writes nothing)
+npx -y @promptwheel/logbook --json       # events to stdout (writes nothing)
 ```
 
-The CLI runs locally and never changes source or Git history. It writes its own
-history artifacts; explicit `annotate` calls append root `annotations.jsonl`,
-and explicit decision commands write only under `.logbook/`.
+Never touches source or git history. It writes its generated artifacts; after
+`init`, a default-window refresh also updates only the marker-owned brief in
+agent files. `-n N` caps commits; `--since/--until` scopes an era without
+replacing that persistent brief.
 
-## Required workflow
+When `LOGBOOK.md` exists:
 
-After locating task-relevant files:
+1. Inspect the current tree just enough to identify task-relevant paths. Do not
+   finalize a plan or diagnosis or make edits yet.
+2. Use the compact generated history brief already present in the agent
+   instructions. If it is absent, read the Historical signal and "What a fresh
+   session should know" sections of
+   `$(git rev-parse --show-toplevel)/LOGBOOK.md`; do not load the full digest by
+   default.
+3. Query each task path with
+   `npx -y @promptwheel/logbook query --file path/to/file --revert`. Do not
+   replace this with a broad keyword search.
+4. Follow the brief's Action line. LOW is normally a hotspot map, but reviewed
+   annotations are explicit rationale and still require reading their keyed
+   LOGBOOK.md entries. For MEDIUM/HIGH, inspect only the task-relevant sections
+   the Action line names.
+5. TRIAGE, don't parrot: the logbook is the recall layer; you are the precision
+   layer. Verify every lead that materially affects the work with
+   `git show <sha>` and confirm it still applies at HEAD.
 
-1. Read `$(git rev-parse --show-toplevel)/LOGBOOK.md` before finalizing a plan.
-2. Use the raw history inventory as orientation, not a task-level risk score.
-3. Inspect every task path through bounded context pages:
+Findings are leads, not verdicts — a suppression event means "a human should
+look here," not misconduct. If the repo is shallow, offer
+`git fetch --unshallow` first.
 
-   ```bash
-   npx -y @promptwheel/logbook@latest context --file src/a.ts --file src/b.ts --revert
-   ```
+## Investigation mode (when the user asks to dig into findings)
 
-   If output says `NEXT`, repeat the identical filters with `--cursor TOKEN`
-   until `END complete` before concluding history is absent.
-4. Treat findings as leads, not verdicts. Verify every material claim with
-   `git show SHA` and confirm it still applies to the current tree.
-5. Before finalizing a change, run the decision preflight for the actual diff:
+For each Notable event or flagged lead worth pursuing: `git show <sha>` the
+commit, read the actual diff, and classify it — real weakening / sanctioned
+maintenance / classifier artifact — with one line of evidence each. Check
+whether flagged suppressions are STILL in the current tree (grep HEAD for
+the skip/ignore near the flagged location). Present the triage as YOUR
+judgment layered on the deterministic record — never edit the logbook files
+to match your conclusions; the record and the reading stay separate.
 
-   ```bash
-   npx -y @promptwheel/logbook@latest check --diff
-   # in a PR/CI range:
-   npx -y @promptwheel/logbook@latest check --diff --base BASE --head HEAD
-   ```
-
-   Follow every `NEXT` cursor. Intermediate pages exit nonzero because later
-   cards are unchecked; only `END complete` can finish cleanly.
-
-If artifacts or wiring look stale, run
-`npx -y @promptwheel/logbook@latest doctor`. Doctor is read-only; do not treat
-it as a refresh.
-
-## Decision authority
-
-Logbook has four storage planes:
-
-- `.logbook/drafts/`: local, gitignored, inert proposals;
-- `.logbook/leads/`: committed policy-published machine leads;
-- `.logbook/decisions/`: committed human-reviewed decisions; and
-- `.logbook/reviews/`: committed reviewer provenance bound to exact bytes.
-
-`check --diff` labels machine leads as lower authority. A decision is
-`human-reviewed` only when its exact card bytes have a matching review record
-on the trusted Git ref. In a range check, the base commit supplies trust, so a
-PR cannot approve itself.
-
-Never infer authority from model confidence. Mechanical grounding proves only
-that a quote occurs in the named commit message, or was introduced/removed in
-the named changed file. It does not prove the interpretation, causality, or
-current applicability.
-
-The committed ref and its branch protections are the authority boundary.
-`--by` is attribution, not identity proof.
-
-## Lazy enrichment: preserve what you actually investigate
-
-When related work causes you to investigate why a prior change happened,
-persist the verified result immediately as an explicitly unreviewed digest
-note. Do not prompt a human and never annotate a guess:
+PERSIST what you learn (lazy enrichment): when an investigation establishes
+WHY something happened — a revert's failure mode, a suppression's cause —
+save it so the next session gets it free instead of re-investigating:
 
 ```bash
-npx -y @promptwheel/logbook@latest annotate SHA "one specific claim" \
-  --span "exact bytes introduced or removed" \
-  --side diff \
-  --evidence-file path/to/file \
-  --by MODEL
+npx -y @promptwheel/logbook annotate SHA "one specific sentence" --by MODEL
 ```
 
-For commit-message evidence, use `--side message` and omit
-`--evidence-file`. Evidence is optional for the low-friction note, but any
-supplied quote must ground exactly or the command abstains. The note appears in
-`LOGBOOK.md` immediately, is always labeled machine-authored and unreviewed,
-and is never consumed by `check --diff`.
+Annotations are sha-keyed, attributed, dated, and merged into LOGBOOK.md as
+"why (inferred)" lines immediately when a usable ledger exists, otherwise on
+the next run. Judgments, not records: only annotate
+causes you verified in the actual diffs, and treat old annotations as aged
+testimony — the fact never changes, but its force can (a "reverted because
+webpack4 broke" constraint stops binding once webpack4 is dead).
 
-Never paraphrase into `--span`, stitch excerpts, or attach an attractive claim
-to an unrelated real substring. Preserve one decision you actually
-investigated at a time; do not bulk-generate rationale across history.
+## Querying the full record (events.jsonl)
 
-### Optional human-reviewed card
-
-Only when a finding specifically needs repository authority, create a separate
-inert card and report its full ID:
+The digest truncates with "…and N more — full record in events.jsonl". When
+completeness matters, query the record — never read it whole (it can exceed the
+context window). Start with task paths and event type before broad terms:
 
 ```bash
-npx -y @promptwheel/logbook@latest annotate-draft SHA "one specific claim" \
-  --span "exact bytes" --side diff --evidence-file path/to/file --by MODEL
-npx -y @promptwheel/logbook@latest pending
-# Human-only:
-# npx -y @promptwheel/logbook@latest accept-draft FULL_CARD_ID --by HUMAN
+# every revert touching a file
+npx -y @promptwheel/logbook query --file lib/response.js --revert
+# all assertion-weakening events (3+ net) since a date
+npx -y @promptwheel/logbook query --weaken 3 --since 2024-01-01
+# all suppression events, era-scoped
+npx -y @promptwheel/logbook query --suppress --since 2024-01-01
 ```
 
-Never run `accept`, `accept-draft`, `accept-lead`, or `reject-lead` on the
-human's behalf. Those commands record human disposition; `accept` is only a
-compatibility alias for `accept-draft`.
+Use broad `--grep` only after path/event filters. If output says `TRUNCATED`,
+narrow with `--file`/`--revert`/dates or raise `--limit` before concluding that
+history is absent or complete. A renamed file can evade a current-path filter;
+broaden deliberately and verify lineage with raw Git.
 
-To seed a mature repository on demand, use the deterministic worklist:
-
-```bash
-npx -y @promptwheel/logbook@latest refine
-```
-
-`refine` names unannotated notable commits. It does not generate claims. Work
-each item through the same inspect → verify → cite → annotate loop.
-
-## Policy-published machine leads
-
-A repository owner may opt into automatic lower-authority publication with a
-committed `.logbook/policy.toml`. Only when that policy is already enabled and
-the task calls for automatic publication may an agent pass candidate JSON to:
-
-```bash
-npx -y @promptwheel/logbook@latest publish --candidates candidates.json
-```
-
-The CLI independently reloads the committed policy and enforces source
-ancestry, raw-object grounding, allowed/protected scopes, quotas, and the
-`.logbook/AUTOMATION_DISABLED` kill switch. Published cards remain machine
-leads; policy publication never makes them human-reviewed.
-
-Do not treat `logbook outcomes` as semantic accuracy. It reports only the
-Git-observable disposition funnel: accepted as-is, accepted with edits,
-explicitly rejected, pending, or vanished without review (unmeasurable).
-
-## Related-work reinforcement
-
-There is deliberately no machine `verify` command and no confirmation counter.
-Repeated confirmations from the same model are correlated and can create a
-self-reinforcing hallucination.
-
-When current work contradicts or ages a surfaced decision:
-
-1. gather concrete evidence;
-2. report the conflict and card ID to the human;
-3. do not silently edit, retire, or promote the card.
-
-This release supports initial drafting/promotion and machine-lead
-accept/edit/reject. It does not yet provide first-class commands to revise or
-retire an already accepted decision. A manual edit breaks the review binding
-and therefore cannot remain authoritative.
-
-## Investigation mode
-
-For each notable event worth pursuing, inspect `git show SHA`, read the actual
-diff, and classify it as real weakening, sanctioned maintenance, or classifier
-artifact with one line of evidence. Check whether suppressions are still in
-HEAD. Present your judgment layered on the deterministic record; never edit
-generated history artifacts to match your conclusion.
-
-## Querying the full event record
-
-Use bounded `context` pages for agent consumption:
-
-```bash
-npx -y @promptwheel/logbook@latest context --file lib/response.js --file lib/session.js --revert
-npx -y @promptwheel/logbook@latest context --file src/core.js --weaken 3 --since 2024-01-01
-npx -y @promptwheel/logbook@latest context --file test/core.test.js --suppress --since 2024-01-01
-```
-
-Use raw `query` only when machine-readable JSONL is required. If it says
-`TRUNCATED`, narrow filters or raise `--limit`. Renames can evade a current-path
-filter; broaden deliberately and verify lineage with raw Git.
+Digest for breadth, queries for depth. Measured: digest alone found 4/12
+qualifying commits on a real task; digest + two logbook queries found 12/12 for
+~400 extra tokens.
 
 ## Generating instructions for other agents
 
-Preserve the ordered workflow: locate task paths, read the brief, inspect all
-task paths through `NEXT` to `END complete`, verify leads with `git show`, then
-run `check --diff`. Preserve the authority-tier labels and “leads, not
-verdicts” doctrine. Never replace the dependency with generic Git advice in a
-repo already wired for Logbook.
+When you generate onboarding docs, AGENTS.md/CLAUDE.md blocks, or reusable
+prompts for a repository that already uses the logbook, preserve the ordered
+workflow: identify task paths from the current tree, follow the compact brief's
+Action line, query those paths before planning or editing, recover from
+`TRUNCATED`, then verify material leads with `git show`. Preserve exact
+operational commands and the "leads, not verdicts" doctrine. Do not replace the
+dependency with generic Git advice: synthesis measurably loses do-not-retry and
+epistemic caution. This applies only to wired repositories; never insert
+Logbook into an unrelated repository.

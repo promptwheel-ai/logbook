@@ -22,6 +22,7 @@ import {
   normalizeScope, scopeMatches, appendPrivateLine, groundStatus,
   decisionCardId, validDecisionCard, serializeDecisionCard, parseDecisionCard, DECISION_SCHEMA,
   checkDecisions, renderDecisionLeads, parsePolicy, publishPolicyLeads, withPublishLock, readPlane, LEGACY_BLOCKS,
+  REPO_MEMORY_BLOCK,
   CHECK_PAGE_MAX_ITEMS, CHECK_PAGE_MAX_BYTES,
   acceptLead, rejectLead, computeReviewOutcomes, renderReviewOutcomes, renderPublish,
   annotateDraft, acceptDraft, parseReview, serializeReview, REVIEW_SCHEMA,
@@ -1594,11 +1595,13 @@ test("init wires the repo once, idempotently, into existing agent files", () => 
   assert.match(agents, /Read LOGBOOK\.md.*completely before any history query/);
   assert.match(agents, /context --file path\/to\/file --revert/);
   assert.match(agents, /Repeat --file.*NEXT.*--cursor TOKEN.*END complete/s);
-  assert.match(agents, /leads, not verdicts.*raw Git evidence/s);
-  assert.match(agents, /annotate SHA.*--span.*--side diff.*--evidence-file/s);
-  assert.match(agents, /accept-draft CARD_ID --by WHO/);
-  assert.match(agents, /Never run accept, accept-draft, accept-lead, or reject-lead/);
-  assert.match(agents, /check --diff.*NEXT.*--cursor TOKEN.*END complete/s);
+  assert.match(agents, /leads, not verdicts.*git show SHA/s);
+  assert.match(agents, /audit\n/);
+  assert.match(agents, /annotate SHA "one specific sentence" --by MODEL/);
+  // the lean block is the deterministic layer only: the opt-in reviewed-decision
+  // commands are documented in docs/reviewed-decisions.md, never wired
+  assert.doesNotMatch(agents, /annotate-draft|pending|accept-draft|accept-lead|reject-lead|check --diff|--span/);
+  assert.equal(agents, REPO_MEMORY_BLOCK, "a fresh AGENTS.md is exactly the generated block");
   // The pin is whatever package.json says, never a literal that goes stale at the next bump.
   const pkgVersion = JSON.parse(readFileSync(join(dirname(CLI), "..", "package.json"), "utf8")).version;
   assert.match(pkgVersion, /^\d+\.\d+\.\d+$/);
@@ -1607,9 +1610,7 @@ test("init wires the repo once, idempotently, into existing agent files", () => 
   const pinned = pkgVersion.replaceAll(".", "\\.");
   assert.match(agents, new RegExp(`npx -y @promptwheel/logbook@${pinned} context`),
     "generated workflow pins the package that authored it instead of npm latest");
-  assert.match(agents, new RegExp(`npx -y @promptwheel/logbook@${pinned} pending`),
-    "the optional review handoff works even when the package is only invoked through npx");
-  assert.doesNotMatch(agents, /Then run logbook pending/);
+  assert.match(agents, new RegExp(`npx -y @promptwheel/logbook@${pinned} annotate SHA`));
   assert.doesNotMatch(agents, /@promptwheel\/logbook context/);
   // Claude Code reads CLAUDE.md, not AGENTS.md — fresh repos get the import bridge
   assert.equal(readFileSync(join(d, "CLAUDE.md"), "utf8"), "@AGENTS.md\n", "bridge created");
@@ -1788,9 +1789,9 @@ test("init migrates prior generated blocks; user-edited blocks stay", () => {
     "a normal refresh migrates the released query block to bounded context traversal");
   assert.doesNotMatch(migratedContext, /TRUNCATED/);
   assert.doesNotMatch(migratedContext, /Historical signal|LOW|MEDIUM|HIGH/);
-  assert.match(migratedContext, /accept-draft CARD_ID --by WHO/);
-  assert.match(migratedContext, /Never run accept, accept-draft, accept-lead, or reject-lead/);
-  assert.match(migratedContext, /check --diff.*NEXT.*END complete/s);
+  assert.match(migratedContext, /annotate SHA "one specific sentence" --by MODEL/);
+  assert.doesNotMatch(migratedContext, /annotate-draft|pending|accept-draft|check --diff/,
+    "the migrated block is the lean deterministic workflow");
   rmSync(d3, { recursive: true, force: true });
 
   const d4 = mkdtempSync(join(tmpdir(), "logbook-migrate-older-release-refresh-"));
@@ -1802,8 +1803,8 @@ test("init migrates prior generated blocks; user-edited blocks stay", () => {
   execFileSync(process.execPath, [CLI, d4], { encoding: "utf8" });
   const migratedOlder = readFileSync(join(d4, "AGENTS.md"), "utf8");
   assert.doesNotMatch(migratedOlder, /Historical signal|LOW|MEDIUM|HIGH/);
-  assert.match(migratedOlder, /check --diff.*NEXT.*END complete/s,
-    "normal refresh upgrades older exact released wiring to the plane preflight");
+  assert.ok(migratedOlder.includes(REPO_MEMORY_BLOCK),
+    "normal refresh upgrades older exact released wiring to the current block");
   rmSync(d4, { recursive: true, force: true });
 
   const d5 = mkdtempSync(join(tmpdir(), "logbook-migrate-unpinned-plane-"));
@@ -1855,8 +1856,9 @@ If output says NEXT, repeat with --cursor TOKEN until END complete.
   execFileSync(process.execPath, [CLI, d6], { encoding: "utf8" });
   const migrated090 = readFileSync(join(d6, "AGENTS.md"), "utf8");
   assert.match(migrated090, new RegExp(`@promptwheel/logbook@${PACKAGE_VERSION.replaceAll(".", "\\.")} annotate SHA`));
-  assert.match(migrated090, /unreviewed digest note[\s\S]*annotate-draft/,
-    "the exact released 0.9.0 workflow migrates to the restored note/card split");
+  assert.match(migrated090, /unreviewed digest note/,
+    "the exact released 0.9.0 workflow migrates to the immediate note");
+  assert.doesNotMatch(migrated090, /annotate-draft|pending|accept-draft|check --diff/);
   rmSync(d6, { recursive: true, force: true });
 
   const d7 = mkdtempSync(join(tmpdir(), "logbook-migrate-pinned-091-plane-"));
@@ -1864,7 +1866,9 @@ If output says NEXT, repeat with --cursor TOKEN until END complete.
     GIT_AUTHOR_NAME: "H", GIT_AUTHOR_EMAIL: "h@x.io", GIT_COMMITTER_NAME: "H", GIT_COMMITTER_EMAIL: "h@x.io" } });
   g7("init", "-q"); writeFileSync(join(d7, "a.js"), "let x = 1;\n");
   g7("add", "-A"); g7("commit", "-q", "-m", "base");
-  const pinned091 = currentPinned.replaceAll(NPX_COMMAND, "npx -y @promptwheel/logbook@0.9.1");
+  // 0.9.1 wrote the plane template; the lean block pinned to 0.9.1 never existed
+  const pinned091 = LEGACY_BLOCKS.find((block) => block.includes("npx -y @promptwheel/logbook@0.9.1 context --file"));
+  assert.ok(pinned091 && pinned091.includes("check --diff"), "the 0.9.1 plane block is a migration source");
   const edited091 = pinned091.replace(
     "Before planning or editing:",
     "Before planning or editing:\nCUSTOM USER LINE — leave this block alone",
@@ -1907,16 +1911,45 @@ test("LEGACY_BLOCKS keeps every byte-exact literal the two former lists held", (
   assert.equal(new Set(LEGACY_BLOCKS).size, LEGACY_BLOCKS.length, "no duplicate literals");
   for (const block of LEGACY_BLOCKS) {
     assert.ok(block.startsWith("\n## Repo memory\n"), "every legacy literal is a whole block");
-    assert.ok(!block.includes(NPX_COMMAND), "the current release's own block is not a migration source");
+    assert.notEqual(block, REPO_MEMORY_BLOCK, "the current release's own block is not a migration source");
   }
-  // Every earlier 0.9.x release pinned the same template to its own version;
-  // each of those pinned blocks must be a migration source or an upgrade
-  // leaves the repo's wiring stale with nothing able to refresh it.
+  // Every earlier 0.9.x release pinned the plane template to its own version,
+  // and pre-release builds of this version did too; each of those pinned
+  // blocks must be a migration source or an upgrade leaves the repo's wiring
+  // stale with nothing able to refresh it.
   const patch = /^0\.9\.(\d+)$/.exec(PACKAGE_VERSION);
   assert.ok(patch, "the 0.9 line is what this test knows how to enumerate");
-  for (let p = 1; p < Number(patch[1]); p++) {
-    assert.ok(LEGACY_BLOCKS.some((block) => block.includes(`npx -y @promptwheel/logbook@0.9.${p} context --file`)),
+  for (let p = 1; p <= Number(patch[1]); p++) {
+    assert.ok(LEGACY_BLOCKS.some((block) => block.includes(`npx -y @promptwheel/logbook@0.9.${p} context --file`) &&
+      block.includes(`npx -y @promptwheel/logbook@0.9.${p} check --diff`)),
       `the 0.9.${p} pinned plane block is a migration source`);
+  }
+});
+
+test("the plane template this version wrote before the lean block migrates on a normal refresh", () => {
+  const d = mkdtempSync(join(tmpdir(), "logbook-migrate-plane-current-"));
+  const env = { ...process.env, NO_COLOR: "1",
+    GIT_AUTHOR_NAME: "H", GIT_AUTHOR_EMAIL: "h@x.io", GIT_COMMITTER_NAME: "H", GIT_COMMITTER_EMAIL: "h@x.io" };
+  delete env.FORCE_COLOR;
+  const g = (...a) => execFileSync("git", ["-C", d, ...a], { env });
+  try {
+    g("init", "-q"); writeFileSync(join(d, "a.js"), "let x = 1;\n");
+    g("add", "-A"); g("commit", "-q", "-m", "base");
+    const previous = LEGACY_BLOCKS.find((block) => block.includes(`${NPX_COMMAND} check --diff`));
+    assert.ok(previous, "the plane template pinned to this version is a migration source");
+    writeFileSync(join(d, "AGENTS.md"), `# Rules\nBe nice.\n${previous}`);
+    const stale = spawnSync(process.execPath, [CLI, "doctor", d], { env, encoding: "utf8" });
+    assert.equal(stale.status, 1, "doctor reports the plane-era block as not current");
+    const out = execFileSync(process.execPath, [CLI, d], { env, encoding: "utf8" });
+    assert.match(out, /updated AGENTS\.md\s+repo-memory workflow refreshed/);
+    assert.equal(readFileSync(join(d, "AGENTS.md"), "utf8"), `# Rules\nBe nice.\n${REPO_MEMORY_BLOCK}`,
+      "the exact plane block is replaced by the lean block, surrounding text untouched");
+    const healthy = spawnSync(process.execPath, [CLI, "doctor", d], { env, encoding: "utf8" });
+    assert.equal(healthy.status, 0, `${healthy.stdout}${healthy.stderr}`);
+    execFileSync(process.execPath, [CLI, d], { env, encoding: "utf8" });
+    assert.equal(readFileSync(join(d, "AGENTS.md"), "utf8"), `# Rules\nBe nice.\n${REPO_MEMORY_BLOCK}`, "stable afterwards");
+  } finally {
+    rmSync(d, { recursive: true, force: true });
   }
 });
 
@@ -1931,7 +1964,9 @@ test("a block pinned by the previous release migrates on a normal refresh and th
     g("add", "-A"); g("commit", "-q", "-m", "base");
     execFileSync(process.execPath, [CLI, "init", d, "-q"], { env, encoding: "utf8" });
     const current = readFileSync(join(d, "AGENTS.md"), "utf8");
-    const previous = current.replaceAll(NPX_COMMAND, "npx -y @promptwheel/logbook@0.9.5");
+    // 0.9.5 wrote the plane template pinned to itself; that exact block is what an upgrading repo holds
+    const previous = LEGACY_BLOCKS.find((block) => block.includes("npx -y @promptwheel/logbook@0.9.5 context --file"));
+    assert.ok(previous, "the 0.9.5 plane block is a migration source");
     assert.notEqual(previous, current);
     writeFileSync(join(d, "AGENTS.md"), previous);
     const stale = spawnSync(process.execPath, [CLI, "doctor", d], { env, encoding: "utf8" });
@@ -1946,7 +1981,7 @@ test("a block pinned by the previous release migrates on a normal refresh and th
   }
 });
 
-test("doctor requires only the deterministic workflow lines, not the experimental ones", () => {
+test("doctor requires exactly the deterministic workflow lines the lean block carries", () => {
   const d = mkdtempSync(join(tmpdir(), "logbook-doctor-core-lines-"));
   const env = { ...process.env, NO_COLOR: "1",
     GIT_AUTHOR_NAME: "H", GIT_AUTHOR_EMAIL: "h@x.io", GIT_COMMITTER_NAME: "H", GIT_COMMITTER_EMAIL: "h@x.io" };
@@ -1958,18 +1993,26 @@ test("doctor requires only the deterministic workflow lines, not the experimenta
     g("add", "-A"); g("commit", "-q", "-m", "base");
     execFileSync(process.execPath, [CLI, "init", d, "-q"], { env, encoding: "utf8" });
     const wired = readFileSync(join(d, "AGENTS.md"), "utf8");
-    const cut = wired.indexOf("For a decision that specifically needs human authority");
-    assert.ok(cut > 0, "the generated block carries the experimental lines after the core ones");
-    const coreOnly = wired.slice(0, cut);
-    assert.doesNotMatch(coreOnly, /annotate-draft|pending|accept-draft|check --diff/);
-    writeFileSync(join(d, "AGENTS.md"), coreOnly);
-    const hidden = doctor();
-    assert.equal(hidden.status, 0, hidden.stdout + hidden.stderr);
-    assert.match(hidden.stdout, /PASS agent wiring: AGENTS\.md has the current context workflow/);
-    writeFileSync(join(d, "AGENTS.md"), coreOnly.replace(`${NPX_COMMAND} context --file path/to/file --revert`, "context removed"));
-    const broken = doctor();
-    assert.equal(broken.status, 1, "a missing deterministic line is still a failure");
-    assert.match(broken.stdout, /FAIL agent wiring: AGENTS\.md is missing part of the current history workflow/);
+    assert.doesNotMatch(wired, /annotate-draft|pending|accept-draft|check --diff/,
+      "the generated block has no experimental lines to hide");
+    const healthy = doctor();
+    assert.equal(healthy.status, 0, healthy.stdout + healthy.stderr);
+    assert.match(healthy.stdout, /PASS agent wiring: AGENTS\.md has the current context workflow/);
+    // a user may append the opt-in lines after the block; doctor does not care either way
+    writeFileSync(join(d, "AGENTS.md"), `${wired}Before finalizing work, run ${NPX_COMMAND} check --diff.\n`);
+    assert.equal(doctor().status, 0, "extra opt-in lines are not a health signal");
+    for (const [label, removed] of [
+      ["context line", `${NPX_COMMAND} context --file path/to/file --revert`],
+      ["git show verification", "git show SHA"],
+      ["annotate line", `${NPX_COMMAND} annotate SHA "one specific sentence"`],
+      ["END complete loop", "until END complete"],
+    ]) {
+      assert.ok(wired.includes(removed), `${label} is in the generated block`);
+      writeFileSync(join(d, "AGENTS.md"), wired.replace(removed, "line removed"));
+      const broken = doctor();
+      assert.equal(broken.status, 1, `removing the ${label} is a failure`);
+      assert.match(broken.stdout, /FAIL agent wiring: AGENTS\.md is missing part of the current history workflow/);
+    }
   } finally {
     rmSync(d, { recursive: true, force: true });
   }
