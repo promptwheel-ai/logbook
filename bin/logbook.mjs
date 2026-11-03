@@ -4027,6 +4027,11 @@ export function hasClaudeImport(text, target) {
 
 const DOCTOR_RANK = { pass: 0, warn: 1, fail: 2 };
 
+// Only the deterministic workflow is required: read the digest, page every
+// relevant path to END complete, verify leads in raw Git, and record verified
+// findings as unreviewed notes. The opt-in reviewed-decision lines
+// (annotate-draft, pending, accept-draft, check --diff) may be absent; a block
+// that hides the experimental layer is still current wiring.
 function currentWiringProblem(text) {
   const value = String(text);
   if (!value.includes("## Repo memory")) return "has no Repo memory block";
@@ -4034,12 +4039,7 @@ function currentWiringProblem(text) {
       !value.includes(`${NPX_COMMAND} context --file path/to/file --revert`) ||
       !/If output says NEXT[\s\S]*until END complete/.test(value) ||
       !/leads, not verdicts[\s\S]*raw Git evidence/.test(value) ||
-      !value.includes(`${NPX_COMMAND} annotate SHA "one specific sentence"`) ||
-      !/unreviewed digest note[\s\S]*annotate-draft/.test(value) ||
-      !value.includes(`${NPX_COMMAND} pending`) ||
-      !value.includes("accept-draft CARD_ID --by WHO") ||
-      !/Never run[\s\S]*accept-draft[\s\S]*accept-lead[\s\S]*reject-lead/.test(value) ||
-      !/check --diff[\s\S]*NEXT[\s\S]*END complete/.test(value))
+      !value.includes(`${NPX_COMMAND} annotate SHA "one specific sentence"`))
     return "is missing part of the current history workflow";
   return "";
 }

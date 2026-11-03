@@ -1864,6 +1864,35 @@ test("a block pinned by the previous release migrates on a normal refresh and th
   }
 });
 
+test("doctor requires only the deterministic workflow lines, not the experimental ones", () => {
+  const d = mkdtempSync(join(tmpdir(), "logbook-doctor-core-lines-"));
+  const env = { ...process.env, NO_COLOR: "1",
+    GIT_AUTHOR_NAME: "H", GIT_AUTHOR_EMAIL: "h@x.io", GIT_COMMITTER_NAME: "H", GIT_COMMITTER_EMAIL: "h@x.io" };
+  delete env.FORCE_COLOR;
+  const g = (...a) => execFileSync("git", ["-C", d, ...a], { env });
+  const doctor = () => spawnSync(process.execPath, [CLI, "doctor", d], { env, encoding: "utf8" });
+  try {
+    g("init", "-q"); writeFileSync(join(d, "a.js"), "let x = 1;\n");
+    g("add", "-A"); g("commit", "-q", "-m", "base");
+    execFileSync(process.execPath, [CLI, "init", d, "-q"], { env, encoding: "utf8" });
+    const wired = readFileSync(join(d, "AGENTS.md"), "utf8");
+    const cut = wired.indexOf("For a decision that specifically needs human authority");
+    assert.ok(cut > 0, "the generated block carries the experimental lines after the core ones");
+    const coreOnly = wired.slice(0, cut);
+    assert.doesNotMatch(coreOnly, /annotate-draft|pending|accept-draft|check --diff/);
+    writeFileSync(join(d, "AGENTS.md"), coreOnly);
+    const hidden = doctor();
+    assert.equal(hidden.status, 0, hidden.stdout + hidden.stderr);
+    assert.match(hidden.stdout, /PASS agent wiring: AGENTS\.md has the current context workflow/);
+    writeFileSync(join(d, "AGENTS.md"), coreOnly.replace(`${NPX_COMMAND} context --file path/to/file --revert`, "context removed"));
+    const broken = doctor();
+    assert.equal(broken.status, 1, "a missing deterministic line is still a failure");
+    assert.match(broken.stdout, /FAIL agent wiring: AGENTS\.md is missing part of the current history workflow/);
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
+});
+
 test("audit on a suppression-free repo is clean, not an error", () => {
   // regression: git() discarded the exit status, so grep's "no matches"
   // (exit 1) was indistinguishable from a real failure and audit threw
