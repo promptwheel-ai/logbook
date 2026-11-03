@@ -4,10 +4,6 @@
 git history as agent memory, for clients without a shell (Claude Desktop,
 Cursor, and any MCP client).
 
-> **0.5 instrumented alpha.** `0.5.1` is the current release on npm (the `latest`
-> tag); the setup blocks below pin it. The decision layer is an instrumented
-> alpha, not a lifecycle-complete platform.
-
 ## Tools
 
 - **logbook_digest** - the history digest: hotspots, do-not-retry reverts,
@@ -41,7 +37,7 @@ Claude Desktop (JSON config):
 ```json
 {
   "mcpServers": {
-    "logbook": { "command": "npx", "args": ["-y", "@promptwheel/logbook-mcp@0.5.1"] }
+    "logbook": { "command": "npx", "args": ["-y", "@promptwheel/logbook-mcp@latest"] }
   }
 }
 ```
@@ -51,11 +47,11 @@ Codex CLI (TOML - `~/.codex/config.toml`, or per-project `.codex/config.toml`):
 ```toml
 [mcp_servers.logbook]
 command = "npx"
-args = ["-y", "@promptwheel/logbook-mcp@0.5.1"]
+args = ["-y", "@promptwheel/logbook-mcp@latest"]
 ```
 
 or the one-liner:
-`codex mcp add logbook -- npx -y @promptwheel/logbook-mcp@0.5.1`.
+`codex mcp add logbook -- npx -y @promptwheel/logbook-mcp@latest`.
 Exposing tools is not the same as using them - keep an AGENTS.md line telling
 the agent when to call logbook_digest.
 
@@ -71,5 +67,11 @@ uses `resetTimeoutOnProgress: true`); without that opt-in, a cold build on
 a large repo can still hit the client's timeout - run the CLI once to
 create the ledger if that bites. Zero network calls; the analysis is git,
 running locally.
+
+## Releasing
+
+The server reports the version in its own `package.json`. `server.json` (the
+MCP Registry listing) is not read at runtime and must be bumped by hand to the
+same number; the behavioral test fails when the two drift.
 
 Apache 2.0. The logbook records what happened; the check verifies what holds.

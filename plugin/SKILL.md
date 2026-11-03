@@ -12,10 +12,10 @@ description: >-
 # Logbook
 
 ```bash
-npx -y @promptwheel/logbook@0.9.5              # refresh history and render any existing notes
-npx -y @promptwheel/logbook@0.9.5 journey      # the story, in color (writes nothing)
-npx -y @promptwheel/logbook@0.9.5 doctor       # read-only artifact/wiring/query health
-npx -y @promptwheel/logbook@0.9.5 --json       # full JSONL, writes nothing; for tooling not agent context (use context, below)
+npx -y @promptwheel/logbook@latest              # refresh history and render any existing notes
+npx -y @promptwheel/logbook@latest journey      # the story, in color (writes nothing)
+npx -y @promptwheel/logbook@latest doctor       # read-only artifact/wiring/query health
+npx -y @promptwheel/logbook@latest --json       # full JSONL, writes nothing; for tooling not agent context (use context, below)
 ```
 
 The CLI runs locally and never changes source or Git history. It writes its own
@@ -31,7 +31,7 @@ After locating task-relevant files:
 3. Inspect every task path through bounded context pages:
 
    ```bash
-   npx -y @promptwheel/logbook@0.9.5 context --file src/a.ts --file src/b.ts --revert
+   npx -y @promptwheel/logbook@latest context --file src/a.ts --file src/b.ts --revert
    ```
 
    If output says `NEXT`, repeat the identical filters with `--cursor TOKEN`
@@ -41,16 +41,16 @@ After locating task-relevant files:
 5. Before finalizing a change, run the decision preflight for the actual diff:
 
    ```bash
-   npx -y @promptwheel/logbook@0.9.5 check --diff
+   npx -y @promptwheel/logbook@latest check --diff
    # in a PR/CI range:
-   npx -y @promptwheel/logbook@0.9.5 check --diff --base BASE --head HEAD
+   npx -y @promptwheel/logbook@latest check --diff --base BASE --head HEAD
    ```
 
    Follow every `NEXT` cursor. Intermediate pages exit nonzero because later
    cards are unchecked; only `END complete` can finish cleanly.
 
 If artifacts or wiring look stale, run
-`npx -y @promptwheel/logbook@0.9.5 doctor`. Doctor is read-only; do not treat
+`npx -y @promptwheel/logbook@latest doctor`. Doctor is read-only; do not treat
 it as a refresh.
 
 ## Decision authority
@@ -82,7 +82,7 @@ persist the verified result immediately as an explicitly unreviewed digest
 note. Do not prompt a human and never annotate a guess:
 
 ```bash
-npx -y @promptwheel/logbook@0.9.5 annotate SHA "one specific claim" \
+npx -y @promptwheel/logbook@latest annotate SHA "one specific claim" \
   --span "exact bytes introduced or removed" \
   --side diff \
   --evidence-file path/to/file \
@@ -105,11 +105,11 @@ Only when a finding specifically needs repository authority, create a separate
 inert card and report its full ID:
 
 ```bash
-npx -y @promptwheel/logbook@0.9.5 annotate-draft SHA "one specific claim" \
+npx -y @promptwheel/logbook@latest annotate-draft SHA "one specific claim" \
   --span "exact bytes" --side diff --evidence-file path/to/file --by MODEL
-npx -y @promptwheel/logbook@0.9.5 pending
+npx -y @promptwheel/logbook@latest pending
 # Human-only:
-# npx -y @promptwheel/logbook@0.9.5 accept-draft FULL_CARD_ID --by HUMAN
+# npx -y @promptwheel/logbook@latest accept-draft FULL_CARD_ID --by HUMAN
 ```
 
 Never run `accept`, `accept-draft`, `accept-lead`, or `reject-lead` on the
@@ -119,7 +119,7 @@ compatibility alias for `accept-draft`.
 To seed a mature repository on demand, use the deterministic worklist:
 
 ```bash
-npx -y @promptwheel/logbook@0.9.5 refine
+npx -y @promptwheel/logbook@latest refine
 ```
 
 `refine` names unannotated notable commits. It does not generate claims. Work
@@ -132,7 +132,7 @@ committed `.logbook/policy.toml`. Only when that policy is already enabled and
 the task calls for automatic publication may an agent pass candidate JSON to:
 
 ```bash
-npx -y @promptwheel/logbook@0.9.5 publish --candidates candidates.json
+npx -y @promptwheel/logbook@latest publish --candidates candidates.json
 ```
 
 The CLI independently reloads the committed policy and enforces source
@@ -174,9 +174,9 @@ generated history artifacts to match your conclusion.
 Use bounded `context` pages for agent consumption:
 
 ```bash
-npx -y @promptwheel/logbook@0.9.5 context --file lib/response.js --file lib/session.js --revert
-npx -y @promptwheel/logbook@0.9.5 context --file src/core.js --weaken 3 --since 2024-01-01
-npx -y @promptwheel/logbook@0.9.5 context --file test/core.test.js --suppress --since 2024-01-01
+npx -y @promptwheel/logbook@latest context --file lib/response.js --file lib/session.js --revert
+npx -y @promptwheel/logbook@latest context --file src/core.js --weaken 3 --since 2024-01-01
+npx -y @promptwheel/logbook@latest context --file test/core.test.js --suppress --since 2024-01-01
 ```
 
 Use raw `query` only when machine-readable JSONL is required. If it says

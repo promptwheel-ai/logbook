@@ -59,7 +59,8 @@ test("handshake and tool inventory", async () => {
   const init = await rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {},
     clientInfo: { name: "behavioral-test", version: "0.0.0" } });
   assert.equal(init.result.serverInfo.name, "logbook");
-  assert.equal(init.result.serverInfo.version, "0.5.1");
+  const declared = JSON.parse(readFileSync(join(dirname(SERVER), "package.json"), "utf8")).version;
+  assert.equal(init.result.serverInfo.version, declared, "the server advertises its package.json version");
   child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
   const tools = await rpc("tools/list", {});
   assert.deepEqual(tools.result.tools.map((t) => t.name).sort(),

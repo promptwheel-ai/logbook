@@ -6,6 +6,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import {
   collectEvents, diffScan, hotspots, analyze, renderLogbookMd,
   auditHead, queryEvents, loadEvents, annotateDraft,
@@ -13,6 +14,9 @@ import {
   formatContextPage, sanitizeContextText,
 } from "@promptwheel/logbook";
 
+// One version source: package.json. server.json (the registry listing) is
+// kept in step by hand and checked by the behavioral test.
+const MCP_VERSION = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8")).version;
 const DEFAULTS = { max: 20000, since: null, until: null };
 const fileFilterSchema = z.string().min(1).max(1024).refine(
   (value) => Buffer.byteLength(value, "utf8") <= 1024,
@@ -70,7 +74,7 @@ function progressFor(extra) {
   }).catch(() => {});
 }
 
-const server = new McpServer({ name: "logbook", version: "0.5.1" });
+const server = new McpServer({ name: "logbook", version: MCP_VERSION });
 
 server.registerTool(
   "logbook_digest",
