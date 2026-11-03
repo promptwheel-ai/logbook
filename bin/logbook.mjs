@@ -4396,7 +4396,7 @@ export const REPO_MEMORY_BLOCK = UNPINNED_REPO_MEMORY_BLOCK.replaceAll(
 // block a release writes is never its own migration source.
 // Add each release that shipped the LEAN block here when the next version is cut;
 // the test suite refuses a version bump that leaves the previous release unlisted.
-export const LEAN_TEMPLATE_RELEASES = ["0.9.7"];
+export const LEAN_TEMPLATE_RELEASES = ["0.9.7", "0.9.8"];
 const PINNED_LEAN_REPO_MEMORY_BLOCKS = LEAN_TEMPLATE_RELEASES
   .filter((version) => version !== PACKAGE_VERSION)
   .map((version) => UNPINNED_REPO_MEMORY_BLOCK.replaceAll(

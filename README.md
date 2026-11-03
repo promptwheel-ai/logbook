@@ -183,7 +183,7 @@ logbook outcomes [path]
 logbook export [path] --format okf --out NEW_DIR [--ref REF]
 ```
 
-## Upgrading to 0.9.8 (unreleased)
+## Upgrading to 0.9.8
 
 - The `## Repo memory` block that `init` writes is now the deterministic
   workflow only: read `LOGBOOK.md`, bounded `context --file` pages per task
