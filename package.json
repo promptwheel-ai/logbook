@@ -32,6 +32,8 @@
     "type": "git",
     "url": "git+https://github.com/promptwheel-ai/logbook.git"
   },
+  "homepage": "https://github.com/promptwheel-ai/logbook#readme",
+  "bugs": "https://github.com/promptwheel-ai/logbook/issues",
   "publishConfig": {
     "access": "public"
   },
