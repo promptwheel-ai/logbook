@@ -4474,3 +4474,11 @@ test("concurrent installed OKF exports yield one coherent winner and no staging 
   rmSync(d, { recursive: true, force: true });
   rmSync(parent, { recursive: true, force: true });
 });
+
+// ---------------------------------------------------- plugin skill: the npx call is pinned to the shipped version
+test("plugin/SKILL.md pins every npx call to this package version (bump the pin with the version)", () => {
+  const skill = readFileSync(new URL("../plugin/SKILL.md", import.meta.url), "utf8");
+  const calls = skill.match(/npx -y @promptwheel\/logbook(@[^\s`]+)?/g) || [];
+  assert.ok(calls.length >= 5, "the skill shows the npx calls");
+  for (const c of calls) assert.equal(c, `npx -y @promptwheel/logbook@${PACKAGE_VERSION}`, `unpinned or stale pin in plugin/SKILL.md: ${c}`);
+});
