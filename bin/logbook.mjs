@@ -4348,12 +4348,12 @@ Before finalizing work, run the decision preflight on the actual diff:
 npx -y @promptwheel/logbook check --diff
 If output says NEXT, repeat with --cursor TOKEN until END complete.
 `;
-// Every 0.9.x release from 0.9.1 to 0.9.6 wrote the plane template above
-// pinned to its own version, and pre-release 0.9.7 builds did too before the
-// lean block below replaced it. Each exact pinned block is a migration source,
+// Every 0.9.x release from 0.9.1 to 0.9.7 wrote the plane template above
+// pinned to its own version (0.9.8 is the first release that writes the lean
+// block below). Each exact pinned block is a migration source,
 // so a refresh by a newer release re-pins the wiring instead of leaving doctor
 // to report it as stale forever.
-const PLANE_TEMPLATE_RELEASES = ["0.9.1", "0.9.2", "0.9.3", "0.9.4", "0.9.5", "0.9.6", "0.9.7"];
+export const PLANE_TEMPLATE_RELEASES = ["0.9.1", "0.9.2", "0.9.3", "0.9.4", "0.9.5", "0.9.6", "0.9.7"];
 const PINNED_PLANE_REPO_MEMORY_BLOCKS = PLANE_TEMPLATE_RELEASES
   .map((version) => UNPINNED_PLANE_REPO_MEMORY_BLOCK.replaceAll(
     "npx -y @promptwheel/logbook",
@@ -4394,7 +4394,9 @@ export const REPO_MEMORY_BLOCK = UNPINNED_REPO_MEMORY_BLOCK.replaceAll(
 // Releases that shipped the lean template pinned to their own version. Append
 // the version when a release ships it. The current version is excluded: the
 // block a release writes is never its own migration source.
-const LEAN_TEMPLATE_RELEASES = ["0.9.7"];
+// Add each release that shipped the LEAN block here when the next version is cut;
+// the test suite refuses a version bump that leaves the previous release unlisted.
+export const LEAN_TEMPLATE_RELEASES = ["0.9.7"];
 const PINNED_LEAN_REPO_MEMORY_BLOCKS = LEAN_TEMPLATE_RELEASES
   .filter((version) => version !== PACKAGE_VERSION)
   .map((version) => UNPINNED_REPO_MEMORY_BLOCK.replaceAll(

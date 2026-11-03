@@ -22,6 +22,7 @@ import {
   normalizeScope, scopeMatches, appendPrivateLine, groundStatus,
   decisionCardId, validDecisionCard, serializeDecisionCard, parseDecisionCard, DECISION_SCHEMA,
   checkDecisions, renderDecisionLeads, parsePolicy, publishPolicyLeads, withPublishLock, readPlane, LEGACY_BLOCKS,
+  PLANE_TEMPLATE_RELEASES, LEAN_TEMPLATE_RELEASES,
   REPO_MEMORY_BLOCK,
   CHECK_PAGE_MAX_ITEMS, CHECK_PAGE_MAX_BYTES,
   acceptLead, rejectLead, computeReviewOutcomes, renderReviewOutcomes, renderPublish,
@@ -1913,20 +1914,27 @@ test("LEGACY_BLOCKS keeps every byte-exact literal the two former lists held", (
     assert.ok(block.startsWith("\n## Repo memory\n"), "every legacy literal is a whole block");
     assert.notEqual(block, REPO_MEMORY_BLOCK, "the current release's own block is not a migration source");
   }
-  // Every earlier 0.9.x release pinned the plane template to its own version,
-  // and pre-release builds of this version did too; each of those pinned
-  // blocks must be a migration source or an upgrade leaves the repo's wiring
-  // stale with nothing able to refresh it.
+  // Every earlier 0.9.x release pinned its block (plane template through 0.9.7,
+  // the lean block from 0.9.8) to its own version; each pinned block must be a
+  // migration source or an upgrade leaves the repo's wiring stale with nothing
+  // able to refresh it. Bumping the version without listing the previous
+  // release in LEAN_TEMPLATE_RELEASES fails here on purpose.
   const patch = /^0\.9\.(\d+)$/.exec(PACKAGE_VERSION);
   assert.ok(patch, "the 0.9 line is what this test knows how to enumerate");
-  for (let p = 1; p <= Number(patch[1]); p++) {
-    assert.ok(LEGACY_BLOCKS.some((block) => block.includes(`npx -y @promptwheel/logbook@0.9.${p} context --file`) &&
-      block.includes(`npx -y @promptwheel/logbook@0.9.${p} check --diff`)),
-      `the 0.9.${p} pinned plane block is a migration source`);
-  }
+  for (let p = 1; p < Number(patch[1]); p++)
+    assert.ok(PLANE_TEMPLATE_RELEASES.includes(`0.9.${p}`) || LEAN_TEMPLATE_RELEASES.includes(`0.9.${p}`),
+      `release 0.9.${p} is listed as a plane or lean template release`);
+  for (const v of PLANE_TEMPLATE_RELEASES)
+    assert.ok(LEGACY_BLOCKS.some((block) => block.includes(`npx -y @promptwheel/logbook@${v} context --file`) &&
+      block.includes(`npx -y @promptwheel/logbook@${v} check --diff`)),
+      `the ${v} pinned plane block is a migration source`);
+  for (const v of LEAN_TEMPLATE_RELEASES.filter((x) => x !== PACKAGE_VERSION))
+    assert.ok(LEGACY_BLOCKS.some((block) => block.includes(`npx -y @promptwheel/logbook@${v} context --file`) &&
+      !block.includes("check --diff")),
+      `the ${v} pinned lean block is a migration source`);
 });
 
-test("the plane template this version wrote before the lean block migrates on a normal refresh", () => {
+test("the plane template the last plane release wrote migrates on a normal refresh", () => {
   const d = mkdtempSync(join(tmpdir(), "logbook-migrate-plane-current-"));
   const env = { ...process.env, NO_COLOR: "1",
     GIT_AUTHOR_NAME: "H", GIT_AUTHOR_EMAIL: "h@x.io", GIT_COMMITTER_NAME: "H", GIT_COMMITTER_EMAIL: "h@x.io" };
@@ -1935,8 +1943,9 @@ test("the plane template this version wrote before the lean block migrates on a 
   try {
     g("init", "-q"); writeFileSync(join(d, "a.js"), "let x = 1;\n");
     g("add", "-A"); g("commit", "-q", "-m", "base");
-    const previous = LEGACY_BLOCKS.find((block) => block.includes(`${NPX_COMMAND} check --diff`));
-    assert.ok(previous, "the plane template pinned to this version is a migration source");
+    const lastPlane = PLANE_TEMPLATE_RELEASES[PLANE_TEMPLATE_RELEASES.length - 1];
+    const previous = LEGACY_BLOCKS.find((block) => block.includes(`npx -y @promptwheel/logbook@${lastPlane} check --diff`));
+    assert.ok(previous, "the plane template pinned to the last plane release is a migration source");
     writeFileSync(join(d, "AGENTS.md"), `# Rules\nBe nice.\n${previous}`);
     const stale = spawnSync(process.execPath, [CLI, "doctor", d], { env, encoding: "utf8" });
     assert.equal(stale.status, 1, "doctor reports the plane-era block as not current");
