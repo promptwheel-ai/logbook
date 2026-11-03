@@ -151,7 +151,7 @@ export const GEN_PAT =
 // an older extractor must trigger a full rebuild, not survive the upgrade.
 // (4: event paths are complete, not a six-path display sample, so --file
 // queries cannot silently miss wide commits)
-// (5: burned during development before the fixed-width SHA change was complete)
+// (5: an interim value superseded before the fixed-width SHA change was complete)
 // (6: event.sha is a fixed 12-char fullSha prefix, independent of unrelated objects)
 // (7: baseline before the diff-scan line-length cap)
 // (8: skip diff lines longer than MAX_SCAN_LINE - a suppression or assertion never
@@ -195,14 +195,14 @@ export const STRONG_ASSERT_PAT = /\.toStrictEqual\(|\.toEqual\(|\.toBe\(|\.toMat
 export const WEAK_ASSERT_PAT = /\.toBeTruthy\(|\.toBeFalsy\(|\.toBeDefined\(|\.toBeUndefined\(|not\.toThrow\(\)|\.toHaveBeenCalled\(\)|assertTrue\(|assertIsNotNone\(/;
 export const REVERT_PAT = /revert|rollback|undo|back out/i;
 export const FIX_PAT = /\bfix|resolve|repair|bug\b/i;
-// The Threshold: the repo first accepting a gate (tests/CI) — the moment it got serious.
+// The Threshold: the repo first accepting a gate (tests/CI): the moment it got serious.
 export const GATE_PAT =
   /\b(add|set ?up|introduce|first).{0,20}(test|ci|workflow|jest|vitest|pipeline|coverage|lint)|\.github\/workflows|jest\.config|vitest\.config|first release|v?1\.0\.0|initial release/i;
 export const MENTOR_PAT = /claude\.md|\.claude|cursorrules|agents?\.md/i;
 
 // A suppression directive only functions in a comment or as call syntax.
 // Inside a quoted string or regex-source it is a MENTION (pattern tables,
-// test fixtures, docs generators) — not a live directive. Approximate but
+// test fixtures, docs generators), not a live directive. Approximate but
 // sound for directives: count unescaped quote chars before the match.
 // Directives that only function INSIDE a comment; every other idiom is call
 // or annotation syntax, so a match sitting after a comment opener is prose
@@ -221,7 +221,7 @@ export function isMention(line, idx, kind) {
   if (kind !== undefined && !COMMENT_DIRECTIVE.test(kind) &&
       /\/\/|\/\*|(^|\s)#(?!\[)|^\s*\*/.test(line.slice(0, idx))) return true;
   // a line that BEGINS with a bare regex literal (continuation of `X =` on
-  // the previous line) — not // or /* comments
+  // the previous line), not // or /* comments
   const t = line.trimStart();
   if (t[0] === "/" && t[1] !== "/" && t[1] !== "*") return true;
   // regex-literal context: an unclosed /… opened after = ( , : [ or return
@@ -230,7 +230,7 @@ export function isMention(line, idx, kind) {
 
 // Language-bound idioms only count in their own languages: @Disabled in a
 // .mjs file is prose ABOUT Java, not a disabled test. The original
-// calibrated set (JS/py families) stays ungated — those idioms are the
+// calibrated set (JS/py families) stays ungated; those idioms are the
 // lineage the fleet numbers were built on.
 export function kindAllowedInFile(kind, file) {
   const ext = ((file || "").match(/\.([a-z0-9_]+)$/i) || [, ""])[1].toLowerCase();
@@ -622,13 +622,13 @@ export function analyze(events, touched) {
     ? Math.max(1, Math.round((times[times.length - 1] - eraStart) / 86400000))
     : 0;
 
-  // Notable events: outliers worth seeing even in the digest —
+  // Notable events: outliers worth seeing even in the digest:
   // security-adjacent reverts, large assertion drops, suppression-dense commits.
   // Severity-ranked, not recency-sliced: a security-revert must never be pushed
   // out of the digest by recent routine churn.
   const isSecRevert = (e) => e.revert && /security|CVE-|vulnerab|exploit/i.test(e.subject);
   // Mass deletions (docs archival, module removal) lose thousands of asserts
-  // legitimately — they are not evaluator weakening; exclude them here.
+  // legitimately; they are not evaluator weakening; exclude them here.
   const isMassDeletion = (e) => e.dels > 4 * Math.max(e.adds, 1) && e.dels > 150;
   const notablePool = events.filter((e) =>
     isSecRevert(e) ||
@@ -806,7 +806,7 @@ export function renderLogbookMd(name, A, shallow, capped, noteInput = []) {
   for (const [f, c] of A.allHot) L.push(`- ${safePath(f)} - ${plural(c, "commit")}`);
   L.push(``);
   L.push(`## Do-not-retry: reverts / rollbacks (${A.reverts.length})`);
-  // truncate the OLD end — the recent reverts are the ones a session must see
+  // truncate the OLD end: the recent reverts are the ones a session must see
   if (A.reverts.length > 20) L.push(`- …${A.reverts.length - 20} earlier - full record in events.jsonl`);
   for (const e of A.reverts.slice(-20)) L.push(`- ${e.date} ${e.sha} ${safeSubject(e.subject)}`);
   L.push(``);
@@ -990,11 +990,11 @@ export function scanSuppressions(repo, { ref = "HEAD", paths = null, gate = true
 export function auditHead(repo, events) {
   const live = scanSuppressions(repo, { ref: "HEAD", gate: true });
   // join: heuristic-date everything from the ledger (cheap, approximate),
-  // sort, then blame-refine the entries that will actually be displayed —
+  // sort, then blame-refine the entries that will actually be displayed:
   // git blame gives the EXACT commit for each live line, at a bounded cost
   // regardless of how suppression-heavy the repo is. (Previously repos with
   // >120 findings skipped blame entirely and every entry inherited the
-  // file's EARLIEST skip date — pytest showed 2010 for a line from 2025.)
+  // file's EARLIEST skip date; pytest showed 2010 for a line from 2025.)
   const oldest = [...events].reverse();
   const heuristic = (item) => {
     let hit = oldest.find((e) => e.files?.includes(item.file) &&
@@ -1023,7 +1023,7 @@ export function auditHead(repo, events) {
   live.sort(byDate);
   // displayed entries get two precision passes, each bounded: (1) drop
   // matches sitting inside a multi-line string (pytest embeds whole test
-  // files with skip markers in triple-quoted fixtures — mentions, not
+  // files with skip markers in triple-quoted fixtures: mentions, not
   // directives; line-local isMention can't see that context, but here the
   // full file is available), then (2) blame the survivors for exact dates.
   const fileCache = new Map();
@@ -1052,7 +1052,7 @@ export function auditHead(repo, events) {
     return triple || tickOpen;
   };
   // PHPUnit's markTestSkipped/-Incomplete is almost always a conditional
-  // environment guard (`if (!extension_loaded(...))`) — gating, not debt.
+  // environment guard (`if (!extension_loaded(...))`): gating, not debt.
   // The annotation forms (@Disabled, [Ignore], Skip=, #[ignore]) are
   // unconditional by construction and need no such check.
   const isGuarded = (item) => {
@@ -1452,7 +1452,7 @@ export function formatContextPage({ repo, head, events, filters = {}, capped = f
 }
 
 // A scope is an exact repo-relative file OR a trailing-slash directory prefix.
-// No globs/regex/basename/symbol parsing — those are a retrieval system, out of
+// No globs/regex/basename/symbol parsing: those are a retrieval system, out of
 // alpha scope, and substring matching confuses foo/foobar.
 export function normalizeScope(raw) {
   let p = String(raw).replace(/\\/g, "/").replace(/^\.\/+/, "").replace(/\/{2,}/g, "/");
@@ -1496,12 +1496,12 @@ function okEvPath(v) {
   return typeof v === "string" && wellFormed(v) && !CTRL.test(v) && v.length > 0 && v.length <= MAX_EVPATH &&
     !/[*?\[\]]/.test(v) && normalizeScope(v) === v; // literal, normalized, no glob
 }
-// RAW-OBJECT grounding — presentation-independent. It NEVER parses `git show`,
+// RAW-OBJECT grounding, presentation-independent. It NEVER parses `git show`,
 // uses `<rev>:<path>`, walks revisions, or lets textconv / replace refs / grafts
 // interpret anything: it reads raw commit/tree/blob objects by explicit OID and
 // compares blob CONTENT. A diff span grounds iff it was INTRODUCED (verbatim in
 // the new blob and NOWHERE in the old) or REMOVED (the inverse); anything else
-// abstains — conservative on recall, but no false attribution. Merges are
+// abstains: conservative on recall, but no false attribution. Merges are
 // refused (a combined diff has no per-file attribution); a declared-but-missing
 // parent (shallow / graft) is unmeasurable and refused. `-z` carries
 // quoted / Unicode paths losslessly.
@@ -1511,7 +1511,7 @@ const MAX_DIFF_ENTRIES = 5000;      // a huge diff is UNMEASURABLE (can't afford
 const CARRY_BUDGET_BYTES = 64 << 20; // aggregate cap for the carry scan; exceeding it is UNMEASURABLE
 // All git object reads: --no-replace-objects (no replace refs) and
 // GIT_NO_LAZY_FETCH=1 (a partial/blob:none clone must NOT silently fetch a
-// missing blob over the network — it must fail, i.e. be treated as unmeasurable).
+// missing blob over the network; it must fail, i.e. be treated as unmeasurable).
 function gitBuf(repo, args, opts = {}) {
   return spawnSync("git", [...RAW_GIT_PREFIX, repo, "--no-replace-objects", ...args],
     { maxBuffer: MAX_GROUND_BYTES + (1 << 20), env: { ...process.env, ...RAW_GIT_ENV }, ...opts }); // Buffer stdout (no encoding)
@@ -1519,7 +1519,7 @@ function gitBuf(repo, args, opts = {}) {
 function gitObj(repo, args, opts = {}) { return gitBuf(repo, args, { encoding: "utf8", ...opts }); }
 // Raw commit object as bytes. Enforces the commit-header GRAMMAR (what git fsck
 // --strict requires): line 1 is the single tree, then zero-or-more parents, then
-// exactly one author and one committer — else it is malformed and refused.
+// exactly one author and one committer; else it is malformed and refused.
 function catCommit(repo, sha) {
   const r = gitBuf(repo, ["cat-file", "commit", sha]);
   if (r.status !== 0 || !r.stdout) return null;
@@ -1539,7 +1539,7 @@ function catCommit(repo, sha) {
   return { tree, parents, message: sep >= 0 ? buf.slice(sep + 2) : Buffer.alloc(0) };
 }
 // Does `needle` appear in ANY of `oids`' blobs? Deduplicated + read in ONE
-// `cat-file --batch` process with an aggregate byte budget — never thousands of
+// `cat-file --batch` process with an aggregate byte budget, never thousands of
 // processes or tens of GiB. "found" | "notfound" | "unmeasurable".
 function batchContains(repo, oids, needle) {
   const uniq = [...new Set(oids.filter((o) => o && !ZERO_OID.test(o)))];
@@ -1622,7 +1622,7 @@ export function groundStatus(repo, sha, span, side, evidenceFile) {
   if (!dir) return "absent";                              // present in both, or neither
   // Guard against an UNPAIRED low-similarity rename: if the span is carried by
   // the opposite side of ANY other changed file, it isn't uniquely this file's
-  // introduced/removed evidence — abstain. Deduped + batched + budgeted.
+  // introduced/removed evidence: abstain. Deduped + batched + budgeted.
   const oppOids = diff.filter((e) => e !== entry).map((e) => dir === "new" ? e.oldSha : e.newSha);
   const carried = batchContains(repo, oppOids, needle);
   if (carried === "unmeasurable") return "unmeasurable";
@@ -1631,8 +1631,8 @@ export function groundStatus(repo, sha, span, side, evidenceFile) {
 // ================= GIT-FILES decision platform (Stage 1: card model) =========
 // One committed file per decision. Authority tier = the PLANE (directory):
 // .logbook/decisions/ = human-reviewed; .logbook/leads/ = policy-published
-// (machine). Git provides what the journal hand-rolled — blob hash = content
-// integrity, history = revision chain, merge = concurrency — so NO revHash /
+// (machine). Git provides what the journal hand-rolled: blob hash = content
+// integrity, history = revision chain, merge = concurrency, so NO revHash /
 // supersedes / lock / CAS here. PORTED forward: canonical schema validation,
 // grounding, scope matching, provenance, trusted-base reads. `cardId` is a
 // STABLE HANDLE (= filename) assigned at draft; edits keep the file and git
@@ -1650,7 +1650,7 @@ function okScope(v) {
   return typeof v === "string" && wellFormed(v) && !CTRL.test(v) && v.length > 0 && v.length <= MAX_EVPATH &&
     !/[*?\[\]]/.test(v) && normalizeScope(v) === v;   // literal, normalized dir-or-file scope (no glob)
 }
-// Structural validity only — NOT content-anchored (cardId is a stable handle;
+// Structural validity only, NOT content-anchored (cardId is a stable handle;
 // git blob integrity replaces a content hash). Grounding is re-checked at read.
 export function validDecisionCard(c) {
   if (!c || typeof c !== "object" || Array.isArray(c)) return false;
@@ -1693,7 +1693,7 @@ export function parseDecisionCard(text) {
 
 // ---- Stage 2: the three planes + trusted-base check --------------------------
 // Planes are directories under .logbook/. Tier = plane. Reads come ONLY from a
-// trusted ref (BASE for a range, HEAD locally) — a PR's own HEAD can never
+// trusted ref (BASE for a range, HEAD locally); a PR's own HEAD can never
 // approve its own decisions. Each file's basename MUST equal its cardId (the id
 // anchor); a mismatch or non-canonical/invalid card is MALFORMED (surfaced,
 // never silently trusted). Only machine cards are re-grounded; a failed
@@ -1702,7 +1702,7 @@ export const DECISION_PLANE = "decisions";   // human-reviewed
 export const LEAD_PLANE = "leads";           // policy-published (machine)
 // Batched RAW read of a committed card plane. One `ls-tree` (with blob OIDs) + one
 // `cat-file --batch-check` (sizes, to skip missing/oversized without reading) +
-// size-bounded chunked `cat-file --batch` for content — instead of one `git show`
+// size-bounded chunked `cat-file --batch` for content, instead of one `git show`
 // per card (the O(cards) process wall). Reads each blob by its explicit tree OID, so
 // replace-refs/grafts cannot rewrite card content and the read is pinned to the tree
 // captured at ls-tree time. Fail-closed: enumeration/batch failure => unreadable;
@@ -2098,7 +2098,7 @@ export function renderDecisionLeads(res) {
 // (remove the lead). Safety: only a MACHINE lead, whose worktree file is a clean,
 // byte-identical, regular file, may be dispositioned; the leads dir is pinned (no symlink
 // escape); only the exact source+destination are staged; the human COMMITS the change.
-// NOTE: this measures REVIEW OUTCOMES, not semantic claim precision — a wrong claim a
+// NOTE: this measures REVIEW OUTCOMES, not semantic claim precision: a wrong claim a
 // human corrects still counts as "kept/edited". Genuine precision needs an explicit
 // correctness verdict + reviewer provenance, which is the plane review layer (Stage 4b).
 function dispositionLeadUnlocked(repo, cardId, dest, transform, by) {
@@ -3055,7 +3055,7 @@ export function renderPublish(r) {
 
 // ---- Stage 3: automatic mode (opt-in policy-published LEADS) -----------------
 // AUTONOMOUS mode publishes machine LEADS only (never human-reviewed decisions).
-// The ONLY authorization-capable, writing API is publishPolicyLeads — it does NOT
+// The ONLY authorization-capable, writing API is publishPolicyLeads; it does NOT
 // accept a caller-supplied policy: it resolves the trust ref to an immutable
 // commit, loads+validates the COMMITTED policy, checks the kill switch, evaluates
 // candidates, then (under a lock in git's common dir) revalidates and installs
@@ -3153,10 +3153,10 @@ function loadTrustedPolicy(repo, commit) {
   return { policy: p, text };
 }
 // Disabled if the trusted ref carries the marker (a worktree-only delete cannot
-// re-enable), OR any local entry exists at the path (lstat — a dangling symlink
+// re-enable), OR any local entry exists at the path (lstat: a dangling symlink
 // counts). Rechecked immediately before every install.
 function killSwitchEngaged(repo, commit) {
-  // committed marker at the trusted tree — fail CLOSED whenever its state cannot be
+  // committed marker at the trusted tree; fail CLOSED whenever its state cannot be
   // determined (unreadable tree, or an entry whose blob is unavailable): absent and
   // unmeasurable must not collapse into "not engaged".
   const ls = rawGitStatus(repo, ["ls-tree", "-z", commit, "--", ".logbook/AUTOMATION_DISABLED"]);
@@ -3194,7 +3194,7 @@ function ancestryStatus(repo, sha, ref) {
   if (r.status === 1 && !r.error && !(r.stderr || "").trim()) return "non-ancestor";
   return "unmeasurable";
 }
-// Scope + evidence authorization against a validated policy (pure — no writes).
+// Scope + evidence authorization against a validated policy (pure, no writes).
 function authorizeScopesEvidence(card, policy) {
   if (!card.scopes.every((s) => policy.allowedScopes.some((a) => scopeMatches(a, s)))) return { reason: "scope-not-allowed" };
   if (card.scopes.some((s) => policy.protectedPaths.some((pp) => scopesOverlap(s, pp)))) return { reason: "protected-scope" };
@@ -3328,7 +3328,7 @@ function installCard(dir, cardId, content) {
 // Returns { __lock:"timeout"|"error", error } if the lock is never acquired. On a
 // successful acquire, returns fn()'s result; if the lock cannot then be removed, the
 // result is flagged incomplete + nonzero + cleanupWarning (a leftover lock blocks the
-// next run — never report success while the lock is stuck).
+// next run; never report success while the lock is stuck).
 export function withPublishLock(repo, fn) {
   let common; try { common = gitRaw(repo, ["rev-parse", "--git-common-dir"]).trim(); } catch { return { __lock: "error", error: "not a git repository" }; }
   const lockDir = join(isAbsolute(common) ? common : join(realpathSync(repo), common), "logbook-publish.lock");
@@ -4537,11 +4537,11 @@ export function parseArgs(argv) {
     else if (!a.startsWith("-")) rest.push(a);
   }
   if (o.cmd === "accept-lead" || o.cmd === "reject-lead" || o.cmd === "accept-draft") {
-    // <cardId> [repo] — cardId positional; --claim edits the claim on accept-lead
+    // <cardId> [repo]: cardId positional; --claim edits the claim on accept-lead
     o.cardId = rest[0];
     if (rest[1]) o.repo = rest[1];
   } else if (o.cmd === "annotate" || o.cmd === "annotate-draft") {
-    // <sha> "<why>" [repo] — sha + why positional
+    // <sha> "<why>" [repo]: sha + why positional
     o.sha = rest[0]; o.why = rest[1];
     if (rest[2]) o.repo = rest[2];
   } else if (rest.length) {
@@ -4772,7 +4772,7 @@ async function main() {
   }
   if (o.cmd === "refine") {
     // On-demand indexing: the un-annotated notable-decision worklist across the
-    // repo. The CLI is deterministic/offline — it names WHAT warrants a "why";
+    // repo. The CLI is deterministic/offline; it names WHAT warrants a "why";
     // the agent then investigates each and writes cite-or-abstain DRAFTS. This
     // is the lazy loop run deliberately, not blind bulk generation.
     if (!scanOk) {
@@ -4926,7 +4926,7 @@ async function main() {
 
   if (o.cmd === "init") {
     const block = PLANE_REPO_MEMORY_BLOCK;
-    // AGENTS.md is the cross-tool convention — always ensure it exists;
+    // AGENTS.md is the cross-tool convention: always ensure it exists;
     // also wire tool-specific files that are present. AGENTS.override.md
     // SHADOWS AGENTS.md in Codex, so it must be wired too when it exists.
     const targets = ["AGENTS.override.md", "CLAUDE.md", ".cursorrules"].filter((f) => existsSync(join(repo, f)));
@@ -4934,7 +4934,7 @@ async function main() {
     for (const f of targets) {
       const p = join(repo, f);
       const cur = existsSync(p) ? readFileSync(p, "utf8") : "";
-      // a CLAUDE.md that imports AGENTS.md is wired through the import —
+      // a CLAUDE.md that imports AGENTS.md is wired through the import;
       // appending the block would duplicate it in Claude's context
       if (f === "CLAUDE.md" && !cur.includes("## Repo memory") && /(^|\n)@AGENTS\.md\s*(\n|$)/.test(cur)) {
         if (!o.quiet) console.log(`  ${C.dim}=${C.r} ${f} already wired (imports AGENTS.md)`);
