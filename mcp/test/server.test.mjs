@@ -1,7 +1,7 @@
 // Behavioral test: drives the REAL server over stdio JSON-RPC, no SDK client.
 // Guards the two integration contracts unit tests can't see:
 //   1. events carry xv regardless of cache state (MCP skips the CLI entrypoint)
-//   2. query never truncates silently — the count line is the contract
+//   2. query never truncates silently: the count line is the contract
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, execFileSync } from "node:child_process";
@@ -64,7 +64,7 @@ test("handshake and tool inventory", async () => {
   child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
   const tools = await rpc("tools/list", {});
   assert.deepEqual(tools.result.tools.map((t) => t.name).sort(),
-    ["logbook_annotate", "logbook_annotate_draft", "logbook_audit", "logbook_context", "logbook_digest", "logbook_query"]);
+    ["logbook_annotate", "logbook_audit", "logbook_context", "logbook_digest", "logbook_query"]);
 });
 
 test("fresh query (no ledger on disk): events carry xv, truncation is announced", async () => {
@@ -283,16 +283,6 @@ test("MCP render paths sanitize repository evidence while query JSON stays raw",
     const afterNote = await callTool("logbook_digest", { repo: isolated });
     assert.match(afterNote, /Unreviewed agent notes[\s\S]*verified reason/,
       "same-HEAD MCP digest loads notes outside its event cache");
-
-    const drafted = await callTool("logbook_annotate_draft", {
-      repo: isolated, sha: head, why: "reviewable reason", span: "re-add suppression",
-      side: "message", by: maliciousBy,
-    });
-    assert.match(drafted, /drafted [0-9a-f]{64}/);
-    const draftDir = join(isolated, ".logbook", "drafts");
-    const draftFile = readdirSync(draftDir).find((file) => file.endsWith(".json"));
-    assert.equal(JSON.parse(readFileSync(join(draftDir, draftFile), "utf8")).by, maliciousBy,
-      "sanitization is render-only; persisted inert draft JSON stays raw");
 
     const invalidSha = "[bad](http://evil) `sha` @ref";
     const invalid = await rpc("tools/call", {

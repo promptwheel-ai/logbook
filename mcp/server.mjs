@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-// @promptwheel/logbook-mcp — the logbook over MCP, for clients without a shell.
-// Six tools wrapping the zero-dep core: digest, unreviewed annotation,
-// reviewable drafting, audit, query, and bounded context pages.
+// @promptwheel/logbook-mcp: the logbook over MCP, for clients without a shell.
+// Five tools wrapping the zero-dep core: digest, unreviewed annotation,
+// audit, query, and bounded context pages. The opt-in reviewed-decision
+// layer (drafts, leads, check --diff) stays CLI-only.
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -9,7 +10,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import {
   collectEvents, diffScan, hotspots, analyze, renderLogbookMd,
-  auditHead, queryEvents, loadEvents, annotateDraft,
+  auditHead, queryEvents, loadEvents, DEFAULT_MAX,
   loadDigestNotes, saveAnnotation, refreshDigestNotes,
   formatContextPage, sanitizeContextText,
 } from "@promptwheel/logbook";
@@ -17,7 +18,9 @@ import {
 // One version source: package.json. server.json (the registry listing) is
 // kept in step by hand and checked by the behavioral test.
 const MCP_VERSION = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8")).version;
-const DEFAULTS = { max: 20000, since: null, until: null };
+// The commit window is the core's DEFAULT_MAX (single source: the ledger cache
+// gate in loadEvents depends on the two sites agreeing).
+const DEFAULTS = { max: DEFAULT_MAX, since: null, until: null };
 const fileFilterSchema = z.string().min(1).max(1024).refine(
   (value) => Buffer.byteLength(value, "utf8") <= 1024,
   { message: "file filter must be at most 1024 UTF-8 bytes" },
@@ -31,7 +34,7 @@ function validateFileFilterCount({ file, files }) {
 // via loadEvents; windowed full builds that report progress (clients reset
 // their timeout on progress notifications).
 const cache = new Map();
-// every tool call resolves to the repo ROOT — nested paths otherwise write
+// every tool call resolves to the repo ROOT; nested paths otherwise write
 // artifacts (and annotations) into subdirectories and title the digest
 // after the subfolder
 function rootOf(repo) {
@@ -118,31 +121,6 @@ server.registerTool(
     if (note.cleanupWarning) return { content: [{ type: "text", text: `saved unreviewed note ${note.sha.slice(0, 8)} and refreshed LOGBOOK.md, but ${sanitizeContextText(note.cleanupWarning, 700)}` }], isError: true };
     return { content: [{ type: "text", text: `saved unreviewed note ${note.sha.slice(0, 8)} (recorded by ${sanitizeContextText(by || "agent", 512)}) - visible in LOGBOOK.md; never accepted or consumed by check --diff` }] };
   }
-);
-
-server.registerTool(
-  "logbook_annotate_draft",
-  {
-    description: "Create a local, inert evidence-bearing decision card for optional human review. Only a human can promote the returned card ID into the trusted decision plane.",
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-    inputSchema: {
-      repo: z.string().describe("absolute path to the git repository"),
-      sha: z.string().describe("the commit being explained (any unique prefix)"),
-      why: z.string().describe("the proposed decision claim, one sentence (max 400 chars)"),
-      span: z.string().min(1).max(600).describe("an exact contiguous quote from the commit message or changed blob"),
-      side: z.enum(["message", "diff"]).describe("where the exact evidence quote occurs"),
-      evidenceFile: z.string().optional().describe("required literal changed path when side=diff; omit for message"),
-      by: z.string().optional().describe("who proposed it (model/agent name)"),
-    },
-  },
-  async ({ repo: repoArg, sha, why, span, side, evidenceFile, by }) => {
-    const repo = rootOf(repoArg);
-    if ((side === "diff") !== Boolean(evidenceFile)) return { content: [{ type: "text", text: side === "diff"
-      ? "diff evidence requires evidenceFile" : "message evidence must not name evidenceFile" }], isError: true };
-    const draft = annotateDraft(repo, { sha, why, span, side, evidenceFile, by });
-    if (draft.error) return { content: [{ type: "text", text: sanitizeContextText(draft.error, 700) }], isError: true };
-    return { content: [{ type: "text", text: `drafted ${draft.cardId} for ${draft.sha.slice(0, 8)} (proposed by ${sanitizeContextText(by || "agent", 512)}) - local and inert; a human may run logbook accept-draft ${draft.cardId} --by WHO` }] };
-  },
 );
 
 server.registerTool(

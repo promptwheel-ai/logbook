@@ -20,15 +20,16 @@ Cursor, and any MCP client).
 - **logbook_annotate** - persist an immediately visible, explicitly unreviewed
   digest note after an agent investigates a change. Optional exact evidence is
   raw-object verified. Notes never enter `check --diff` authority.
-- **logbook_annotate_draft** - create a separate local, inert evidence-bearing
-  card when a finding needs optional human review. It returns the full card ID;
-  only a human may promote it with `logbook accept-draft CARD_ID --by WHO`.
 
-## Upgrading from 0.5.0
+The opt-in reviewed-decision layer (drafts, leads, `check --diff`, OKF export)
+is CLI-only; see the core package's `docs/reviewed-decisions.md`.
 
-`logbook_annotate` now restores the low-friction behavior: it writes an
-unreviewed digest note and does not return a card ID. A caller that needs the
-0.5.0 inert-card behavior must call `logbook_annotate_draft` explicitly.
+## Upgrading
+
+- From 0.5.x: `logbook_annotate_draft` is gone. A caller that needs an inert
+  review card runs the CLI: `logbook annotate-draft SHA "WHY" ...`.
+- From 0.5.0: `logbook_annotate` writes an unreviewed digest note and does not
+  return a card ID.
 
 ## Setup
 

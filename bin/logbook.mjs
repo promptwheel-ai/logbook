@@ -4467,10 +4467,19 @@ function usage() {
                   [--evidence-file P] [--by WHO] [path]
                                   persist an immediately visible UNREVIEWED digest note;
                                   grounded spans are optional and raw-verified
+    logbook refine [path] [--limit N]
+                                  on-demand worklist: un-annotated notable decisions
+                                  (reverts/suppressions) to investigate + annotate
+    logbook [path] --json         structured events to stdout (writes nothing)
+
+  experimental (reviewed decisions): opt-in, see docs/reviewed-decisions.md
+  and docs/okf-export.md
     logbook annotate-draft SHA "WHY" [--span "exact quote" --side message|diff]
                   [--evidence-file P] [--by WHO] [path]
                                   create a local, inert card for the optional
                                   human-reviewed decision workflow
+    logbook pending [path]        local draft decisions awaiting human acceptance
+                                  (inert until accept-draft + a trusted commit)
     logbook accept CARDID --by WHO [--file P ...] [--dir P/] [path]
                                   human-promote one exact local draft (compatibility
                                   alias: accept-draft); CARDID must be the full id
@@ -4497,12 +4506,6 @@ function usage() {
                                   generate a deterministic OKF v0.1 projection of
                                   byte-bound human-reviewed decisions at REF (default
                                   HEAD); DIR must not already exist; never imported
-    logbook pending [path]        local draft decisions awaiting human acceptance
-                                  (inert until accept-draft + a trusted commit)
-    logbook refine [path] [--limit N]
-                                  on-demand worklist: un-annotated notable decisions
-                                  (reverts/suppressions) to investigate + annotate
-    logbook [path] --json         structured events to stdout (writes nothing)
 
   options:
     -n, --max N        commits to analyze (default ${DEFAULT_MAX})
