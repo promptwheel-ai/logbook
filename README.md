@@ -180,6 +180,24 @@ logbook outcomes [path]
 logbook export [path] --format okf --out NEW_DIR [--ref REF]
 ```
 
+## Upgrading to 0.9.7
+
+- `logbook query --json` now honors its filters (`--file`, `--revert`, and
+  the rest). It used to print the whole unfiltered ledger. `logbook --json`
+  is still the full ledger; `--json` is rejected on commands that have no
+  JSON output.
+- The reviewed-decision commands are grouped as experimental in `--help` and
+  documented in `docs/reviewed-decisions.md`. Nothing about them changed.
+- `JOURNEY.md` is no longer written by the default run, and `doctor` no
+  longer requires it. `logbook journey` still prints the story; `--compare`
+  and its bundled percentile table are gone.
+- A normal refresh now re-pins a `## Repo memory` block written by any
+  earlier 0.9.x release, so `doctor` passes again after an upgrade.
+- The npm tarball ships `bin/` only; the research memos under `docs/` stay in
+  the repository. Developer-only smoke scripts were removed.
+- MCP server 0.6.0: the `logbook_annotate_draft` tool was removed (use the
+  CLI's `annotate-draft`), and the server reports its `package.json` version.
+
 ## Upgrading from 0.8 or 0.9.0
 
 Existing `annotations.jsonl` rows remain unreviewed digest notes and render
