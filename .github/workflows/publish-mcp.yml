@@ -1,0 +1,26 @@
+# Publishes mcp/server.json to the official MCP registry. Runs under this repository's GitHub Actions
+# identity (OIDC), which is how the registry verifies the io.github.promptwheel-ai namespace: no
+# personal token is involved. Trigger it by hand after the npm package for the version in server.json
+# is live: gh workflow run publish-mcp.yml
+name: Publish MCP server
+on:
+  workflow_dispatch:
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install mcp-publisher
+        run: |
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/').tar.gz" | tar xz mcp-publisher
+          sudo mv mcp-publisher /usr/local/bin/mcp-publisher
+          mcp-publisher --version
+      - name: Log in through the repository's OIDC identity
+        working-directory: mcp
+        run: mcp-publisher login github-oidc
+      - name: Publish
+        working-directory: mcp
+        run: mcp-publisher publish
