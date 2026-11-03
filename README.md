@@ -27,7 +27,6 @@ history before it plans.
 
   ✓ wrote LOGBOOK.md     hotspots · do-not-retry · suppression ledger
   ✓ wrote events.jsonl   structured history events
-  ✓ wrote JOURNEY.md     the repo's story
 ```
 
 The examples below use `logbook` as the binary name. Run them through the exact
@@ -68,11 +67,11 @@ yet; it does not generate claims.
 |---|---|
 | `LOGBOOK.md` | Bounded history brief for agents: hotspots, do-not-retry reverts, suppressions, weakened assertions, and fragile areas |
 | `events.jsonl` | Structured deterministic history events for tools and queries |
-| `JOURNEY.md` | Human-readable narrative of the repository's history |
 | `annotations.jsonl` | Durable machine-authored notes, shown in the digest as explicitly unreviewed leads |
 
 Commit `annotations.jsonl` to share the notes with the team, or add it to
-`.gitignore` to keep them local to one checkout.
+`.gitignore` to keep them local to one checkout. `logbook journey` prints the
+repository's story to the terminal and writes no file.
 
 ## History queries and context economics
 

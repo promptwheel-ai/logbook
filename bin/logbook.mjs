@@ -1,14 +1,14 @@
 #!/usr/bin/env node
-// @promptwheel/logbook — turn git history into memory an agent can use.
+// @promptwheel/logbook: turn git history into memory an agent can use.
 //
 // Nobody reads the git history: it's too big, and skimming a slice gives a
 // wrong picture. Code maps say where things are; nothing says what happened.
 // This mines a repo's git history (read-only, newest 20k commits by default)
-// and writes three artifacts:
-//   LOGBOOK.md  — the digest a fresh agent session needs: hotspots,
-//                   do-not-retry (reverts), suppression ledger, fragile areas
-//   events.jsonl  — one structured event per commit (the data layer)
-//   JOURNEY.md    — the repo's story, told as a hero's journey
+// and writes two artifacts:
+//   LOGBOOK.md    the digest a fresh agent session needs: hotspots,
+//                 do-not-retry (reverts), suppression ledger, fragile areas
+//   events.jsonl  one structured event per commit (the data layer)
+// `logbook journey` prints the repo's story to stdout and writes nothing.
 //
 // Single file. Zero dependencies. History extraction is read-only; explicit
 // commands write generated artifacts or Git-tracked decision-plane files.
@@ -859,31 +859,6 @@ export function journeyBeats(name, A, { markdown = true } = {}) {
   return B;
 }
 
-// Fleet percentile tables — top 2,500 GitHub repos, 2026-07 (n=2500, 20k windows, extractor v4 mention-clean).
-// reverts/bargains are per 1,000 commits (size-fair); winter in days.
-// Regenerate from a fleet run per release; no network calls, ever.
-export const FLEET = {
-  reverts_per_1k: [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0.22,0.81,1.09,1.34,1.53,1.7,1.84,1.98,2.15,2.34,2.48,2.64,2.79,2.91,3.08,3.22,3.34,3.56,3.68,3.86,3.99,4.13,4.26,4.35,4.47,4.66,4.75,4.83,4.95,5.06,5.21,5.35,5.5,5.66,5.75,5.89,6.07,6.16,6.29,6.39,6.51,6.65,6.76,6.94,7.07,7.23,7.38,7.54,7.7,7.87,8.11,8.29,8.43,8.67,8.87,9.07,9.3,9.53,9.78,10,10.22,10.57,10.81,11.13,11.43,12,12.43,12.92,13.33,13.92,14.52,15.36,16.04,17.05,18.49,20.46,24.27,57.37],
-  bargains_per_1k: [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0.21,0.36,0.5,0.66,0.86,1.09,1.27,1.47,1.71,1.95,2.2,2.5,2.76,3.06,3.57,3.86,4.44,4.78,5.06,5.41,6.02,6.43,6.99,7.61,7.97,8.43,9.02,9.65,10.18,10.99,11.66,12.27,13.14,13.93,14.98,15.79,16.75,17.7,18.54,19.52,20.88,22.15,23.88,25.64,27.2,30.2,33.29,36.28,40.62,44.8,48.93,52.92,58.82,70.17,85.07,108.19,1000],
-  winter_days: [0,3,6,10,12,15,18,21,23,27,30,33,36,40,43,46,49,53,57,60,63,67,70,74,79,83,86,93,97,100,105,110,115,119,124,130,140,146,150,156,163,168,175,181,189,194,202,211,216,222,231,237,245,253,262,271,281,297,308,322,331,343,352,368,378,389,400,412,428,442,459,474,490,503,521,533,553,576,591,618,652,676,713,743,767,789,818,857,901,943,998,1060,1112,1194,1272,1381,1586,1810,2136,2552,4321],
-};
-
-export function fleetPct(key, val) {
-  const a = FLEET[key];
-  if (!a || !a.length) return null;
-  let c = 0;
-  for (const v of a) if (v < val) c++;
-  return Math.round((100 * c) / a.length);
-}
-
-export function almanacPcts(A) {
-  return {
-    reverts: fleetPct("reverts_per_1k", (A.reverts.length / Math.max(A.n, 1)) * 1000),
-    bargains: fleetPct("bargains_per_1k", (A.suspEvents.length / Math.max(A.n, 1)) * 1000),
-    winter: A.winter.days ? fleetPct("winter_days", A.winter.days) : null,
-  };
-}
-
 export function almanacStats(A) {
   const s = [["commits", fmt(A.n)], ["reverts", A.reverts.length], ["bargains", A.suspEvents.length]];
   if (A.abyss && A.abyss.dels > 100) s.push(["abyss", `−${fmt(A.abyss.dels)}`]);
@@ -891,26 +866,12 @@ export function almanacStats(A) {
   return s;
 }
 
-export function renderJourneyMd(name, A, compare) {
-  const safeName = sanitizeContextText(name, 1024);
-  const L = [`# ⚔️ The Journey of ${safeName}`, ``, `_${UNTRUSTED_EVIDENCE_WARNING}_`, ``,
-    `_An epic in ${fmt(A.n)} commit${A.n === 1 ? "" : "s"}, as entered in the logbook._`, ``];
-  for (const [num, title, body] of journeyBeats(name, A)) L.push(`**${num}. ${title}.** ${body}`, ``);
-  L.push(`---`);
-  const pcts = compare ? almanacPcts(A) : {};
-  L.push(`_The Logbook Almanac_ - ` + almanacStats(A).map(([k, v]) =>
-    `${k} ${v}${pcts[k] != null ? ` (p${pcts[k]})` : ""}`).join(" · "));
-  if (compare) L.push(`_Percentiles vs the top 2,500 repos on GitHub (size-fair, per 1k commits)._`);
-  return L.join("\n") + "\n";
-}
-
 export function sha256(text) {
   return createHash("sha256").update(text).digest("hex");
 }
 
-// Both human-facing artifacts carry one canonical record for the exact
-// events ledger they describe. Keeping this here prevents digest and journey
-// freshness metadata from drifting into separate implementations.
+// The digest carries one canonical record for the exact events ledger it
+// describes; doctor verifies the ledger against this stamp.
 export function stampArtifact(markdown, headSha, record = {}) {
   const sha = FULL_SHA_PAT.test(String(headSha || ""))
     ? String(headSha).toLowerCase() : "unknown";
@@ -942,10 +903,9 @@ export function parseArtifactRecord(markdown) {
 
 // Each file is replaced atomically. The bundle is intentionally not claimed
 // to be transactional; `logbook doctor` detects an interrupted multi-file
-// update by comparing both stamps with the exact ledger hash.
+// update by comparing the digest stamp with the exact ledger hash.
 export function writeArtifactBundle(outDir, {
   name, A, shallow, capped, notes = [], headSha, record, ledgerText = null,
-  compare = false,
 }) {
   if (ledgerText !== null) {
     if (record.sha256 !== sha256(ledgerText))
@@ -958,33 +918,28 @@ export function writeArtifactBundle(outDir, {
     stampArtifact(renderLogbookMd(name, A, shallow, capped, notes), headSha, record));
   if (ledgerText !== null)
     managedWriteFile(outDir, join(outDir, "events.jsonl"), ledgerText);
-  managedWriteFile(outDir, join(outDir, "JOURNEY.md"),
-    stampArtifact(renderJourneyMd(name, A, compare), headSha, record));
 }
 
 const C = process.stdout.isTTY || process.env.FORCE_COLOR
   ? { gold: "\x1b[38;5;220m", dim: "\x1b[38;5;245m", good: "\x1b[38;5;114m", info: "\x1b[38;5;44m", bad: "\x1b[38;5;203m", odd: "\x1b[38;5;177m", bold: "\x1b[1m", r: "\x1b[0m" }
   : { gold: "", dim: "", good: "", info: "", bad: "", odd: "", bold: "", r: "" };
 
-export function renderJourneyAnsi(name, A, compare) {
+export function renderJourneyAnsi(name, A) {
   const L = [];
   L.push(`\n  ${C.gold}${C.bold}⚔  The Journey of ${sanitizeContextText(name, 1024, { markdown: false })}${C.r}`);
   L.push(`  ${C.dim}an epic in ${fmt(A.n)} commit${A.n === 1 ? "" : "s"}, as entered in the logbook${C.r}`);
   for (const [num, title, body, tone] of journeyBeats(name, A, { markdown: false }))
     L.push(`\n  ${C[tone]}${C.bold}${num}. ${title}${C.r}\n  ${C.dim}${body}${C.r}`);
   const stats = almanacStats(A);
-  const pcts = compare ? almanacPcts(A) : {};
-  const sfx = (k) => (pcts[k] != null ? ` p${pcts[k]}` : "");
-  const line = stats.map(([k, v]) => `${C.gold}${v}${C.r} ${C.dim}${k}${sfx(k)}${C.r}`).join(" · ");
-  const plain = stats.map(([k, v]) => `${v} ${k}${sfx(k)}`).join(" · ");
+  const line = stats.map(([k, v]) => `${C.gold}${v}${C.r} ${C.dim}${k}${C.r}`).join(" · ");
+  const plain = stats.map(([k, v]) => `${v} ${k}`).join(" · ");
   const w = Math.max(plain.length + 4, 42);
   L.push(`\n  ${C.gold}╭${"─".repeat(w)}╮${C.r}`);
   const title = "THE LOGBOOK ALMANAC";
   L.push(`  ${C.gold}│${C.r}  ${C.bold}${title}${C.r}${" ".repeat(w - title.length - 2)}${C.gold}│${C.r}`);
   L.push(`  ${C.gold}│${C.r}  ${line}${" ".repeat(w - plain.length - 2)}${C.gold}│${C.r}`);
   L.push(`  ${C.gold}╰${"─".repeat(w)}╯${C.r}`);
-  if (compare) L.push(`  ${C.dim}percentiles vs the top 2,500 repos on GitHub${C.r}\n`);
-  else L.push("");
+  L.push("");
   return L.join("\n");
 }
 
@@ -3909,8 +3864,6 @@ export function refreshDigestNotes(repo, opts = {}) {
   const ledgerText = events.map((event) => JSON.stringify(event)).join("\n") + "\n";
   const record = { events: events.length, max: o.max, scope: "default",
     capped: Boolean(capped), sha256: sha256(ledgerText) };
-  const journey = readRegularUtf8NoFollow(join(repo, "JOURNEY.md"), 4 << 20);
-  const compare = !journey.error && journey.text.includes("_Percentiles vs the top 2,500 repos on GitHub");
   // The note transaction itself is short and releases this lock before refresh.
   // Reacquire it only around the final notes snapshot -> artifact write ->
   // signature check. Concurrent analyzers may run in parallel, but their final
@@ -3921,7 +3874,7 @@ export function refreshDigestNotes(repo, opts = {}) {
     try {
       writeArtifactBundle(repo, { name: basename(repo), A,
         shallow: existsSync(join(repo, ".git", "shallow")), capped, notes,
-        headSha, record, ledgerText, compare });
+        headSha, record, ledgerText });
     } catch (error) {
       return { error: `digest artifacts could not be replaced safely: ${error.code || error.message}` };
     }
@@ -4075,7 +4028,8 @@ function isUsableLogbookSkill(path) {
 export function doctorRepo(repo) {
   const checks = [];
   const add = (level, name, detail, action = "") => checks.push({ level, name, detail, action });
-  const artifacts = ["LOGBOOK.md", "events.jsonl", "JOURNEY.md"];
+  // JOURNEY.md is no longer written; an existing one is ignored, not checked.
+  const artifacts = ["LOGBOOK.md", "events.jsonl"];
   const missing = artifacts.filter((file) => !existsSync(join(repo, file)));
   let events = null;
   let ledgerUsable = false;
@@ -4095,17 +4049,13 @@ export function doctorRepo(repo) {
       events = lines.map((line) => JSON.parse(line));
       const uniqueEvents = new Set(events.map((event) => event?.fullSha)).size === events.length;
       const schemasCurrent = events.length > 0 && uniqueEvents && events.every(isCurrentCachedEvent);
-      const markdown = ["LOGBOOK.md", "JOURNEY.md"].map((file) =>
-        [file, readFileSync(join(repo, file), "utf8")]);
-      const records = markdown.map(([, text]) => parseArtifactRecord(text));
-      const sameRecord = records.length === 2 && records.every(Boolean) &&
-        JSON.stringify(records[0]) === JSON.stringify(records[1]);
-      const record = sameRecord ? records[0] : null;
+      const digestText = readFileSync(join(repo, "LOGBOOK.md"), "utf8");
+      const record = parseArtifactRecord(digestText);
+      const hasRecord = Boolean(record);
       const hashMatches = record?.sha256 !== "unmeasured" && record?.sha256 === sha256(ledgerText);
       const countMatches = record?.events === events.length && Number.isInteger(record?.max) && record.max > 0;
-      const heads = markdown.map(([, text]) => artifactHead(text));
-      bundleFresh = Boolean(head) && heads.every((value) => value === head);
-      ledgerUsable = schemasCurrent && sameRecord && hashMatches && countMatches;
+      bundleFresh = Boolean(head) && artifactHead(digestText) === head;
+      ledgerUsable = schemasCurrent && hasRecord && hashMatches && countMatches;
 
       let windowMatches = false;
       let capMatches = false;
@@ -4123,11 +4073,11 @@ export function doctorRepo(repo) {
       if (!schemasCurrent)
         add("fail", "artifacts", "events.jsonl is empty, duplicated, invalid, or from another extractor",
           `run: ${NPX_COMMAND}`);
-      else if (!sameRecord || !hashMatches || !countMatches)
+      else if (!hasRecord || !hashMatches || !countMatches)
         add("fail", "artifacts", "record metadata or ledger hash does not match the generated bundle",
           `run: ${NPX_COMMAND}`);
       else if (!bundleFresh)
-        add("fail", "artifacts", "digest and journey stamps do not both match the current HEAD",
+        add("fail", "artifacts", "digest stamp does not match the current HEAD",
           `run: ${NPX_COMMAND}`);
       else if (record.scope === "default" && (!windowMatches || !capMatches))
         add("fail", "artifacts", "event order or window does not exactly match current Git history",
@@ -4141,7 +4091,7 @@ export function doctorRepo(repo) {
         add("warn", "artifacts", `${plural(events.length, "verified current event")}; analysis intentionally capped at ${record.max}`,
           "raise -n or analyze another era if older history matters");
       else
-        add("pass", "artifacts", `${plural(events.length, "verified current event")}; Markdown records agree with the ledger`);
+        add("pass", "artifacts", `${plural(events.length, "verified current event")}; digest record agrees with the ledger`);
     } catch {
       events = null;
       ledgerUsable = false;
@@ -4454,7 +4404,7 @@ function usage() {
   usage:
     logbook init [path]           analyze + wire AGENTS.md/CLAUDE.md/.cursorrules
                                   so your agent is instructed to read history first
-    logbook [path]                analyze repo → LOGBOOK.md, events.jsonl, JOURNEY.md
+    logbook [path]                analyze repo → LOGBOOK.md, events.jsonl
     logbook journey [path]        the repo's story, in color (writes nothing)
     logbook audit [path]          what is STILL suppressed in HEAD, and since when
     logbook doctor [path]         read-only artifact/wiring/skill/query health check
@@ -4509,7 +4459,6 @@ function usage() {
 
   options:
     -n, --max N        commits to analyze (default ${DEFAULT_MAX})
-    --compare          rank your almanac against the top 2,500 GitHub repos
     --since / --until  era-scoped archaeology (git date formats)
     --out DIR          output directory (history artifacts or a fresh export bundle)
     -q, --quiet        suppress the summary
@@ -4582,7 +4531,6 @@ export function parseArgs(argv) {
     else if (a === "--json") o.json = true;
     else if (a === "-q" || a === "--quiet") o.quiet = true;
     else if (a === "--out") o.out = take("--out");
-    else if (a === "--compare") o.compare = true;
     else if (a === "-h" || a === "--help") o.cmd = "help";
     else if (a === "-v" || a === "--version") o.cmd = "version";
     else if (a.startsWith("-")) o._unknown ||= a;
@@ -4654,7 +4602,7 @@ async function main() {
       console.error("  usage: logbook export [path] --format okf --out NEW_DIR [--ref REF]");
       process.exit(1);
     }
-    const incompatible = o.json || o.compare || o.diff || o.cursorProvided ||
+    const incompatible = o.json || o.diff || o.cursorProvided ||
       o.candidates || o.claim || o.by || o.span || o.side || o.evidenceFile ||
       o.files?.length || o.since || o.until || o.limit !== undefined ||
       o.weaken !== undefined || o.downgrade !== undefined || o.revert || o.suppress || o.grep ||
@@ -4943,7 +4891,7 @@ async function main() {
   const touched = hotspots(repo, o);
   const A = analyze(events, touched);
   if (!scanOk) A.degraded = true;
-  if (o.cmd === "journey") return console.log(renderJourneyAnsi(name, A, o.compare));
+  if (o.cmd === "journey") return console.log(renderJourneyAnsi(name, A));
 
   if (o.cmd === "init" && o.out) {
     console.error(`  init ignores --out: the wiring points agents at the repo root`);
@@ -4967,7 +4915,7 @@ async function main() {
   const written = withStableNoteSnapshot(repo, (notes) => {
     writeArtifactBundle(outDir, {
       name, A, shallow, capped, notes, headSha, record,
-      ledgerText: scanOk ? ledgerText : null, compare: o.compare,
+      ledgerText: scanOk ? ledgerText : null,
     });
     return { written: true };
   });
@@ -5023,7 +4971,7 @@ async function main() {
       console.log(`  ${C.good}✓${C.r} wrote ${C.bold}events.jsonl${C.r}   ${C.dim}${fmt(A.n)} structured event${A.n === 1 ? "" : "s"}${C.r}`);
     else
       console.log(`  ${C.bad}⚠${C.r} did not write ${C.bold}events.jsonl${C.r}   ${C.dim}diff scan incomplete; any existing ledger was left untouched${C.r}`);
-    console.log(`  ${C.good}✓${C.r} wrote ${C.bold}JOURNEY.md${C.r}     ${C.dim}the repo's story, told back to you${C.r}\n`);
+    console.log("");
     if (shallow) console.log(`  ${C.bad}⚠${C.r} ${C.dim}shallow clone - run git fetch --unshallow for the full record${C.r}\n`);
     console.log(`  ${C.dim}next:${C.r} logbook journey   ${C.dim}(see it in color)${C.r}\n`);
   }
