@@ -20,7 +20,7 @@ import {
   hasClaudeImport,
   normalizeScope, scopeMatches, appendPrivateLine, groundStatus,
   decisionCardId, validDecisionCard, serializeDecisionCard, parseDecisionCard, DECISION_SCHEMA,
-  checkDecisions, renderDecisionLeads, parsePolicy, publishPolicyLeads, withPublishLock, readPlane,
+  checkDecisions, renderDecisionLeads, parsePolicy, publishPolicyLeads, withPublishLock, readPlane, LEGACY_BLOCKS,
   CHECK_PAGE_MAX_ITEMS, CHECK_PAGE_MAX_BYTES,
   acceptLead, rejectLead, computeReviewOutcomes, renderReviewOutcomes, renderPublish,
   annotateDraft, acceptDraft, parseReview, serializeReview, REVIEW_SCHEMA,
@@ -1711,17 +1711,17 @@ test("init migrates prior generated blocks; user-edited blocks stay", () => {
   assert.match(migratedContext, /check --diff.*NEXT.*END complete/s);
   rmSync(d3, { recursive: true, force: true });
 
-  const d4 = mkdtempSync(join(tmpdir(), "logbook-migrate-old-lmh-refresh-"));
+  const d4 = mkdtempSync(join(tmpdir(), "logbook-migrate-older-release-refresh-"));
   const g4 = (...a) => execFileSync("git", ["-C", d4, ...a], { env: { ...process.env,
     GIT_AUTHOR_NAME: "H", GIT_AUTHOR_EMAIL: "h@x.io", GIT_COMMITTER_NAME: "H", GIT_COMMITTER_EMAIL: "h@x.io" } });
   g4("init", "-q"); writeFileSync(join(d4, "a.js"), "let x = 1;\n");
   g4("add", "-A"); g4("commit", "-q", "-m", "base");
   writeFileSync(join(d4, "AGENTS.md"), priorBlock);
   execFileSync(process.execPath, [CLI, d4], { encoding: "utf8" });
-  const migratedOldLmh = readFileSync(join(d4, "AGENTS.md"), "utf8");
-  assert.doesNotMatch(migratedOldLmh, /Historical signal|LOW|MEDIUM|HIGH/);
-  assert.match(migratedOldLmh, /check --diff.*NEXT.*END complete/s,
-    "normal refresh upgrades older exact LMH wiring to the plane preflight");
+  const migratedOlder = readFileSync(join(d4, "AGENTS.md"), "utf8");
+  assert.doesNotMatch(migratedOlder, /Historical signal|LOW|MEDIUM|HIGH/);
+  assert.match(migratedOlder, /check --diff.*NEXT.*END complete/s,
+    "normal refresh upgrades older exact released wiring to the plane preflight");
   rmSync(d4, { recursive: true, force: true });
 
   const d5 = mkdtempSync(join(tmpdir(), "logbook-migrate-unpinned-plane-"));
@@ -1801,6 +1801,67 @@ If output says NEXT, repeat with --cursor TOKEN until END complete.
   assert.equal(readFileSync(join(d7, "AGENTS.md"), "utf8"), migrated091,
     "the migrated block is stable on the next refresh");
   rmSync(d7, { recursive: true, force: true });
+});
+
+test("LEGACY_BLOCKS keeps every byte-exact literal the two former lists held", () => {
+  // SHA-256 of each literal in the union of NORMAL_REFRESH_OLD_BLOCKS (8) and
+  // main()'s oldBlocks (6, four byte-identical), snapshotted before they were
+  // consolidated. A reformatted literal would stop matching users' files.
+  const snapshot = {
+    "0.9.0 plane, unpinned": "e16df50df7fcd30dfdfcfb7d98ac911e88e0a58321af0f420d7eb5b4c0ed14ac",
+    "0.9.0 plane, pinned": "4f58b022c5a30d7d7ef772ccbef9cf7333afb910c49e6f0b1ffe3837e1ca1ab6",
+    "0.9.1+ plane, unpinned": "c4c9ec4ab2f193371afc87efbe78c465589eb1d4eced7b5ba1c79df8b0bda19a",
+    "0.9.1 plane, pinned": "8558b78056da2f2678663f7ad23334db0798d326e34bae2b2108bcad6661f2ab",
+    "LOW-signal + context": "5f0e3e2efa7d001da27a5a7be05f8a3a9ecef5d0295c52f59cf89a142102383d",
+    "LOW-signal + query": "4ad28319d79aaeb68611e899974891dcd1f9b24c3a39410de2a1de013cf236a3",
+    "LOW-signal prose, --by MODEL": "3b8b42ae2168ba1920eb64bc28dd108dfd17f59f6e8a100a9089b3712f8ad604",
+    "LOW-signal prose, --by codex": "04eb8a4ab5b7805301d8fa00ac264d710189cb0d5c369d89d9282f76c6816dfe",
+    "root codex, em-dash": "e9c0183a2bd54cf3dc8f84b26a9894953a64b8cf0669a0e4dbe64d1c47a9ef9e",
+    "initial 0.7.0, em-dash": "23711b600a4d07b368dea3cacfb951d5140d5e63d7b37f1516109fb1c706dc53",
+  };
+  const present = new Map(LEGACY_BLOCKS.map((block) => [sha256(block), block]));
+  for (const [label, digest] of Object.entries(snapshot))
+    assert.ok(present.has(digest), `legacy literal still present byte-exact: ${label}`);
+  assert.equal(new Set(LEGACY_BLOCKS).size, LEGACY_BLOCKS.length, "no duplicate literals");
+  for (const block of LEGACY_BLOCKS) {
+    assert.ok(block.startsWith("\n## Repo memory\n"), "every legacy literal is a whole block");
+    assert.ok(!block.includes(NPX_COMMAND), "the current release's own block is not a migration source");
+  }
+  // Every earlier 0.9.x release pinned the same template to its own version;
+  // each of those pinned blocks must be a migration source or an upgrade
+  // leaves the repo's wiring stale with nothing able to refresh it.
+  const patch = /^0\.9\.(\d+)$/.exec(PACKAGE_VERSION);
+  assert.ok(patch, "the 0.9 line is what this test knows how to enumerate");
+  for (let p = 1; p < Number(patch[1]); p++) {
+    assert.ok(LEGACY_BLOCKS.some((block) => block.includes(`npx -y @promptwheel/logbook@0.9.${p} context --file`)),
+      `the 0.9.${p} pinned plane block is a migration source`);
+  }
+});
+
+test("a block pinned by the previous release migrates on a normal refresh and then satisfies doctor", () => {
+  const d = mkdtempSync(join(tmpdir(), "logbook-migrate-previous-pin-"));
+  const env = { ...process.env, NO_COLOR: "1",
+    GIT_AUTHOR_NAME: "H", GIT_AUTHOR_EMAIL: "h@x.io", GIT_COMMITTER_NAME: "H", GIT_COMMITTER_EMAIL: "h@x.io" };
+  delete env.FORCE_COLOR;
+  const g = (...a) => execFileSync("git", ["-C", d, ...a], { env });
+  try {
+    g("init", "-q"); writeFileSync(join(d, "a.js"), "let x = 1;\n");
+    g("add", "-A"); g("commit", "-q", "-m", "base");
+    execFileSync(process.execPath, [CLI, "init", d, "-q"], { env, encoding: "utf8" });
+    const current = readFileSync(join(d, "AGENTS.md"), "utf8");
+    const previous = current.replaceAll(NPX_COMMAND, "npx -y @promptwheel/logbook@0.9.5");
+    assert.notEqual(previous, current);
+    writeFileSync(join(d, "AGENTS.md"), previous);
+    const stale = spawnSync(process.execPath, [CLI, "doctor", d], { env, encoding: "utf8" });
+    assert.equal(stale.status, 1, "doctor reports wiring pinned to another release as not current");
+    const out = execFileSync(process.execPath, [CLI, d], { env, encoding: "utf8" });
+    assert.match(out, /updated AGENTS\.md\s+repo-memory workflow refreshed/);
+    assert.equal(readFileSync(join(d, "AGENTS.md"), "utf8"), current, "the normal refresh re-pins the exact block");
+    const healthy = spawnSync(process.execPath, [CLI, "doctor", d], { env, encoding: "utf8" });
+    assert.equal(healthy.status, 0, `${healthy.stdout}${healthy.stderr}`);
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
 });
 
 test("audit on a suppression-free repo is clean, not an error", () => {
