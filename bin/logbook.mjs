@@ -187,8 +187,7 @@ export const MAX_SCAN_LINE = 4000;
 // per char it is already well past MAX_SCAN_LINE characters, so the char check below would skip it
 // anyway. This is what keeps a 24 MB minified/blob line from ever becoming a JS string.
 const DECODE_GATE = 1 << 16;
-export const SUPPRESS_PAT =
-  /@ts-nocheck|@ts-ignore|eslint-disable|# *noqa|# *type: *ignore|\bit\.skip\b|\btest\.skip\b|\bxit\(|\bxdescribe\(|describe\.skip\b|@pytest\.mark\.skip\b|@unittest\.skip\b|\bt\.Skip\(|@Disabled\b|@Ignore\b|\[Ignore\b|Skip\s*=\s*"|#\[ignore|markTestSkipped\(|markTestIncomplete\(|except[^:]*: *pass|NOLINT|cppcheck-suppress|coverity\[/g;
+// SUPPRESS_PAT is derived from the IDIOMS table below (one source for every detector surface).
 export const ASSERT_PAT = /assert|expect\(|\.toBe|\.toEqual|t\.Error|t\.Fatal/;
 // Assertion strength (for downgrade detection): exact/behavioral vs existence/truthy.
 export const STRONG_ASSERT_PAT = /\.toStrictEqual\(|\.toEqual\(|\.toBe\(|\.toMatchObject\(|\.toThrow\([^)]|assertEqual\(|assertIs\(|assertRaises\([^)]/;
@@ -200,14 +199,74 @@ export const GATE_PAT =
   /\b(add|set ?up|introduce|first).{0,20}(test|ci|workflow|jest|vitest|pipeline|coverage|lint)|\.github\/workflows|jest\.config|vitest\.config|first release|v?1\.0\.0|initial release/i;
 export const MENTOR_PAT = /claude\.md|\.claude|cursorrules|agents?\.md/i;
 
+// ---------- suppression idioms: the ONE table ----------
+// Every detector surface is derived from this table at module load:
+//   SUPPRESS_PAT        the joined alternation; the diff scanner runs it as a JS
+//                       regex and audit hands the same source to `git grep -P`,
+//                       so each `src` must be valid in BOTH JavaScript and PCRE
+//                       (no named groups, lookbehind, \p{..}, or a bare `/`).
+//   COMMENT_DIRECTIVE   the comment-only subset isMention consults (`directive`
+//                       is the substring tested against the matched kind; the
+//                       Python forms carry their `#` prefix in the match).
+//   kindAllowedInFile   language gating: an idiom with `exts` only counts in
+//                       files of those extensions, the rest is ungated (the
+//                       original calibrated JS/py set the fleet numbers rest on).
+//   kindIsTestSkip      `testSkip` marks the idioms that silence a test rather
+//                       than a linter or type checker (audit --json exposes it).
+//   `conditional`       PHPUnit markers that are usually an environment guard;
+//                       auditHead drops them when an `if (` sits just above.
+// Order is the alternation order, so keep new entries at the end of their
+// family. Any precision change here must bump EXTRACTOR_VERSION.
+const JVM_EXTS = ["java", "kt", "kts", "scala", "groovy"];
+const DOTNET_EXTS = ["cs", "fs", "vb"];
+const PHP_EXTS = ["php", "phtml"];
+const C_FAMILY_EXTS = ["c", "cc", "cpp", "cxx", "c++", "h", "hh", "hpp", "hxx", "ipp", "inl", "cu", "cuh"];
+export const IDIOMS = [
+  { src: "@ts-nocheck", lang: "TypeScript", commentOnly: true, testSkip: false },
+  { src: "@ts-ignore", lang: "TypeScript", commentOnly: true, testSkip: false },
+  { src: "eslint-disable", lang: "JavaScript", commentOnly: true, testSkip: false },
+  { src: "# *noqa", directive: "noqa", lang: "Python", commentOnly: true, testSkip: false },
+  { src: "# *type: *ignore", directive: "type: *ignore", lang: "Python", commentOnly: true, testSkip: false },
+  { src: "\\bit\\.skip\\b", lang: "JavaScript", testSkip: true },
+  { src: "\\btest\\.skip\\b", lang: "JavaScript", testSkip: true },
+  { src: "\\bxit\\(", lang: "JavaScript", testSkip: true },
+  { src: "\\bxdescribe\\(", lang: "JavaScript", testSkip: true },
+  { src: "describe\\.skip\\b", lang: "JavaScript", testSkip: true },
+  { src: "@pytest\\.mark\\.skip\\b", lang: "Python", testSkip: true },
+  { src: "@unittest\\.skip\\b", lang: "Python", testSkip: true },
+  { src: "\\bt\\.Skip\\(", lang: "Go", exts: ["go"], testSkip: true },
+  { src: "@Disabled\\b", lang: "JVM", exts: JVM_EXTS, testSkip: true },
+  { src: "@Ignore\\b", lang: "JVM", exts: JVM_EXTS, testSkip: true },
+  { src: "\\[Ignore\\b", lang: ".NET", exts: DOTNET_EXTS, testSkip: true },
+  { src: "Skip\\s*=\\s*\"", lang: ".NET", exts: DOTNET_EXTS, testSkip: true },
+  { src: "#\\[ignore", lang: "Rust", exts: ["rs"], testSkip: true },
+  { src: "markTestSkipped\\(", lang: "PHP", exts: PHP_EXTS, testSkip: true, conditional: true },
+  { src: "markTestIncomplete\\(", lang: "PHP", exts: PHP_EXTS, testSkip: true, conditional: true },
+  { src: "except[^:]*: *pass", lang: "Python", testSkip: false },
+  { src: "NOLINT", lang: "C/C++", exts: C_FAMILY_EXTS, commentOnly: true, testSkip: false },
+  { src: "cppcheck-suppress", lang: "C/C++", exts: C_FAMILY_EXTS, commentOnly: true, testSkip: false },
+  { src: "coverity\\[", lang: "C/C++", exts: C_FAMILY_EXTS, commentOnly: true, testSkip: false },
+];
+export const SUPPRESS_PAT = new RegExp(IDIOMS.map((idiom) => idiom.src).join("|"), "g");
+export const COMMENT_DIRECTIVE = new RegExp(
+  IDIOMS.filter((idiom) => idiom.commentOnly).map((idiom) => idiom.directive ?? idiom.src).join("|"));
+// A matched kind is exactly one alternation's text, so an anchored whole-match
+// of each `src` identifies which idiom produced it.
+const IDIOM_MATCHERS = IDIOMS.map((idiom) => ({ idiom, whole: new RegExp(`^(?:${idiom.src})$`) }));
+export function idiomFor(kind) {
+  const k = String(kind ?? "").trim();
+  const hit = IDIOM_MATCHERS.find(({ whole }) => whole.test(k));
+  return hit ? hit.idiom : null;
+}
+export function kindIsTestSkip(kind) { return Boolean(idiomFor(kind)?.testSkip); }
+
 // A suppression directive only functions in a comment or as call syntax.
 // Inside a quoted string or regex-source it is a MENTION (pattern tables,
 // test fixtures, docs generators), not a live directive. Approximate but
 // sound for directives: count unescaped quote chars before the match.
-// Directives that only function INSIDE a comment; every other idiom is call
-// or annotation syntax, so a match sitting after a comment opener is prose
-// ("// don't use describe.skip here"), not a live suppression.
-const COMMENT_DIRECTIVE = /@ts-nocheck|@ts-ignore|eslint-disable|noqa|type: *ignore|NOLINT|cppcheck-suppress|coverity\[/;
+// Comment-only directives (COMMENT_DIRECTIVE) are the exception; every other
+// idiom is call or annotation syntax, so a match sitting after a comment
+// opener is prose ("// don't use describe.skip here"), not a live suppression.
 export function isMention(line, idx, kind) {
   let sq = 0, dq = 0, bt = 0;
   for (let i = 0; i < idx; i++) {
@@ -229,22 +288,15 @@ export function isMention(line, idx, kind) {
 }
 
 // Language-bound idioms only count in their own languages: @Disabled in a
-// .mjs file is prose ABOUT Java, not a disabled test. The original
-// calibrated set (JS/py families) stays ungated; those idioms are the
-// lineage the fleet numbers were built on.
+// .mjs file is prose ABOUT Java, not a disabled test, and a C/C++ linter
+// marker quoted in another language is a mention. Idioms without `exts` in
+// the table stay ungated. The extension is the trailing [a-z0-9_] run, so a
+// file like `a.c++` has none (pinned by the idiom-table fixture test).
 export function kindAllowedInFile(kind, file) {
+  const idiom = idiomFor(kind);
+  if (!idiom?.exts) return true;
   const ext = ((file || "").match(/\.([a-z0-9_]+)$/i) || [, ""])[1].toLowerCase();
-  const k = kind.trim();
-  if (k === "@Disabled" || k === "@Ignore") return ["java", "kt", "kts", "scala", "groovy"].includes(ext);
-  if (k.startsWith("[Ignore") || /^Skip\s*=\s*"?$/.test(k)) return ["cs", "fs", "vb"].includes(ext);
-  if (k === "#[ignore") return ext === "rs";
-  if (k.startsWith("markTest")) return ["php", "phtml"].includes(ext);
-  if (k === "t.Skip(") return ext === "go";
-  // C/C++ linter idioms (clang-tidy NOLINT, cppcheck, coverity) only count in C/C++ sources,
-  // so a `// NOLINT` quoted in prose or another language reads as a mention, not a suppression.
-  if (k === "NOLINT" || k === "cppcheck-suppress" || k.startsWith("coverity["))
-    return ["c", "cc", "cpp", "cxx", "c++", "h", "hh", "hpp", "hxx", "ipp", "inl", "cu", "cuh"].includes(ext);
-  return true;
+  return idiom.exts.includes(ext);
 }
 
 export function classifyFile(f) {
@@ -1054,9 +1106,10 @@ export function auditHead(repo, events) {
   // PHPUnit's markTestSkipped/-Incomplete is almost always a conditional
   // environment guard (`if (!extension_loaded(...))`): gating, not debt.
   // The annotation forms (@Disabled, [Ignore], Skip=, #[ignore]) are
-  // unconditional by construction and need no such check.
+  // unconditional by construction and need no such check. The table marks
+  // which idioms get this check (`conditional`).
   const isGuarded = (item) => {
-    if (!item.kind.startsWith("markTest")) return false;
+    if (!idiomFor(item.kind)?.conditional) return false;
     let text = fileCache.get(item.file);
     if (text === undefined) {
       try { text = git(repo, ["show", `HEAD:${item.file}`]); } catch { text = null; }
@@ -4824,11 +4877,12 @@ async function main() {
       if (o.files && o.files.length) {
         // scoped light audit (gated, no blame/dates, cheap enough for a per-turn hook)
         const lite = scanSuppressions(repo, { ref: "HEAD", paths: o.files, gate: true });
-        return console.log(JSON.stringify(lite.map((x) => ({ file: x.file, line: x.line, kind: String(x.kind).trim(), content: x.content }))));
+        return console.log(JSON.stringify(lite.map((x) => ({ file: x.file, line: x.line, kind: String(x.kind).trim(), testSkip: kindIsTestSkip(x.kind), content: x.content }))));
       }
-      // full gated audit (blame-dated, re-silencing fight log), the whole-repo ledger
+      // full gated audit (blame-dated, re-silencing fight log), the whole-repo ledger.
+      // testSkip comes from the idiom table so consumers need not re-derive the skip idioms.
       const live = auditHead(repo, events);
-      return console.log(JSON.stringify(live.map((x) => ({ file: x.file, line: x.line, kind: String(x.kind).trim(), content: x.content ?? "", since: x.since ?? null, sha: x.sha ?? null, resilenced: x.resilenced ?? 0 }))));
+      return console.log(JSON.stringify(live.map((x) => ({ file: x.file, line: x.line, kind: String(x.kind).trim(), testSkip: kindIsTestSkip(x.kind), content: x.content ?? "", since: x.since ?? null, sha: x.sha ?? null, resilenced: x.resilenced ?? 0 }))));
     }
     return console.log(renderAudit(name, auditHead(repo, events)));
   }

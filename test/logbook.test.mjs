@@ -10,7 +10,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { devNull, tmpdir } from "node:os";
 
 import {
-  SUPPRESS_PAT, classifyFile, parseArgs, collectEvents, diffScan, hotspots, analyze,
+  SUPPRESS_PAT, COMMENT_DIRECTIVE, IDIOMS, idiomFor, kindIsTestSkip,
+  classifyFile, parseArgs, collectEvents, diffScan, hotspots, analyze,
   renderLogbookMd, renderJourneyAnsi, journeyBeats, almanacStats,
   loadEvents, kindAllowedInFile, historyInventory,
   PACKAGE_VERSION, NPX_COMMAND, EXTRACTOR_VERSION, FORMAT_VERSION, CONTEXT_ORDER_VERSION,
@@ -121,6 +122,36 @@ test("language-bound idioms only count in their own languages", () => {
   assert.ok(!kindAllowedInFile("NOLINT", "bin/logbook.mjs"), "C/C++ idiom in JS = prose");
   assert.ok(!kindAllowedInFile("cppcheck-suppress", "notes.md"));
   assert.ok(kindAllowedInFile("eslint-disable", "weird.xyz"), "original set stays ungated");
+});
+
+test("the derived detector surfaces equal the pre-table snapshot byte for byte", () => {
+  // test/fixtures/suppression-idioms.json was written from the hand-maintained
+  // SUPPRESS_PAT / COMMENT_DIRECTIVE literals and kindAllowedInFile BEFORE they
+  // were derived from IDIOMS. Byte-identical regex sources mean detector
+  // precision did not change, so EXTRACTOR_VERSION did not need a bump. A
+  // deliberate idiom change must regenerate this fixture AND bump it.
+  const snap = JSON.parse(readFileSync(join(dirname(CLI), "..", "test", "fixtures", "suppression-idioms.json"), "utf8"));
+  assert.equal(SUPPRESS_PAT.source, snap.suppressPat);
+  assert.equal(SUPPRESS_PAT.flags, snap.suppressFlags);
+  assert.equal(COMMENT_DIRECTIVE.source, snap.commentDirective);
+  assert.equal(COMMENT_DIRECTIVE.flags, "");
+  for (const kind of snap.kinds) {
+    const bits = snap.files.map((file) => (kindAllowedInFile(kind, file) ? "1" : "0")).join("");
+    assert.equal(bits, snap.allowed[kind], `kindAllowedInFile truth row for ${JSON.stringify(kind)}`);
+  }
+  // the shared source is what audit hands to `git grep -P`: it must still compile as PCRE
+  const pcre = spawnSync("git", ["grep", "-nP", SUPPRESS_PAT.source, "HEAD", "--", "package.json"],
+    { cwd: join(dirname(CLI), ".."), encoding: "utf8" });
+  assert.ok(pcre.status === 0 || pcre.status === 1, `PCRE compiles the derived source: ${pcre.stderr}`);
+  // every table row is reachable: its own realization maps back to itself
+  for (const idiom of IDIOMS) {
+    const sample = snap.kinds.find((kind) => idiomFor(kind) === idiom);
+    assert.ok(sample !== undefined, `a snapshot kind realizes ${idiom.src}`);
+  }
+  assert.equal(idiomFor("unknown-kind"), null);
+  assert.ok(kindIsTestSkip("it.skip") && kindIsTestSkip(" @Disabled ") && kindIsTestSkip("markTestSkipped("));
+  assert.ok(!kindIsTestSkip("eslint-disable") && !kindIsTestSkip("# noqa") && !kindIsTestSkip("except: pass") &&
+    !kindIsTestSkip("NOLINT") && !kindIsTestSkip("nonsense"));
 });
 
 test("suppression idioms across languages match directives, not lookalikes", () => {
@@ -1019,6 +1050,31 @@ test("audit --json exposes live suppressions with content (full, scoped, and raw
   // raw-ref base (the delta base): grep at the clean base ref, a.js carries no suppression there
   const base = JSON.parse(execFileSync(process.execPath, [CLI, "audit", "--json", "--ref", "HEAD~1", d], { encoding: "utf8" }));
   assert.ok(!base.some((x) => x.file === "a.js"), "no a.js suppression at the base ref (it is what the branch added)");
+});
+
+test("audit --json classifies each live suppression as testSkip or not, from the idiom table", () => {
+  const d = mkdtempSync(join(tmpdir(), "logbook-audit-testskip-"));
+  const g = (args, date) => execFileSync("git", ["-C", d, ...args], { env: { ...process.env,
+    GIT_AUTHOR_NAME: "H", GIT_AUTHOR_EMAIL: "h@x.io", GIT_COMMITTER_NAME: "H",
+    GIT_COMMITTER_EMAIL: "h@x.io", ...(date && { GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date }) } });
+  try {
+    g(["init", "-q"]);
+    writeFileSync(join(d, "a.js"), "/* eslint-disable no-unused-vars */\nlet x = 1;\n");
+    writeFileSync(join(d, "b.test.js"), "it.skip('flaky', () => {});\n");
+    writeFileSync(join(d, "c.py"), "try:\n    f()\nexcept: pass\n");
+    g(["add", "-A"]); g(["commit", "-q", "-m", "three kinds"], "2024-02-01T12:00:00");
+    const byFile = (rows) => Object.fromEntries(rows.map((x) => [x.file, x]));
+    const full = byFile(JSON.parse(execFileSync(process.execPath, [CLI, "audit", "--json", d], { encoding: "utf8" })));
+    assert.equal(full["a.js"].testSkip, false, "a lint directive is not a test skip");
+    assert.equal(full["b.test.js"].testSkip, true, "a skipped test is");
+    assert.equal(full["c.py"].testSkip, false, "a swallowed exception is not");
+    for (const row of Object.values(full)) assert.equal(row.testSkip, kindIsTestSkip(row.kind));
+    const scoped = byFile(JSON.parse(execFileSync(process.execPath,
+      [CLI, "audit", "--json", "--file", "b.test.js", d], { encoding: "utf8" })));
+    assert.equal(scoped["b.test.js"].testSkip, true, "the scoped light shape carries it too");
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
 });
 
 test("suppressions inside string literals are mentions, not directives", () => {
