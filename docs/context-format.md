@@ -6,7 +6,7 @@ agent behavior, task success, or token savings from avoided work.
 ## Method
 
 - Date: 2026-07-13
-- Implementation: the `0.8.0` `formatContextPage` contract
+- Implementation: the `formatContextPage` contract as released in 0.8.0
 - Input: 7,123 already-ordered, path-selected event rows from ten open-source
   repository fixtures used by the development retrieval study
 - Baseline bytes: `JSON.stringify(event) + "\n"` for every row

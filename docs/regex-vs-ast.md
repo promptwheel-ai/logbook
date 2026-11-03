@@ -50,7 +50,7 @@ ground-truth heuristics - the calibration is stable when the ruler improves.
 - **True assertion downgrades are outlier-rare** (~1 in 1,600
   assert-touching commits under the strict v2 ground truth) - which makes
   the tripwire MORE valuable per firing, like the security-revert tag. The
-  detector ships in 0.2.0 scoped to the precisely-judgeable named-matcher
+  detector shipped in 0.2.0, scoped to the precisely-judgeable named-matcher
   class; recall on confirmed cases: 1/1 (v2), 2/2 (v1).
 - **The sharpest finding cuts the other way:** hand-reviewing the AST flags
   showed even real parsers can't cheaply judge bare-assert strength -

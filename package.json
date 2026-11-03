@@ -8,7 +8,7 @@
   },
   "files": [
     "bin",
-    "docs"
+    "NOTICE"
   ],
   "engines": {
     "node": ">=18"

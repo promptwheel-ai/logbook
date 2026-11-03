@@ -1,24 +1,25 @@
 # AST exploration (2026-07-10)
 
-Question: does upgrading detection to AST give real capability or a viral
-edge - and what do we adopt now vs later?
+A design note from early development, kept for the record. It asks whether
+upgrading detection from regex to AST parsing adds real capability, and what
+to adopt when.
 
-## The three plays
+## The three options
 
-1. **Full AST via tree-sitter-class parsers** - REJECTED for core. Kills the
-   zero-dependency single-file constitution (the thing that makes `npx` cold
-   trust possible), adds per-language grammars, and precision is invisible in
-   a demo. If ever shipped: as an opt-in enrichment pack that deepens
-   events.jsonl; core stays single-file.
-2. **A larger AST+dataflow pattern engine** from earlier work - the real
+1. **Full AST via tree-sitter-class parsers**: not adopted for the core. It
+   would end the zero-dependency single-file design (the thing that makes
+   `npx` cold trust possible), add per-language grammars, and the precision
+   gain is invisible in ordinary use. If ever shipped, it would be an opt-in
+   enrichment pack that deepens events.jsonl; the core stays single-file.
+2. **A larger AST+dataflow pattern engine** from earlier work: the real
    deep-analysis asset. If it ships, it ships as an opt-in pack that
-   enriches events.jsonl; never into the zero-dep core.
-3. **AST-grade checks that don't need an AST** - ADOPTED NOW. The canonical
+   enriches events.jsonl, never into the zero-dep core.
+3. **AST-grade checks that don't need an AST**: adopted. The canonical
    "regex can't see this" case is semantic assertion weakening:
    `expect(x).toEqual(y)` → `expect(x).toBeTruthy()`. Same line count,
    assertion gutted. But it IS visible to paired diff analysis: a STRONG
    assertion form removed and a WEAK form added in the same file's hunks is
-   a downgrade. Deterministic, zero-dep, tonight-sized.
+   a downgrade. Deterministic, zero-dep, and small enough to add in one pass.
 
 ## The strength table (v1)
 
@@ -35,21 +36,21 @@ construction: requires both sides in the same commit and file class
 
 ## Python stdlib-AST (v0.3 candidate, not now)
 
-Python ships `ast` in the stdlib - an opt-in deep mode could shell out to
-python3 (as we already shell to git) and parse test files pre/post commit for
-true semantic diffs, no npm deps. Priced at: per-commit `git show` pairs +
-parse = 10-50x slower; needs its own caps and fleet pass. Explore after
-launch if downgrade detection proves the appetite.
+Python ships `ast` in the stdlib. An opt-in deep mode could shell out to
+python3 (as the tool already shells out to git) and parse test files pre/post
+commit for true semantic diffs, with no npm deps. Cost: per-commit `git show`
+pairs plus parsing is 10-50x slower and needs its own caps and a corpus pass.
+Worth exploring only if downgrade detection proves there is demand.
 
 ## Verdict
 
-Regex+heuristics stays the core. Adopt downgrade detection now (it is the
+Regex+heuristics stays the core. Downgrade detection was adopted (it is the
 strongest "not just grep" proof and a real capability). AST proper enters as
-packs, funded by demand, never into the zero-dep core.
+packs, by demand, never into the zero-dep core.
 
-## Postscript: the doctrine the exploration ended at (2026-07-11)
+## Postscript: where the exploration ended (2026-07-11)
 
-The night's real finding, one level above "regex vs AST": **git itself is the
+The real finding, one level above "regex vs AST": **git itself is the
 tool.** Git is already a content-addressed database with a C-speed query
 engine - log, grep, blame, pickaxe (-S), numstat, diff. The logbook is thin
 layers over that substrate:
