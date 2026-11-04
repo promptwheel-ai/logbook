@@ -4226,7 +4226,7 @@ export function doctorRepo(repo) {
   }
   if (skill) add("pass", "skill", `discoverable Logbook skill found at ${sanitizeContextText(skillDisplay, 1024, { markdown: false })}`);
   else add("warn", "skill", "no valid Logbook skill found at conventional repo or home locations",
-    "optional: copy github.com/promptwheel-ai/logbook/blob/master/plugin/SKILL.md to ~/.agents/skills/logbook/SKILL.md");
+    "optional: copy github.com/promptwheel-ai/logbook/blob/master/plugin/skills/logbook/SKILL.md to ~/.agents/skills/logbook/SKILL.md");
 
   if (!events || !ledgerUsable) {
     add("fail", "query", "no verified event record is available", "regenerate artifacts, then retry doctor");

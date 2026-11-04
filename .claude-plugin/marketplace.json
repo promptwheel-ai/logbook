@@ -1,0 +1,16 @@
+{
+  "name": "logbook",
+  "description": "Logbook for Claude Code: your repo's git history as memory, with the MCP tools and the skill in one install.",
+  "owner": {
+    "name": "Matthew Owens",
+    "url": "https://github.com/promptwheel-ai"
+  },
+  "plugins": [
+    {
+      "name": "logbook",
+      "version": "0.1.0",
+      "source": "./plugin",
+      "description": "The logbook skill plus the logbook MCP server (five tools: context, query, digest, audit, annotate), pinned, offline."
+    }
+  ]
+}

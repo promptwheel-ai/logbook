@@ -23,7 +23,7 @@ workflow in `AGENTS.md`, `CLAUDE.md`, or `.cursorrules` so the agent reads
 history before it plans: read `LOGBOOK.md`, page each task path with
 `context --file`, verify leads with `git show`, refresh, `audit`, and
 `annotate` what it verified. The same workflow ships as an agent skill in
-[plugin/SKILL.md](plugin/SKILL.md).
+[plugin/skills/logbook/SKILL.md](plugin/skills/logbook/SKILL.md).
 
 ```text
   1,326 commits · 322 files · 7.3 years · 354 authors
@@ -200,7 +200,7 @@ logbook export [path] --format okf --out NEW_DIR [--ref REF]
   carry `testSkip`.
 - The CLI is driven by one command table: a flag that a command does not take
   is a usage error instead of being silently ignored.
-- The agent skill (`plugin/SKILL.md`) is the lean deterministic-layer text.
+- The agent skill (`plugin/skills/logbook/SKILL.md`) is the lean deterministic-layer text.
 
 ## Upgrading to 0.9.7
 
