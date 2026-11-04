@@ -1,17 +1,17 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.promptwheel-ai/logbook",
-  "description": "Git-history memory for coding agents: reverts, weakened tests, hot spots, and reviewed decisions.",
+  "description": "Git-history memory for coding agents: reverts, weakened tests, hot spots, and unreviewed notes.",
   "repository": {
     "url": "https://github.com/promptwheel-ai/logbook",
     "source": "github"
   },
-  "version": "0.6.0",
+  "version": "0.6.1",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@promptwheel/logbook-mcp",
-      "version": "0.6.0",
+      "version": "0.6.1",
       "transport": {
         "type": "stdio"
       }

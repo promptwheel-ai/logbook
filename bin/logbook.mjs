@@ -15,7 +15,7 @@
 // Classifier lineage: the wild-rate-study scan (calibrated 12/12).
 
 import { spawnSync } from "node:child_process";
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual, randomInt } from "node:crypto";
 import { devNull } from "node:os";
 // Every TRUST-PATH git call must read RAW objects: --no-replace-objects (ignore
 // replace refs) + GIT_GRAFT_FILE=<null> (ignore grafts) + GIT_NO_LAZY_FETCH. So a
@@ -445,7 +445,7 @@ export function diffScan(repo, events, opts, onProgress) {
   const take = (buf) => { scanned = scanWindow(buf, bySha, scanned); if (onProgress) onProgress(Math.min(scanned, total), total); };
   const tryBuf = (args) => { try { return gitPatchBuf(repo, args); } catch { return null; } };
   if (opts.shas) {
-    const FLAGS = ["show", "--no-walk=unsorted", "--pretty=%x1e%H", "-p", "--unified=0"];
+    const FLAGS = ["show", "--no-walk=unsorted", "--pretty=%x1e%H", "-p", "--no-textconv", "--no-ext-diff", "--unified=0"];
     const scanShas = (arr) => {
       if (!arr.length) return true;
       const buf = tryBuf([...FLAGS, ...arr]);
@@ -454,13 +454,13 @@ export function diffScan(repo, events, opts, onProgress) {
     };
     for (let o = 0; o < opts.shas.length; o += WINDOW) if (!scanShas(opts.shas.slice(o, o + WINDOW))) return false;
   } else if (opts.range) {
-    const buf = tryBuf(["log", opts.range, "--no-merges", "--pretty=%x1e%H", "-p", "--unified=0"]);
+    const buf = tryBuf(["log", opts.range, "--no-merges", "--pretty=%x1e%H", "-p", "--no-textconv", "--no-ext-diff", "--unified=0"]);
     if (buf === null) return false; // a range is a single unsplittable request
     take(buf);
   } else {
     const scanSpan = (skip, count) => {
       if (count <= 0) return true;
-      const buf = tryBuf(["log", `-${count}`, `--skip=${skip}`, "--no-merges", ...eraArgs(opts), "--pretty=%x1e%H", "-p", "--unified=0"]);
+      const buf = tryBuf(["log", `-${count}`, `--skip=${skip}`, "--no-merges", ...eraArgs(opts), "--pretty=%x1e%H", "-p", "--no-textconv", "--no-ext-diff", "--unified=0"]);
       if (buf === null) { if (count === 1) return false; const h = count >> 1; return scanSpan(skip, h) && scanSpan(skip + h, count - h); }
       take(buf); return true;
     };
@@ -552,6 +552,28 @@ function isCurrentCachedEvent(event) {
     event.suppressions.every((suppression) => typeof suppression === "string");
 }
 
+// Reused rows are evidence only while git still agrees with them. On every
+// reuse a few rows are chosen at random and re-derived from their commits, and
+// each must match its cached row byte for byte; one mismatch rebuilds the whole
+// record. A ledger edited by hand or committed by someone else can therefore
+// not be served reliably, whichever rows were touched, and the loader is the
+// one place every reader (CLI and MCP) passes through.
+const REUSE_SAMPLE = 3;
+function sampleVerified(repo, rows, opts, scanDiff) {
+  if (!rows.length) return true;
+  const picks = new Map();
+  while (picks.size < Math.min(REUSE_SAMPLE, rows.length)) {
+    const row = rows[randomInt(rows.length)];
+    picks.set(row.fullSha, row);
+  }
+  const shas = [...picks.keys()];
+  let fresh;
+  try { fresh = collectEventsForShas(repo, shas); } catch { return false; }
+  if (fresh.length !== shas.length) return false;
+  if (!scanDiff(repo, fresh, { ...opts, shas }, undefined)) return false;
+  return fresh.every((event) => JSON.stringify(event) === JSON.stringify(picks.get(event.fullSha)));
+}
+
 export function loadEvents(repo, opts, onProgress, scanDiff = diffScan) {
   if (process.env.LOGBOOK_NO_CACHE) return null;
   if (opts.max !== DEFAULT_MAX || opts.since || opts.until || opts.range) return null;
@@ -588,9 +610,13 @@ export function loadEvents(repo, opts, onProgress, scanDiff = diffScan) {
     const missingShas = orderedShas.filter((sha) => !cachedBySha.has(sha));
     if (!missingShas.length) {
       const ordered = orderedShas.map((sha) => cachedBySha.get(sha));
+      if (!sampleVerified(repo, ordered, opts, scanDiff)) return null;
       return { events: ordered, mode: "cached", capped };
     }
 
+    const missing = new Set(missingShas);
+    const reusedRows = orderedShas.filter((sha) => !missing.has(sha)).map((sha) => cachedBySha.get(sha));
+    if (!sampleVerified(repo, reusedRows, opts, scanDiff)) return null;
     const fresh = collectEventsForShas(repo, missingShas);
     if (!scanDiff(repo, fresh, { ...opts, shas: missingShas }, onProgress))
       return null;
@@ -959,6 +985,27 @@ export function parseArtifactRecord(markdown) {
 export function writeArtifactBundle(outDir, {
   name, A, shallow, capped, notes = [], headSha, record, ledgerText = null,
 }) {
+  // Never replace a LOGBOOK.md that logbook did not write, or an events.jsonl
+  // that is not a ledger: a file by either name that a person wrote is theirs,
+  // and an error is cheaper than a lost file.
+  const digestPath = join(outDir, "LOGBOOK.md");
+  if (existsSync(digestPath)) {
+    const existing = readRegularUtf8NoFollow(digestPath, MAX_EVENT_CACHE);
+    if (existing.error || !/<!-- logbook:generated-through:/.test(existing.text))
+      throw new Error(`refusing to replace a LOGBOOK.md that logbook did not write: ${digestPath} (move it aside first)`);
+  }
+  if (ledgerText !== null) {
+    const ledgerPath = join(outDir, "events.jsonl");
+    if (existsSync(ledgerPath)) {
+      const existing = readRegularUtf8NoFollow(ledgerPath, MAX_EVENT_CACHE);
+      const isLedger = !existing.error && existing.text.split("\n").filter(Boolean).every((line) => {
+        try { const row = JSON.parse(line); return Boolean(row) && typeof row === "object" && (typeof row.fullSha === "string" || typeof row.sha === "string"); }
+        catch { return false; }
+      });
+      if (!isLedger)
+        throw new Error(`refusing to replace an events.jsonl that is not a logbook ledger: ${ledgerPath} (move it aside first)`);
+    }
+  }
   if (ledgerText !== null) {
     if (record.sha256 !== sha256(ledgerText))
       throw new Error("artifact record hash does not match events ledger");
@@ -1135,7 +1182,7 @@ export function auditHead(repo, events) {
   {
     for (const item of live.slice(0, 30)) {
       try {
-        const out = git(repo, ["log", "-S", item.kind, "--format=%x1e%H", "-p", "--unified=0", "--", item.file]);
+        const out = git(repo, ["log", "-S", item.kind, "--format=%x1e%H", "-p", "--no-textconv", "--no-ext-diff", "--unified=0", "--", item.file]);
         let seq = "";
         for (const chunk of out.split("\x1e")) {
           if (!chunk.trim()) continue;
@@ -4396,7 +4443,7 @@ export const REPO_MEMORY_BLOCK = UNPINNED_REPO_MEMORY_BLOCK.replaceAll(
 // block a release writes is never its own migration source.
 // Add each release that shipped the LEAN block here when the next version is cut;
 // the test suite refuses a version bump that leaves the previous release unlisted.
-export const LEAN_TEMPLATE_RELEASES = ["0.9.7", "0.9.8"];
+export const LEAN_TEMPLATE_RELEASES = ["0.9.7", "0.9.8", "0.9.9"];
 const PINNED_LEAN_REPO_MEMORY_BLOCKS = LEAN_TEMPLATE_RELEASES
   .filter((version) => version !== PACKAGE_VERSION)
   .map((version) => UNPINNED_REPO_MEMORY_BLOCK.replaceAll(

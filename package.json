@@ -1,6 +1,6 @@
 {
   "name": "@promptwheel/logbook",
-  "version": "0.9.8",
+  "version": "0.9.9",
   "description": "Local Git-history memory with immediate unreviewed notes and optional reviewed temporal decisions for coding agents.",
   "type": "module",
   "bin": {

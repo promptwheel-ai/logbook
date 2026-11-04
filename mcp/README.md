@@ -62,8 +62,9 @@ the agent when to call logbook_digest.
 
 Three cache layers: session memo per HEAD (repeat calls: 4ms), disk reuse
 of events.jsonl with incremental append (0.4s on the 20k-commit repo we
-measured - the ledger must exist, i.e. a CLI run wrote it; the MCP server
-itself keeps its cache in memory and does not write events.jsonl), and
+measured - the ledger must exist, i.e. a CLI run or logbook_annotate wrote it;
+a random sample of reused rows is re-derived from git on every reuse; the
+read-only tools keep their cache in memory and write nothing), and
 windowed cold builds that emit MCP progress notifications. Clients can opt
 in to resetting their timeout on progress (the official TypeScript SDK
 uses `resetTimeoutOnProgress: true`); without that opt-in, a cold build on

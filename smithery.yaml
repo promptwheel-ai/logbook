@@ -5,4 +5,4 @@ startCommand:
     type: object
     properties: {}
   commandFunction: |-
-    (config) => ({ command: 'npx', args: ['-y', '@promptwheel/logbook-mcp@0.6.0'] })
+    (config) => ({ command: 'npx', args: ['-y', '@promptwheel/logbook-mcp@0.6.1'] })

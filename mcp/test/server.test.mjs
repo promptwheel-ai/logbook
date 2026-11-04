@@ -5,6 +5,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, execFileSync } from "node:child_process";
+import { UNTRUSTED_EVIDENCE_WARNING } from "@promptwheel/logbook";
 import { mkdtempSync, writeFileSync, rmSync, readFileSync, mkdirSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -40,7 +41,8 @@ before(() => {
     g(["add", "-A"]); g(["commit", "-q", "-m", `c${i}`]);
   }
   for (let i = 5; i < 105; i++) g(["commit", "-q", "--allow-empty", "-m", `c${i}`]);
-  child = spawn(process.execPath, [SERVER], { stdio: ["pipe", "pipe", "inherit"] });
+  // the server confines tool calls to its cwd plus LOGBOOK_MCP_ROOTS; the test repos live in tmpdir
+  child = spawn(process.execPath, [SERVER], { stdio: ["pipe", "pipe", "inherit"], env: { ...process.env, LOGBOOK_MCP_ROOTS: tmpdir() } });
   child.stdout.on("data", (d) => {
     buf += d;
     let nl;
@@ -141,9 +143,9 @@ test("release metadata requires the plane-native core", () => {
   const corePkg = JSON.parse(readFileSync(join(mcpRoot, "..", "package.json"), "utf8"));
   const lock = JSON.parse(readFileSync(join(mcpRoot, "package-lock.json"), "utf8"));
   const listing = JSON.parse(readFileSync(join(mcpRoot, "server.json"), "utf8"));
-  assert.equal(pkg.version, "0.6.0");
-  assert.equal(pkg.dependencies["@promptwheel/logbook"], "^0.9.7");   // logbook_query relies on query --json honoring filters (core 0.9.7+)
-  assert.equal(lock.packages[""].dependencies["@promptwheel/logbook"], "^0.9.7");
+  assert.equal(pkg.version, "0.6.1");
+  assert.equal(pkg.dependencies["@promptwheel/logbook"], "^0.9.9");   // sampled ledger reuse and the write refusal (core 0.9.9+)
+  assert.equal(lock.packages[""].dependencies["@promptwheel/logbook"], "^0.9.9");
   assert.equal(lock.packages[".."].version, corePkg.version,
     "the development lock's linked core metadata follows the root package");
   assert.equal(listing.version, pkg.version);
@@ -341,4 +343,37 @@ test("MCP audit neutralizes Python comment directives that could become Markdown
   } finally {
     rmSync(isolated, { recursive: true, force: true });
   }
+});
+
+test("a repo outside the server's workspace is refused, for reading and for writing", async () => {
+  for (const name of ["logbook_digest", "logbook_query", "logbook_annotate"]) {
+    const args = name === "logbook_annotate" ? { repo: "/", sha: "HEAD", why: "x" } : { repo: "/" };
+    const r = await rpc("tools/call", { name, arguments: args });
+    assert.equal(r.result.isError, true, name);
+    assert.match(r.result.content[0].text, /outside this server's workspace/);
+  }
+});
+
+test("query limit is capped at 1000 and every query answer carries the untrusted-evidence warning as its own block", async () => {
+  const over = await rpc("tools/call", { name: "logbook_query", arguments: { repo, limit: 5000 } });
+  assert.ok(over.error || over.result?.isError, "a limit over 1000 is rejected");
+  const ok = await rpc("tools/call", { name: "logbook_query", arguments: { repo, limit: 3 } });
+  assert.equal(ok.result.content.length, 2);
+  assert.match(ok.result.content[0].text, /^\d+ matching event/);
+  assert.equal(ok.result.content[1].text, UNTRUSTED_EVIDENCE_WARNING);
+});
+
+test("annotate refuses to replace a LOGBOOK.md that logbook did not write", async () => {
+  const d = mkdtempSync(join(tmpdir(), "logbook-mcp-human-"));
+  const env = { ...process.env, GIT_AUTHOR_NAME: "H", GIT_AUTHOR_EMAIL: "h@x.io", GIT_COMMITTER_NAME: "H", GIT_COMMITTER_EMAIL: "h@x.io" };
+  const g = (args) => execFileSync("git", ["-C", d, ...args], { env });
+  g(["init", "-q"]);
+  writeFileSync(join(d, "a.js"), "let a = 1;\n"); g(["add", "-A"]); g(["commit", "-q", "-m", "seed"]);
+  const human = "# My sailing log\n\nDay 1: fair winds.\n";
+  writeFileSync(join(d, "LOGBOOK.md"), human);
+  const r = await rpc("tools/call", { name: "logbook_annotate", arguments: { repo: d, sha: "HEAD", why: "a note" } });
+  assert.equal(r.result.isError, true);
+  assert.match(r.result.content[0].text, /refusing to replace a LOGBOOK\.md that logbook did not write/);
+  assert.equal(readFileSync(join(d, "LOGBOOK.md"), "utf8"), human, "the person's file is untouched");
+  rmSync(d, { recursive: true, force: true });
 });

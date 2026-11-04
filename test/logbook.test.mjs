@@ -4482,3 +4482,38 @@ test("plugin/skills/logbook/SKILL.md pins every npx call to this package version
   assert.ok(calls.length >= 5, "the skill shows the npx calls");
   for (const c of calls) assert.equal(c, `npx -y @promptwheel/logbook@${PACKAGE_VERSION}`, `unpinned or stale pin in plugin/skills/logbook/SKILL.md: ${c}`);
 });
+
+test("a hand-edited ledger is not served: reused rows are re-derived from git by sample, and a rebuild answers instead", () => {
+  const { d, g } = tmpGitRepo("logbook-stamp-");
+  g("init", "-q");
+  writeFileSync(join(d, "a.js"), "let a = 1;\n"); g("add", "-A"); g("commit", "-qm", "seed");
+  writeFileSync(join(d, "a.js"), "let a = 2;\n"); g("add", "-A"); g("commit", "-qm", "second");
+  execFileSync(process.execPath, [CLI, d, "-q"], { encoding: "utf8" });   // writes the stamped bundle
+  const opts = { max: 20000, since: null, until: null };
+  assert.ok(loadEvents(d, opts), "a ledger git still agrees with is reused");
+  const evPath = join(d, "events.jsonl");
+  const rows = readFileSync(evPath, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  rows[0].subject = "rewritten by hand";
+  writeFileSync(evPath, rows.map((r) => JSON.stringify(r)).join("\n") + "\n");
+  assert.equal(loadEvents(d, opts), null, "a two-row ledger with one edited row is caught by the sample every time");
+  const served = execFileSync(process.execPath, [CLI, d, "--json"], { encoding: "utf8" });
+  assert.ok(!served.includes("rewritten by hand"), "the tampered row is not served");
+  const fresh = execFileSync(process.execPath, [CLI, d, "--json"], { encoding: "utf8", env: { ...process.env, LOGBOOK_NO_CACHE: "1" } });
+  assert.equal(served, fresh, "the answer is the rebuilt one, byte for byte");
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("the writer refuses to replace a LOGBOOK.md or events.jsonl that logbook did not write", () => {
+  const { d, g } = tmpGitRepo("logbook-human-");
+  g("init", "-q");
+  writeFileSync(join(d, "a.js"), "let a = 1;\n"); g("add", "-A"); g("commit", "-qm", "seed");
+  const human = "# My sailing log\n\nDay 1: fair winds.\n";
+  writeFileSync(join(d, "LOGBOOK.md"), human);
+  assert.throws(() => execFileSync(process.execPath, [CLI, d, "-q"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }), /refusing to replace a LOGBOOK\.md that logbook did not write/);
+  assert.equal(readFileSync(join(d, "LOGBOOK.md"), "utf8"), human);
+  rmSync(join(d, "LOGBOOK.md"));
+  writeFileSync(join(d, "events.jsonl"), "not a ledger\n");
+  assert.throws(() => execFileSync(process.execPath, [CLI, d, "-q"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }), /refusing to replace an events\.jsonl that is not a logbook ledger/);
+  assert.equal(readFileSync(join(d, "events.jsonl"), "utf8"), "not a ledger\n");
+  rmSync(d, { recursive: true, force: true });
+});

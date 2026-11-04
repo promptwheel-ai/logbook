@@ -1,7 +1,7 @@
 {
   "name": "@promptwheel/logbook-mcp",
   "mcpName": "io.github.promptwheel-ai/logbook",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "MCP server for @promptwheel/logbook - turnkey unreviewed notes plus optional reviewable decision cards.",
   "type": "module",
   "keywords": [
@@ -23,7 +23,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
-    "@promptwheel/logbook": "^0.9.7",
+    "@promptwheel/logbook": "^0.9.9",
     "zod": "^3.23.0"
   },
   "publishConfig": {

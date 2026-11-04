@@ -7,13 +7,29 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
+import { resolve as resolvePath, sep as pathSep, delimiter as pathDelimiter } from "node:path";
 import {
   collectEvents, diffScan, hotspots, analyze, renderLogbookMd,
   auditHead, queryEvents, loadEvents, DEFAULT_MAX,
   loadDigestNotes, saveAnnotation, refreshDigestNotes,
-  formatContextPage, sanitizeContextText,
+  formatContextPage, sanitizeContextText, UNTRUSTED_EVIDENCE_WARNING,
 } from "@promptwheel/logbook";
+
+// Every tool call is confined to this server's workspace: the directory it was
+// started in (the session's working directory under Claude Code and most
+// clients) plus any roots listed in LOGBOOK_MCP_ROOTS (a path list). A repo
+// outside them is refused, so a tool call cannot read, or through annotate
+// write, another project on the machine.
+const ALLOWED_ROOTS = [process.cwd(), ...String(process.env.LOGBOOK_MCP_ROOTS || "").split(pathDelimiter).filter(Boolean)]
+  .map((p) => { try { return realpathSync(resolvePath(p)); } catch { return null; } })
+  .filter(Boolean);
+function confined(path) {
+  let real;
+  try { real = realpathSync(resolvePath(path)); } catch { return false; }
+  return ALLOWED_ROOTS.some((root) => real === root || real.startsWith(root + pathSep));
+}
+const REPO_ARG = z.string().optional().describe("absolute path to the git repository; defaults to the server's working directory, and must be inside it (or a root listed in LOGBOOK_MCP_ROOTS)");
 
 // One version source: package.json. server.json (the registry listing) is
 // kept in step by hand and checked by the behavioral test.
@@ -38,11 +54,14 @@ const cache = new Map();
 // artifacts (and annotations) into subdirectories and title the digest
 // after the subfolder
 function rootOf(repo) {
+  const target = repo == null || repo === "" ? process.cwd() : repo;
+  if (!confined(target))
+    throw new Error(`repo is outside this server's workspace (${ALLOWED_ROOTS.join(", ")}): start the server in the repository you want to read, or list more roots in LOGBOOK_MCP_ROOTS`);
   try {
-    const r = execFileSync("git", ["-C", repo, "rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim();
-    if (r) return r;
+    const r = execFileSync("git", ["-C", target, "rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim();
+    if (r && confined(r)) return r;
   } catch { /* fall through */ }
-  return repo;
+  return target;
 }
 function pipeline(repoArg, onProgress) {
   const repo = rootOf(repoArg);
@@ -83,7 +102,7 @@ server.registerTool(
   "logbook_digest",
   {
     description: "The repo's history digest: hotspots, do-not-retry reverts, suppression ledger, fragile areas, notable events, per-file history. Use when starting work in an unfamiliar repo, before a refactor or large change, or when deciding whether green tests can be trusted.",
-    inputSchema: { repo: z.string().describe("absolute path to the git repository") },
+    inputSchema: { repo: REPO_ARG },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
   },
   async ({ repo }, extra) => {
@@ -97,9 +116,9 @@ server.registerTool(
   "logbook_annotate",
   {
     description: "Persist a machine-authored, explicitly unreviewed note after investigating a commit. It appears immediately in the repo digest but never enters check --diff authority. Optional quoted evidence is raw-object verified.",
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
     inputSchema: {
-    repo: z.string().describe("absolute path to the git repository"),
+    repo: REPO_ARG,
     sha: z.string().describe("the commit being explained (any unique prefix)"),
     why: z.string().describe("the inferred cause, one sentence, specific (max 400 chars)"),
     span: z.string().min(1).max(600).optional().describe("optional exact contiguous quote from the commit message or changed blob"),
@@ -127,7 +146,7 @@ server.registerTool(
   "logbook_audit",
   {
     description: "What is STILL suppressed in HEAD and since when (blame-dated), with re-silencing fight logs. Use when asked what tests are skipped, what debt is live, or whether a suppression keeps coming back.",
-    inputSchema: { repo: z.string().describe("absolute path to the git repository") },
+    inputSchema: { repo: REPO_ARG },
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
   },
   async ({ repo }, extra) => {
@@ -145,7 +164,7 @@ server.registerTool(
     description: "Filter the full commit-event record with precision. Start with all relevant files + event type before broad grep. Repeated paths use OR; other filters use AND. Returns up to `limit` matches, default 100, with exact counts and explicit truncation recovery.",
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     inputSchema: {
-    repo: z.string().describe("absolute path to the git repository"),
+    repo: REPO_ARG,
     file: fileFilterSchema.optional().describe("legacy single substring match against files touched"),
     files: z.array(fileFilterSchema).min(1).max(32).optional().describe("file substrings; matches events touching any supplied path"),
     revert: z.boolean().optional(),
@@ -154,7 +173,7 @@ server.registerTool(
     downgrade: z.number().optional().describe("min assertion downgrades"),
     grep: z.string().optional().describe("substring match against commit subject"),
     since: z.string().optional(), until: z.string().optional(),
-    limit: z.number().int().min(1).optional(),
+    limit: z.number().int().min(1).max(1000).optional().describe("at most 1000; for complete coverage page through logbook_context instead"),
     },
   },
   async ({ repo, ...f }, extra) => {
@@ -170,7 +189,12 @@ server.registerTool(
       (all.length > hits.length ? " - TRUNCATED: narrow with file/revert/date filters or pass a higher limit before concluding" : "");
     // Keep every line after the count/status line as JSON: existing MCP
     // consumers parse rows that way, so cap metadata belongs on line one.
-    return { content: [{ type: "text", text: note + capNote + (hits.length ? "\n" + hits.map((e) => JSON.stringify(e)).join("\n") : "") }] };
+    // The JSON block stays byte-identical to the CLI's --json rows (the contract); the warning rides
+    // as its own block because subjects, authors, and paths are repository-controlled text.
+    return { content: [
+      { type: "text", text: note + capNote + (hits.length ? "\n" + hits.map((e) => JSON.stringify(e)).join("\n") : "") },
+      { type: "text", text: UNTRUSTED_EVIDENCE_WARNING },
+    ] };
   }
 );
 
@@ -180,7 +204,7 @@ server.registerTool(
     description: "Return the same filtered history order as logbook_query in compact, bounded pages for agent context. Pass all relevant paths in files; paths use OR and other filters use AND. This is deterministic delivery, not relevance ranking. Repeat identical filters with every NEXT cursor until END complete when completeness matters.",
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     inputSchema: {
-    repo: z.string().describe("absolute path to the git repository"),
+    repo: REPO_ARG,
     file: fileFilterSchema.optional().describe("legacy single substring match against files touched"),
     files: z.array(fileFilterSchema).min(1).max(32).optional().describe("file substrings; matches events touching any supplied path"),
     revert: z.boolean().optional(),
