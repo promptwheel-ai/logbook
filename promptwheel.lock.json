@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "items": [
+    "cap:bin:exec",
+    "cap:mcp:exec",
+    "dep:@modelcontextprotocol/sdk",
+    "dep:@promptwheel/logbook",
+    "dep:zod",
+    "entry:bin:logbook",
+    "module:bin",
+    "module:mcp",
+    "scripthash:mcp/package.json:release:3fcc71bbb9673292",
+    "scripthash:mcp/package.json:release:dry:d0b75858f4cf731a",
+    "scripthash:mcp/package.json:test:a7e30c5ac51b719b",
+    "scripthash:package.json:test:e2b71a21ab2e4bb1",
+    "workflow:.github/workflows/ci.yml",
+    "workflow:.github/workflows/publish-mcp.yml"
+  ]
+}
