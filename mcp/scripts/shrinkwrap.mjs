@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 // Builds npm-shrinkwrap.json for the published package from a clean registry install, so a cold
 // `npx -y @promptwheel/logbook-mcp@x.y.z` resolves the exact tree that was published, transitive
-// packages included. It runs as `prepack` (before `npm publish` packs) and is removed again by
-// `postpack`, so the development tree keeps its link to the core in the parent directory and its
-// own package-lock.json. Zero dependencies.
+// packages included. `npm run release` runs it right before `npm publish` and removes the file
+// after (`--clean`), so the development tree keeps its link to the core in the parent directory
+// and its own package-lock.json. A prepack hook would be too late: npm fixes the tarball's file
+// list before prepack runs. Zero dependencies.
 import { mkdtempSync, writeFileSync, readFileSync, copyFileSync, rmSync, existsSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";

@@ -16,7 +16,8 @@
   },
   "files": [
     "server.mjs",
-    "LICENSE"
+    "LICENSE",
+    "npm-shrinkwrap.json"
   ],
   "engines": {
     "node": ">=18.14.1"
@@ -39,7 +40,7 @@
   "bugs": "https://github.com/promptwheel-ai/logbook/issues",
   "scripts": {
     "test": "node --test test/server.test.mjs",
-    "prepack": "node scripts/shrinkwrap.mjs",
-    "postpack": "node scripts/shrinkwrap.mjs --clean"
+    "release": "node scripts/shrinkwrap.mjs && npm publish && node scripts/shrinkwrap.mjs --clean",
+    "release:dry": "node scripts/shrinkwrap.mjs && npm publish --dry-run && node scripts/shrinkwrap.mjs --clean"
   }
 }

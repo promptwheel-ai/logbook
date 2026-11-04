@@ -150,10 +150,10 @@ test("release metadata requires the plane-native core", () => {
     "the development lock's linked core metadata follows the root package");
   assert.equal(listing.version, pkg.version);
   assert.equal(listing.packages[0].version, pkg.version);
-  // the published tarball carries npm-shrinkwrap.json built from the registry at pack time, so a
-  // cold npx install resolves the exact tree that was published; the dev tree keeps its link
-  assert.equal(pkg.scripts.prepack, "node scripts/shrinkwrap.mjs");
-  assert.equal(pkg.scripts.postpack, "node scripts/shrinkwrap.mjs --clean");
+  // the published tarball carries npm-shrinkwrap.json built from the registry right before the
+  // publish (npm fixes the file list before prepack runs, so a lifecycle hook is too late), and the
+  // file is removed after, so the dev tree keeps its link to the core; `npm run release` is the path
+  assert.equal(pkg.scripts.release, "node scripts/shrinkwrap.mjs && npm publish && node scripts/shrinkwrap.mjs --clean");
 });
 
 test("context traverses the raw query order exactly in bounded pages", async () => {
