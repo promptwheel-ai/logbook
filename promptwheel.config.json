@@ -1,7 +1,7 @@
 {
-  "linkNodeModules": false,
+  "linkDirs": ["mcp/node_modules"],
   "metrics": [
-    { "name": "root_tests",            "cmd": "node --test 2>&1 | grep -cE \"^ok \"", "extract": "number", "direction": "up",   "guard": true, "gamingCheck": false },
+    { "name": "root_tests",            "cmd": "node --test --test-reporter=tap test/*.test.mjs 2>&1 | grep -cE \"^ok \"", "extract": "number", "direction": "up",   "guard": true, "gamingCheck": false },
     { "name": "mcp_tests",             "cmd": "cd mcp && node --test",                 "extract": "exit",   "direction": "pass", "guard": true },
     { "name": "self_run_suppressions", "cmd": "LOGBOOK_NO_CACHE=1 node bin/logbook.mjs query . --suppress 2>/dev/null | wc -l | tr -d \" \"", "extract": "number", "direction": "down", "guard": true, "gamingCheck": false },
     { "name": "runtime_deps",          "cmd": "node -e \"process.exit(Object.keys(require('./package.json').dependencies||{}).length?1:0)\"", "extract": "exit", "direction": "pass", "guard": true },
