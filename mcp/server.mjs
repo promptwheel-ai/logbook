@@ -36,7 +36,8 @@ function confined(path) {
 // home, a folder under a vendored tree) is not part of it and is not widened: the tools work on
 // the directory itself, as in 0.6.1. Derived from git, never from the caller.
 function toplevelOf(path) {
-  try { return execFileSync("git", ["-C", path, "rev-parse", "--show-toplevel"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim() || null; }
+  // through the native real path: git answers with forward slashes on Windows, and every comparison here is against real paths
+  try { const r = execFileSync("git", ["-C", path, "rev-parse", "--show-toplevel"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim(); return r ? realpathSync.native(r) : null; }
   catch { return null; }
 }
 function tracked(path) {   // does the repository track at least one file under this directory?

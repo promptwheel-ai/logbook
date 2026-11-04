@@ -46,8 +46,8 @@ try {
   delete seed.packages[""].devDependencies;
   writeFileSync(join(work, "package-lock.json"), JSON.stringify(seed, null, 2));
   writeFileSync(join(work, "package.json"), JSON.stringify({ name: pkg.name, version: pkg.version, dependencies: deps }, null, 2));
-  execFileSync("npm", ["install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund"], { cwd: work, env, stdio: ["ignore", "pipe", "pipe"] });
-  execFileSync("npm", ["shrinkwrap"], { cwd: work, env, stdio: ["ignore", "pipe", "pipe"] });
+  execFileSync("npm", ["install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund"], { cwd: work, env, stdio: ["ignore", "pipe", "pipe"], shell: process.platform === "win32" });
+  execFileSync("npm", ["shrinkwrap"], { cwd: work, env, stdio: ["ignore", "pipe", "pipe"], shell: process.platform === "win32" });
   const wrapped = JSON.parse(readFileSync(join(work, "npm-shrinkwrap.json"), "utf8"));
   const core = wrapped.packages?.["node_modules/" + CORE]?.version;
   if (!core) throw new Error("the shrinkwrap does not pin " + CORE);
