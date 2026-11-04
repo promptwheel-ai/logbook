@@ -38,6 +38,8 @@
   "homepage": "https://github.com/promptwheel-ai/logbook/tree/master/mcp#readme",
   "bugs": "https://github.com/promptwheel-ai/logbook/issues",
   "scripts": {
-    "test": "node --test test/server.test.mjs"
+    "test": "node --test test/server.test.mjs",
+    "prepack": "node scripts/shrinkwrap.mjs",
+    "postpack": "node scripts/shrinkwrap.mjs --clean"
   }
 }
