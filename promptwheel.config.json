@@ -1,5 +1,6 @@
 {
-  "linkDirs": ["mcp/node_modules"],
+  "linkDirs": [],
+  "setup": "cd mcp && npm ci --ignore-scripts --no-audit --no-fund --prefer-offline",
   "metrics": [
     { "name": "root_tests",            "cmd": "node --test --test-reporter=tap test/*.test.mjs 2>&1 | grep -cE \"^ok \"", "extract": "number", "direction": "up",   "guard": true, "gamingCheck": false },
     { "name": "mcp_tests",             "cmd": "cd mcp && node --test",                 "extract": "exit",   "direction": "pass", "guard": true },

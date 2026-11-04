@@ -26,9 +26,11 @@ Cursor, and any MCP client).
 Every tool call is confined to the directory the server was started in (the session's working
 directory under Claude Code and most clients) plus any roots listed in the `LOGBOOK_MCP_ROOTS`
 environment variable (a path list). A `repo` argument anywhere else is refused, for reading and for
-writing. When that directory sits inside a repository (a session opened in `monorepo/packages/foo`),
-the tools work on the repository's root, as the CLI does: the root is derived from git, never taken
-from the caller.
+writing. When that directory is part of a repository (a session opened in `monorepo/packages/foo`,
+a folder the repository tracks files under), the tools work on the repository's root, as the CLI
+does: the root is derived from git, never taken from the caller. A scratch folder that merely sits
+inside some repository without being tracked by it is not widened; the tools work on the folder
+itself.
 
 The reviewed-decision layer (drafts, leads, `check --diff`, OKF export) is
 experimental, opt-in, and CLI-only; see the core package's
@@ -69,9 +71,10 @@ the agent when to call logbook_digest.
 
 ## Performance
 
-Three cache layers: session memo per HEAD (repeat calls: 4ms), disk reuse
-of events.jsonl with incremental append (0.4s on the 20k-commit repo we
-measured - the ledger must exist, i.e. a CLI run or logbook_annotate wrote it;
+Three cache layers: session memo per HEAD (a repeat call with an unchanged
+HEAD answers in milliseconds), disk reuse of events.jsonl with incremental
+append (a warm run on a history of tens of thousands of commits is well under
+a second; the ledger must exist, i.e. a CLI run or logbook_annotate wrote it;
 a random sample of reused rows is re-derived from git on every reuse; the
 read-only tools keep their cache in memory and write nothing), and
 windowed cold builds that emit MCP progress notifications. Clients can opt

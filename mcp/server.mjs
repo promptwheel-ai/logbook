@@ -29,21 +29,33 @@ function confined(path) {
   try { real = realpathSync(resolvePath(path)); } catch { return false; }
   return ALLOWED_ROOTS.some((root) => real === root || real.startsWith(root + pathSep));
 }
-// the repository that CONTAINS a workspace root (its git toplevel) counts as the workspace too: a
-// session opened in monorepo/packages/foo reads and writes the repository at the root, as the CLI
-// does. Derived from git for the allowed roots, never from the caller, so it widens nothing a
-// caller can choose.
+// the repository that CONTAINS a workspace root (its git toplevel) counts as the workspace too, but
+// only when the workspace is part of that repository: a session opened in monorepo/packages/foo,
+// a directory the repository tracks files under, reads and writes the repository at the root, as
+// the CLI does. A scratch directory that merely sits inside some repository (a dotfiles-tracked
+// home, a folder under a vendored tree) is not part of it and is not widened: the tools work on
+// the directory itself, as in 0.6.1. Derived from git, never from the caller.
 function toplevelOf(path) {
   try { return execFileSync("git", ["-C", path, "rev-parse", "--show-toplevel"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim() || null; }
   catch { return null; }
 }
-const WORKSPACE_TOPLEVELS = ALLOWED_ROOTS.map(toplevelOf).filter(Boolean);
+function tracked(path) {   // does the repository track at least one file under this directory?
+  try { execFileSync("git", ["-C", path, "ls-files", "--error-unmatch", "--", "."], { stdio: "ignore" }); return true; }
+  catch { return false; }
+}
+function projectRoot(path) {
+  const r = toplevelOf(path);
+  if (!r) return null;
+  if (confined(r)) return r;            // the root is inside the workspace anyway
+  return tracked(path) ? r : null;      // above it: only for a directory the repository tracks
+}
+const WORKSPACE_TOPLEVELS = ALLOWED_ROOTS.map(projectRoot).filter(Boolean);
 function workspaceRoot(path) {
   let real;
   try { real = realpathSync(resolvePath(path)); } catch { return false; }
   return WORKSPACE_TOPLEVELS.includes(real);
 }
-const REPO_ARG = z.string().optional().describe("absolute path to the git repository; defaults to the server's working directory, and must be inside it (or a root listed in LOGBOOK_MCP_ROOTS); when that directory sits inside a repository, the tools work on the repository's root");
+const REPO_ARG = z.string().optional().describe("absolute path to the git repository; defaults to the server's working directory, and must be inside it (or a root listed in LOGBOOK_MCP_ROOTS); when that directory is part of a repository (it holds files the repository tracks), the tools work on the repository's root");
 
 // One version source: package.json. server.json (the registry listing) is
 // kept in step by hand and checked by the behavioral test.
@@ -71,10 +83,9 @@ function rootOf(repo) {
   const target = repo == null || repo === "" ? process.cwd() : repo;
   if (!confined(target) && !workspaceRoot(target))
     throw new Error(`repo is outside this server's workspace (${ALLOWED_ROOTS.join(", ")}): start the server in the repository you want to read, or list more roots in LOGBOOK_MCP_ROOTS`);
-  // a confined target resolves to its repository root even when the root lies above the
-  // workspace (the root is derived from git for a path already inside the workspace)
-  const r = toplevelOf(target);
-  return r || target;
+  // a confined target resolves to its repository root, even one above the workspace when the
+  // target is part of that repository (the root is derived from git, never from the caller)
+  return projectRoot(target) || target;
 }
 function pipeline(repoArg, onProgress) {
   const repo = rootOf(repoArg);

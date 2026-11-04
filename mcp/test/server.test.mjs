@@ -143,7 +143,7 @@ test("release metadata requires the plane-native core", () => {
   const corePkg = JSON.parse(readFileSync(join(mcpRoot, "..", "package.json"), "utf8"));
   const lock = JSON.parse(readFileSync(join(mcpRoot, "package-lock.json"), "utf8"));
   const listing = JSON.parse(readFileSync(join(mcpRoot, "server.json"), "utf8"));
-  assert.equal(pkg.version, "0.6.2");
+  assert.equal(pkg.version, "0.6.3");
   assert.equal(pkg.dependencies["@promptwheel/logbook"], "^0.9.10");   // sampled ledger reuse and the write refusal (core 0.9.9+); executable bins (0.9.10)
   assert.equal(lock.packages[""].dependencies["@promptwheel/logbook"], "^0.9.10");
   assert.equal(lock.packages[".."].version, corePkg.version,
@@ -434,7 +434,32 @@ test("a workspace inside a repository works on the repository root, for reading 
   rmSync(d, { recursive: true, force: true });
 });
 
+test("a scratch directory that only sits inside a repository is not widened to that repository's root", async () => {
+  const d = mkdtempSync(join(tmpdir(), "logbook-mcp-scratch-"));
+  const env = { ...process.env, GIT_AUTHOR_NAME: "H", GIT_AUTHOR_EMAIL: "h@x.io", GIT_COMMITTER_NAME: "H", GIT_COMMITTER_EMAIL: "h@x.io" };
+  const g = (args) => execFileSync("git", ["-C", d, ...args], { env });
+  g(["init", "-q"]);
+  writeFileSync(join(d, "a.js"), "let a = 1;\n"); g(["add", "-A"]); g(["commit", "-q", "-m", "seed"]);
+  // the workspace holds nothing the repository tracks (a dotfiles-tracked home, a folder under a vendored tree)
+  const scratch = join(d, "scratch");
+  mkdirSync(scratch, { recursive: true });
+  writeFileSync(join(scratch, "untracked.txt"), "x\n");
+  await withServer(scratch, { LOGBOOK_MCP_ROOTS: "" }, async (call) => {
+    const ann = await call("tools/call", { name: "logbook_annotate", arguments: { sha: "HEAD", why: "a note" } });
+    assert.notEqual(ann.result.isError, true, ann.result.content[0].text);
+    for (const f of ["annotations.jsonl", "LOGBOOK.md", "events.jsonl"]) {
+      assert.ok(existsSync(join(scratch, f)), `${f} written in the workspace itself`);
+      assert.ok(!existsSync(join(d, f)), `${f} not written at the enclosing repository's root`);
+    }
+    const root = await call("tools/call", { name: "logbook_digest", arguments: { repo: d } });
+    assert.equal(root.result.isError, true, "the enclosing repository's root is refused: the workspace is not part of it");
+  });
+  rmSync(d, { recursive: true, force: true });
+});
+
 test("the release shrinkwrap keeps every version the development lock pins (the tested tree is the published tree)", (t) => {
+  // registry-backed: opt in with LOGBOOK_NETWORK_TESTS=1 (ci does), so the repo's own gate stays offline and deterministic
+  if (!process.env.LOGBOOK_NETWORK_TESTS) return t.skip("set LOGBOOK_NETWORK_TESTS=1 to run the registry-backed shrinkwrap check");
   const mcpRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
   const lock = JSON.parse(readFileSync(join(mcpRoot, "package-lock.json"), "utf8"));
   const target = join(mcpRoot, "npm-shrinkwrap.json");

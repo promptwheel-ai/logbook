@@ -83,10 +83,11 @@ and 8 KiB. A cursor is bound to the repository HEAD, filters, analysis window,
 and ordered event set, so a stale or edited cursor is rejected instead of
 silently drifting.
 
-The history scan is cached in bounded windows. On a measured 20k-commit repo:
-43s cold, 0.4s with a prior run on disk, and 4ms on repeat calls in an MCP
-session. `LOGBOOK_NO_CACHE=1` forces a rebuild; `LOGBOOK_WINDOW=N` tunes the
-window.
+The history scan is cached in bounded windows. On a history of tens of
+thousands of commits a cold run takes tens of seconds, a warm run that reuses
+the ledger on disk is well under a second, and a repeat call with an unchanged
+HEAD in an MCP session is milliseconds. `LOGBOOK_NO_CACHE=1` forces a rebuild;
+`LOGBOOK_WINDOW=N` tunes the window.
 
 In a random 400-repo sample of the top 2,500 GitHub repositories, the median
 `LOGBOOK.md` was about 1,000 estimated tokens while the median full `git log`
@@ -182,6 +183,28 @@ logbook reject-lead CARDID --by WHO
 logbook outcomes [path]
 logbook export [path] --format okf --out NEW_DIR [--ref REF]
 ```
+
+## Upgrading to 0.9.10
+
+- A reused `events.jsonl` is no longer trusted as written: on every reuse a
+  random sample of its rows is re-derived from git, and any mismatch rebuilds
+  the ledger. A hand-edited or committed ledger cannot be served as history.
+- The writer refuses to replace a `LOGBOOK.md` that logbook did not write
+  (no generated-through stamp) or an `events.jsonl` that is not a ledger, so a
+  hand-written file with either name is left alone instead of overwritten.
+- The four patch scans run with `--no-textconv --no-ext-diff`, so a repo's
+  diff drivers and textconv filters never shape what the detector reads.
+- MCP server 0.6.x (publishes separately): every tool call is confined to the
+  server's working directory plus `LOGBOOK_MCP_ROOTS`; a workspace that is
+  part of a repository (a folder the repository tracks files under, such as
+  `monorepo/packages/foo`) resolves to that repository's root, and a scratch
+  folder that merely sits inside some repository is not widened. The
+  published tarball carries an `npm-shrinkwrap.json` seeded from the tested
+  lock. `logbook_query` is capped at 1000 rows and returns the untrusted-
+  evidence warning as a second content block; `logbook_annotate` is marked
+  destructive.
+- `bin/logbook.mjs` is tracked executable again (the tarball's bin carries
+  the mode bit).
 
 ## Upgrading to 0.9.8
 
