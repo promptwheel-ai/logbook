@@ -8,7 +8,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { execFileSync } from "node:child_process";
 import { readFileSync, realpathSync } from "node:fs";
-import { resolve as resolvePath, sep as pathSep, delimiter as pathDelimiter } from "node:path";
+import { basename as pathBasename, resolve as resolvePath, sep as pathSep, delimiter as pathDelimiter } from "node:path";
 import {
   collectEvents, diffScan, hotspots, analyze, renderLogbookMd,
   auditHead, queryEvents, loadEvents, DEFAULT_MAX,
@@ -133,7 +133,7 @@ server.registerTool(
   async ({ repo }, extra) => {
     const { A, capped } = pipeline(repo, progressFor(extra));
     const root = rootOf(repo);
-    return { content: [{ type: "text", text: renderLogbookMd(root.split("/").pop(), A, false, capped, loadDigestNotes(root)) }] };
+    return { content: [{ type: "text", text: renderLogbookMd(pathBasename(root), A, false, capped, loadDigestNotes(root)) }] };
   }
 );
 
