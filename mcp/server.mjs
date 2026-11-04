@@ -22,11 +22,11 @@ import {
 // outside them is refused, so a tool call cannot read, or through annotate
 // write, another project on the machine.
 const ALLOWED_ROOTS = [process.cwd(), ...String(process.env.LOGBOOK_MCP_ROOTS || "").split(pathDelimiter).filter(Boolean)]
-  .map((p) => { try { return realpathSync(resolvePath(p)); } catch { return null; } })
+  .map((p) => { try { return realpathSync.native(resolvePath(p)); } catch { return null; } })
   .filter(Boolean);
 function confined(path) {
   let real;
-  try { real = realpathSync(resolvePath(path)); } catch { return false; }
+  try { real = realpathSync.native(resolvePath(path)); } catch { return false; }
   return ALLOWED_ROOTS.some((root) => real === root || real.startsWith(root + pathSep));
 }
 // the repository that CONTAINS a workspace root (its git toplevel) counts as the workspace too, but
@@ -52,7 +52,7 @@ function projectRoot(path) {
 const WORKSPACE_TOPLEVELS = ALLOWED_ROOTS.map(projectRoot).filter(Boolean);
 function workspaceRoot(path) {
   let real;
-  try { real = realpathSync(resolvePath(path)); } catch { return false; }
+  try { real = realpathSync.native(resolvePath(path)); } catch { return false; }
   return WORKSPACE_TOPLEVELS.includes(real);
 }
 const REPO_ARG = z.string().optional().describe("absolute path to the git repository; defaults to the server's working directory, and must be inside it (or a root listed in LOGBOOK_MCP_ROOTS); when that directory is part of a repository (it holds files the repository tracks), the tools work on the repository's root");
