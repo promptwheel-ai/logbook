@@ -21,6 +21,15 @@ Cursor, and any MCP client).
   digest note after an agent investigates a change. Optional exact evidence is
   raw-object verified. Notes never become reviewed-decision authority.
 
+## Workspace
+
+Every tool call is confined to the directory the server was started in (the session's working
+directory under Claude Code and most clients) plus any roots listed in the `LOGBOOK_MCP_ROOTS`
+environment variable (a path list). A `repo` argument anywhere else is refused, for reading and for
+writing. When that directory sits inside a repository (a session opened in `monorepo/packages/foo`),
+the tools work on the repository's root, as the CLI does: the root is derived from git, never taken
+from the caller.
+
 The reviewed-decision layer (drafts, leads, `check --diff`, OKF export) is
 experimental, opt-in, and CLI-only; see the core package's
 `docs/reviewed-decisions.md`. Nothing requires an agent to run `check --diff`

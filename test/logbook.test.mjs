@@ -1880,7 +1880,7 @@ If output says NEXT, repeat with --cursor TOKEN until END complete.
   const migrated091 = readFileSync(join(d7, "AGENTS.md"), "utf8");
   assert.match(migrated091, new RegExp(`@promptwheel/logbook@${PACKAGE_VERSION.replaceAll(".", "\\.")} context`),
     "normal refresh upgrades the exact released 0.9.1 workflow");
-  assert.doesNotMatch(migrated091, /@promptwheel\/logbook@0\.9\.1/);
+  assert.doesNotMatch(migrated091, /@promptwheel\/logbook@0\.9\.1(?!\d)/);
   assert.equal(migrated091.split("## Repo memory").length - 1, 1, "0.9.1 migration never duplicates the block");
   assert.equal(readFileSync(join(d7, "CLAUDE.md"), "utf8"), edited091,
     "a user-edited 0.9.1-shaped block is not rewritten");
@@ -4516,4 +4516,12 @@ test("the writer refuses to replace a LOGBOOK.md or events.jsonl that logbook di
   assert.throws(() => execFileSync(process.execPath, [CLI, d, "-q"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }), /refusing to replace an events\.jsonl that is not a logbook ledger/);
   assert.equal(readFileSync(join(d, "events.jsonl"), "utf8"), "not a ledger\n");
   rmSync(d, { recursive: true, force: true });
+});
+
+test("both bins are tracked executable (100755), so a direct tarball extraction can run them", () => {
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  for (const f of ["bin/logbook.mjs", "mcp/server.mjs"]) {
+    const stage = execFileSync("git", ["-C", root, "ls-files", "--stage", f], { encoding: "utf8" });
+    assert.match(stage, /^100755 /, `${f} is tracked as ${stage.slice(0, 6) || "untracked"}; run: git update-index --chmod=+x ${f}`);
+  }
 });

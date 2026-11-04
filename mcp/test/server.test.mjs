@@ -6,8 +6,8 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, execFileSync } from "node:child_process";
 import { UNTRUSTED_EVIDENCE_WARNING } from "@promptwheel/logbook";
-import { mkdtempSync, writeFileSync, rmSync, readFileSync, mkdirSync, readdirSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { mkdtempSync, writeFileSync, rmSync, readFileSync, mkdirSync, readdirSync, existsSync } from "node:fs";
+import { join, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 
@@ -143,9 +143,9 @@ test("release metadata requires the plane-native core", () => {
   const corePkg = JSON.parse(readFileSync(join(mcpRoot, "..", "package.json"), "utf8"));
   const lock = JSON.parse(readFileSync(join(mcpRoot, "package-lock.json"), "utf8"));
   const listing = JSON.parse(readFileSync(join(mcpRoot, "server.json"), "utf8"));
-  assert.equal(pkg.version, "0.6.1");
-  assert.equal(pkg.dependencies["@promptwheel/logbook"], "^0.9.9");   // sampled ledger reuse and the write refusal (core 0.9.9+)
-  assert.equal(lock.packages[""].dependencies["@promptwheel/logbook"], "^0.9.9");
+  assert.equal(pkg.version, "0.6.2");
+  assert.equal(pkg.dependencies["@promptwheel/logbook"], "^0.9.10");   // sampled ledger reuse and the write refusal (core 0.9.9+); executable bins (0.9.10)
+  assert.equal(lock.packages[""].dependencies["@promptwheel/logbook"], "^0.9.10");
   assert.equal(lock.packages[".."].version, corePkg.version,
     "the development lock's linked core metadata follows the root package");
   assert.equal(listing.version, pkg.version);
@@ -380,4 +380,78 @@ test("annotate refuses to replace a LOGBOOK.md that logbook did not write", asyn
   assert.match(r.result.content[0].text, /refusing to replace a LOGBOOK\.md that logbook did not write/);
   assert.equal(readFileSync(join(d, "LOGBOOK.md"), "utf8"), human, "the person's file is untouched");
   rmSync(d, { recursive: true, force: true });
+});
+
+// a second server, started where the test says, with its own stdio loop
+async function withServer(cwd, env, fn) {
+  const c = spawn(process.execPath, [SERVER], { cwd, stdio: ["pipe", "pipe", "inherit"], env: { ...process.env, ...env } });
+  let b = ""; const pend = new Map(); let id = 100000;
+  c.stdout.on("data", (d) => {
+    b += d; let nl;
+    while ((nl = b.indexOf("\n")) !== -1) {
+      const line = b.slice(0, nl); b = b.slice(nl + 1);
+      if (!line.trim()) continue;
+      let m; try { m = JSON.parse(line); } catch { continue; }
+      const r = pend.get(m.id); if (r) { pend.delete(m.id); r(m); }
+    }
+  });
+  const call = (method, params) => {
+    const i = id++;
+    c.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: i, method, params }) + "\n");
+    return new Promise((res, rej) => { pend.set(i, res); setTimeout(() => { if (pend.delete(i)) rej(new Error(`rpc timeout: ${method}`)); }, 60000).unref(); });
+  };
+  try {
+    await call("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "behavioral-test", version: "0.0.0" } });
+    c.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
+    return await fn(call);
+  } finally { c.kill(); }
+}
+
+test("a workspace inside a repository works on the repository root, for reading and for writing", async () => {
+  const d = mkdtempSync(join(tmpdir(), "logbook-mcp-nested-"));
+  const env = { ...process.env, GIT_AUTHOR_NAME: "H", GIT_AUTHOR_EMAIL: "h@x.io", GIT_COMMITTER_NAME: "H", GIT_COMMITTER_EMAIL: "h@x.io" };
+  const g = (args) => execFileSync("git", ["-C", d, ...args], { env });
+  g(["init", "-q"]);
+  const sub = join(d, "packages", "foo");
+  mkdirSync(sub, { recursive: true });
+  writeFileSync(join(sub, "a.js"), "let a = 1;\n"); g(["add", "-A"]); g(["commit", "-q", "-m", "seed"]);
+  // the workspace is the subfolder only: no LOGBOOK_MCP_ROOTS, the server's cwd is packages/foo
+  await withServer(sub, { LOGBOOK_MCP_ROOTS: "" }, async (call) => {
+    const digest = await call("tools/call", { name: "logbook_digest", arguments: {} });
+    assert.notEqual(digest.result.isError, true, digest.result.content[0].text);
+    assert.match(digest.result.content[0].text, new RegExp("^# The Logbook of " + basename(d) + "\\b"), "titled after the repository root, not the subfolder");
+    const ann = await call("tools/call", { name: "logbook_annotate", arguments: { sha: "HEAD", why: "a note" } });
+    assert.notEqual(ann.result.isError, true, ann.result.content[0].text);
+    for (const f of ["annotations.jsonl", "LOGBOOK.md", "events.jsonl"]) {
+      assert.ok(existsSync(join(d, f)), `${f} written at the repository root`);
+      assert.ok(!existsSync(join(sub, f)), `${f} not written in the subfolder`);
+    }
+    const explicit = await call("tools/call", { name: "logbook_digest", arguments: { repo: d } });
+    assert.notEqual(explicit.result.isError, true, "the root named explicitly is the same repository");
+    const outside = await call("tools/call", { name: "logbook_digest", arguments: { repo: dirname(d) } });
+    assert.equal(outside.result.isError, true, "the directory above the repository is still refused");
+  });
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("the release shrinkwrap keeps every version the development lock pins (the tested tree is the published tree)", (t) => {
+  const mcpRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const lock = JSON.parse(readFileSync(join(mcpRoot, "package-lock.json"), "utf8"));
+  const target = join(mcpRoot, "npm-shrinkwrap.json");
+  // a core range that is already on the registry: the one under test may not be published yet
+  const run = (args) => execFileSync(process.execPath, [join(mcpRoot, "scripts", "shrinkwrap.mjs"), ...args],
+    { cwd: mcpRoot, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, LOGBOOK_SHRINKWRAP_CORE: "^0.9.9" } });
+  try { run([]); }
+  catch (e) {
+    const text = String((e && e.stderr) || (e && e.message) || "");
+    if (/ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ETIMEDOUT|network|fetch failed/i.test(text)) return t.skip("the npm registry is unreachable");
+    throw e;
+  }
+  try {
+    const wrapped = JSON.parse(readFileSync(target, "utf8"));
+    for (const k of ["node_modules/@modelcontextprotocol/sdk", "node_modules/zod"])
+      assert.equal(wrapped.packages[k].version, lock.packages[k].version, `${k} keeps the locked version`);
+    assert.ok(wrapped.packages["node_modules/@promptwheel/logbook"]?.version, "the core resolves from the registry");
+    assert.equal(wrapped.packages[".."], undefined, "no link to the development tree survives");
+  } finally { run(["--clean"]); }
 });

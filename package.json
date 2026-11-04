@@ -1,7 +1,7 @@
 {
   "name": "@promptwheel/logbook",
-  "version": "0.9.9",
-  "description": "Local Git-history memory with immediate unreviewed notes and optional reviewed temporal decisions for coding agents.",
+  "version": "0.9.10",
+  "description": "Turn Git history into memory AI coding agents can use: reverts not to retry, weakened tests, hot spots, and the suppression debt still live in HEAD.",
   "type": "module",
   "bin": {
     "logbook": "bin/logbook.mjs"
@@ -26,7 +26,12 @@
     "repo",
     "archaeology",
     "decisions",
-    "provenance"
+    "provenance",
+    "coding-agents",
+    "claude-code",
+    "codex",
+    "mcp",
+    "agent-memory"
   ],
   "repository": {
     "type": "git",

@@ -29,7 +29,21 @@ function confined(path) {
   try { real = realpathSync(resolvePath(path)); } catch { return false; }
   return ALLOWED_ROOTS.some((root) => real === root || real.startsWith(root + pathSep));
 }
-const REPO_ARG = z.string().optional().describe("absolute path to the git repository; defaults to the server's working directory, and must be inside it (or a root listed in LOGBOOK_MCP_ROOTS)");
+// the repository that CONTAINS a workspace root (its git toplevel) counts as the workspace too: a
+// session opened in monorepo/packages/foo reads and writes the repository at the root, as the CLI
+// does. Derived from git for the allowed roots, never from the caller, so it widens nothing a
+// caller can choose.
+function toplevelOf(path) {
+  try { return execFileSync("git", ["-C", path, "rev-parse", "--show-toplevel"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim() || null; }
+  catch { return null; }
+}
+const WORKSPACE_TOPLEVELS = ALLOWED_ROOTS.map(toplevelOf).filter(Boolean);
+function workspaceRoot(path) {
+  let real;
+  try { real = realpathSync(resolvePath(path)); } catch { return false; }
+  return WORKSPACE_TOPLEVELS.includes(real);
+}
+const REPO_ARG = z.string().optional().describe("absolute path to the git repository; defaults to the server's working directory, and must be inside it (or a root listed in LOGBOOK_MCP_ROOTS); when that directory sits inside a repository, the tools work on the repository's root");
 
 // One version source: package.json. server.json (the registry listing) is
 // kept in step by hand and checked by the behavioral test.
@@ -55,13 +69,12 @@ const cache = new Map();
 // after the subfolder
 function rootOf(repo) {
   const target = repo == null || repo === "" ? process.cwd() : repo;
-  if (!confined(target))
+  if (!confined(target) && !workspaceRoot(target))
     throw new Error(`repo is outside this server's workspace (${ALLOWED_ROOTS.join(", ")}): start the server in the repository you want to read, or list more roots in LOGBOOK_MCP_ROOTS`);
-  try {
-    const r = execFileSync("git", ["-C", target, "rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim();
-    if (r && confined(r)) return r;
-  } catch { /* fall through */ }
-  return target;
+  // a confined target resolves to its repository root even when the root lies above the
+  // workspace (the root is derived from git for a path already inside the workspace)
+  const r = toplevelOf(target);
+  return r || target;
 }
 function pipeline(repoArg, onProgress) {
   const repo = rootOf(repoArg);
