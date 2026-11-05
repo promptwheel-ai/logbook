@@ -25,11 +25,13 @@ history before it plans: read `LOGBOOK.md`, page each task path with
 `annotate` what it verified. The same workflow ships as an agent skill in
 [plugin/skills/logbook/SKILL.md](plugin/skills/logbook/SKILL.md).
 
+Its output, shortened:
+
 ```text
   1,326 commits · 322 files · 7.3 years · 354 authors
 
   ✓ wrote LOGBOOK.md     hotspots · do-not-retry · suppression ledger
-  ✓ wrote events.jsonl   structured history events
+  ✓ wrote events.jsonl   1,326 structured events
 ```
 
 The examples below use `logbook` as the binary name. Run them through the exact
