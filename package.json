@@ -1,6 +1,6 @@
 {
   "name": "@promptwheel/logbook",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "Turn Git history into memory AI coding agents can use: reverts not to retry, weakened tests, hot spots, and the suppression debt still live in HEAD.",
   "type": "module",
   "bin": {

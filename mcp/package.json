@@ -1,7 +1,7 @@
 {
   "name": "@promptwheel/logbook-mcp",
   "mcpName": "io.github.promptwheel-ai/logbook",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Git-history memory for coding agents: reverts, weakened tests, hot spots, and unreviewed notes.",
   "type": "module",
   "keywords": [
@@ -27,7 +27,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
-    "@promptwheel/logbook": "^0.10.0",
+    "@promptwheel/logbook": "^0.11.0",
     "zod": "^3.23.0"
   },
   "publishConfig": {

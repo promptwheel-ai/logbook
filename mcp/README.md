@@ -34,6 +34,8 @@ itself.
 
 ## Upgrading
 
+- From 0.7.x: requires core 0.11, which removed the CLI-only `refine`, `journey`,
+  and `--out`. The five tools are unchanged.
 - From 0.6.x: requires core 0.10, which removed the CLI-only reviewed-decision
   layer. The five tools are unchanged.
 - From 0.5.x: `logbook_annotate_draft` is gone.

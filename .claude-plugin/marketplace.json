@@ -8,7 +8,7 @@
   "plugins": [
     {
       "name": "logbook",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "source": "./plugin",
       "description": "The logbook skill plus the logbook MCP server (five tools: context, query, digest, audit, annotate), pinned, offline."
     }

@@ -8,7 +8,6 @@
 //   LOGBOOK.md    the digest a fresh agent session needs: hotspots,
 //                 do-not-retry (reverts), suppression ledger, fragile areas
 //   events.jsonl  one structured event per commit (the data layer)
-// `logbook journey` prints the repo's story to stdout and writes nothing.
 //
 // Single file. Zero dependencies. History extraction is read-only; explicit
 // commands write generated artifacts and the annotations.jsonl note store.
@@ -188,10 +187,6 @@ export const STRONG_ASSERT_PAT = /\.toStrictEqual\(|\.toEqual\(|\.toBe\(|\.toMat
 export const WEAK_ASSERT_PAT = /\.toBeTruthy\(|\.toBeFalsy\(|\.toBeDefined\(|\.toBeUndefined\(|not\.toThrow\(\)|\.toHaveBeenCalled\(\)|assertTrue\(|assertIsNotNone\(/;
 export const REVERT_PAT = /revert|rollback|undo|back out/i;
 export const FIX_PAT = /\bfix|resolve|repair|bug\b/i;
-// The Threshold: the repo first accepting a gate (tests/CI): the moment it got serious.
-export const GATE_PAT =
-  /\b(add|set ?up|introduce|first).{0,20}(test|ci|workflow|jest|vitest|pipeline|coverage|lint)|\.github\/workflows|jest\.config|vitest\.config|first release|v?1\.0\.0|initial release/i;
-export const MENTOR_PAT = /claude\.md|\.claude|cursorrules|agents?\.md/i;
 
 // ---------- suppression idioms: the ONE table ----------
 // Every detector surface is derived from this table at module load:
@@ -659,36 +654,21 @@ export function analyze(events, touched) {
   }
   const fragile = [...refix.entries()].sort((a, b) => b[1] - a[1]).filter(([, c]) => c >= 2).slice(0, 20);
 
-  // journey beats
   const first = oldest[0];
   const last = oldest[oldest.length - 1];
-  const threshold =
-    oldest.find((e) => e.shape.test || GATE_PAT.test(e.subject)) || null;
-  const mentor = oldest.find((e) => MENTOR_PAT.test(e.subject)) || null;
-  const abyss = events.length ? events.reduce((a, e) => (e.dels > a.dels ? e : a)) : null;
   // Date sanity: repos in the wild contain epoch-1970 and future-dated commits
   // (broken committer clocks). Ignore them for any date arithmetic.
   const MIN_T = Date.parse("1995-01-01");
   const MAX_T = Date.now() + 86400000;
   const validDate = (d) => { const t = Date.parse(d); return t > MIN_T && t < MAX_T; };
   // Era detection: a lone wrong-but-plausible date (one 2001 commit in a 2022
-  // repo) poisons winter/span past the epoch floor. Skip isolated leading
+  // repo) poisons the span past the epoch floor. Skip isolated leading
   // dates that sit >3 years before the next, up to max(1, 0.5%) of commits.
   const times = oldest.filter((e) => validDate(e.date)).map((e) => Date.parse(e.date)).sort((a, b) => a - b);
   let sk = 0;
   const maxSkip = Math.max(1, Math.floor(times.length * 0.005));
   while (sk < maxSkip && sk + 1 < times.length && times[sk + 1] - times[sk] > 3 * 365.25 * 86400000) sk++;
   const eraStart = times.length ? times[sk] : 0;
-  const inEra = (d) => { const t = Date.parse(d); return t >= eraStart && validDate(d); };
-  let winter = { days: 0, from: null, to: null };
-  for (let i = 1; i < oldest.length; i++) {
-    if (!inEra(oldest[i].date) || !inEra(oldest[i - 1].date)) continue;
-    const gap = Math.round(
-      (new Date(oldest[i].date) - new Date(oldest[i - 1].date)) / 86400000
-    );
-    if (gap > winter.days) winter = { days: gap, from: oldest[i - 1].date, to: oldest[i].date };
-  }
-  const trials = fragile.slice(0, 3);
 
   const spanDays = times.length
     ? Math.max(1, Math.round((times[times.length - 1] - eraStart) / 86400000))
@@ -732,13 +712,12 @@ export function analyze(events, touched) {
   const iso = (t) => new Date(t).toISOString().slice(0, 10);
   return {
     notable, notableMore, perFile,
-    n: events.length, first, last, spanDays,
+    n: events.length, spanDays,
     spanStart: times.length ? iso(eraStart) : first?.date,
     spanEnd: times.length ? iso(times[times.length - 1]) : last?.date,
     filesTouched: touched.length,
     authors: authors.size, topAuthor,
     reverts, suspEvents, weaken, fragile,
-    threshold, mentor, abyss, winter, trials,
     srcHot: touched.filter(([f]) => classifyFile(f) === "src").slice(0, 10),
     allHot: touched.slice(0, 6),
   };
@@ -904,40 +883,6 @@ export function renderLogbookMd(name, A, shallow, capped, noteInput = []) {
   return L.join("\n") + "\n";
 }
 
-export function journeyBeats(name, A, { markdown = true } = {}) {
-  // Preserve the journey's existing compact 64-character subject treatment;
-  // sanitization is a render-layer hardening change, not an expansion of it.
-  const safeSubject = (value) => sanitizeContextText(String(value).slice(0, 64), 1024, { markdown });
-  const B = [];
-  if (A.first) B.push(["I", "The Call", `${A.first.date} - "${safeSubject(A.first.subject)}"`, "good"]);
-  if (A.threshold && A.threshold.sha !== A.first?.sha)
-    B.push(["II", "The Threshold", `${A.threshold.date} - the repo accepts a gate: "${safeSubject(A.threshold.subject)}"`, "info"]);
-  if (A.mentor)
-    B.push(["III", "The Mentor", `${A.mentor.date} - "${safeSubject(A.mentor.subject)}"`, "info"]);
-  if (A.trials.length) {
-    const t = A.trials.slice(0, 2).map(([k, c]) => `${c}× "${safeSubject(k.trim())}"`).join("; ");
-    B.push(["IV", "The Road of Trials", `the same battles, fought and re-fought: ${t}`, "odd"]);
-  }
-  if (A.abyss && A.abyss.dels > 100)
-    B.push(["V", "The Abyss", `${A.abyss.date} - ${fmt(A.abyss.dels)} lines unmade in one stroke: "${safeSubject(A.abyss.subject)}"`, "bad"]);
-  if (A.winter.days >= 14)
-    B.push(["VI", "The Long Winter", `${A.winter.days} days of silence, ${A.winter.from} → ${A.winter.to}. the repo waited.`, "info"]);
-  if (A.suspEvents.length)
-    B.push(["VII", "Whispered Bargains", `${A.suspEvents.length}× a test was skipped or a warning hushed. the logbook records; the check verifies.`, "bad"]);
-  if (A.reverts.length)
-    B.push(["VIII", "Paths Unwalked", `${A.reverts.length} roads taken then untaken - first: "${safeSubject(A.reverts[0].subject)}"`, "info"]);
-  if (A.last)
-    B.push(["IX", "The Road Goes On", `${A.last.date} - "${safeSubject(A.last.subject)}". ${fmt(A.n)} commit${A.n === 1 ? "" : "s"} and counting.`, "good"]);
-  return B;
-}
-
-export function almanacStats(A) {
-  const s = [["commits", fmt(A.n)], ["reverts", A.reverts.length], ["bargains", A.suspEvents.length]];
-  if (A.abyss && A.abyss.dels > 100) s.push(["abyss", `−${fmt(A.abyss.dels)}`]);
-  if (A.winter.days >= 14) s.push(["winter", `${A.winter.days}d`]);
-  return s;
-}
-
 export function sha256(text) {
   return createHash("sha256").update(text).digest("hex");
 }
@@ -1014,27 +959,8 @@ export function writeArtifactBundle(outDir, {
 }
 
 const C = process.stdout.isTTY || process.env.FORCE_COLOR
-  ? { gold: "\x1b[38;5;220m", dim: "\x1b[38;5;245m", good: "\x1b[38;5;114m", info: "\x1b[38;5;44m", bad: "\x1b[38;5;203m", odd: "\x1b[38;5;177m", bold: "\x1b[1m", r: "\x1b[0m" }
-  : { gold: "", dim: "", good: "", info: "", bad: "", odd: "", bold: "", r: "" };
-
-export function renderJourneyAnsi(name, A) {
-  const L = [];
-  L.push(`\n  ${C.gold}${C.bold}⚔  The Journey of ${sanitizeContextText(name, 1024, { markdown: false })}${C.r}`);
-  L.push(`  ${C.dim}an epic in ${fmt(A.n)} commit${A.n === 1 ? "" : "s"}, as entered in the logbook${C.r}`);
-  for (const [num, title, body, tone] of journeyBeats(name, A, { markdown: false }))
-    L.push(`\n  ${C[tone]}${C.bold}${num}. ${title}${C.r}\n  ${C.dim}${body}${C.r}`);
-  const stats = almanacStats(A);
-  const line = stats.map(([k, v]) => `${C.gold}${v}${C.r} ${C.dim}${k}${C.r}`).join(" · ");
-  const plain = stats.map(([k, v]) => `${v} ${k}`).join(" · ");
-  const w = Math.max(plain.length + 4, 42);
-  L.push(`\n  ${C.gold}╭${"─".repeat(w)}╮${C.r}`);
-  const title = "THE LOGBOOK ALMANAC";
-  L.push(`  ${C.gold}│${C.r}  ${C.bold}${title}${C.r}${" ".repeat(w - title.length - 2)}${C.gold}│${C.r}`);
-  L.push(`  ${C.gold}│${C.r}  ${line}${" ".repeat(w - plain.length - 2)}${C.gold}│${C.r}`);
-  L.push(`  ${C.gold}╰${"─".repeat(w)}╯${C.r}`);
-  L.push("");
-  return L.join("\n");
-}
+  ? { gold: "\x1b[38;5;220m", dim: "\x1b[38;5;245m", good: "\x1b[38;5;114m", bad: "\x1b[38;5;203m", bold: "\x1b[1m", r: "\x1b[0m" }
+  : { gold: "", dim: "", good: "", bad: "", bold: "", r: "" };
 
 // ---------- audit: what is STILL suppressed today, and since when ----------
 // scanSuppressions: the live-suppression scan at a ref, with line content. The shared core behind
@@ -1960,7 +1886,7 @@ export function saveAnnotation(repo, dir, { sha, why, by, span, side, evidenceFi
 // the event cache and the post-write snapshot is checked so concurrent writers
 // cannot leave LOGBOOK.md stuck on a stale subset.
 export function refreshDigestNotes(repo, opts = {}) {
-  const o = { max: DEFAULT_MAX, since: null, until: null, quiet: true, out: null, ...opts };
+  const o = { max: DEFAULT_MAX, since: null, until: null, quiet: true, ...opts };
   const reused = loadEvents(repo, o);
   let events = reused?.events, capped = reused?.capped;
   if (!events) {
@@ -2387,7 +2313,7 @@ export const REPO_MEMORY_BLOCK = UNPINNED_REPO_MEMORY_BLOCK.replaceAll(
 // block a release writes is never its own migration source.
 // Add each release that shipped the LEAN block here when the next version is cut;
 // the test suite refuses a version bump that leaves the previous release unlisted.
-export const LEAN_TEMPLATE_RELEASES = ["0.9.7", "0.9.8", "0.9.9", "0.9.10", "0.10.0"];
+export const LEAN_TEMPLATE_RELEASES = ["0.9.7", "0.9.8", "0.9.9", "0.9.10", "0.10.0", "0.11.0"];
 const PINNED_LEAN_REPO_MEMORY_BLOCKS = LEAN_TEMPLATE_RELEASES
   .filter((version) => version !== PACKAGE_VERSION)
   .map((version) => UNPINNED_REPO_MEMORY_BLOCK.replaceAll(
@@ -2493,7 +2419,6 @@ const FLAGS = {
   "--since": { key: "since", value: true },
   "--until": { key: "until", value: true },
   "--json": { key: "json", note: "--json applies to the default run (the full ledger), query (filtered), and audit" },
-  "--out": { key: "out", value: true },
   "--quiet": { key: "quiet" },
   "--file": { value: true, set: (o, v) => { o.file = v; (o.files ||= []).push(v); } },
   "--revert": { key: "revert" },
@@ -2525,20 +2450,16 @@ const POSITIONAL_LABELS = { repo: "[path]", sha: "SHA", why: "\"WHY\"" };
 // silently ignores an option that would have changed the result elsewhere.
 export const COMMANDS = [
   {
-    name: "init", flags: [...WINDOW_FLAGS, "--out"], run: runDigest,
+    name: "init", flags: WINDOW_FLAGS, run: runDigest,
     usage: [{ syntax: "logbook init [path]",
       help: ["analyze + wire AGENTS.md/CLAUDE.md/.cursorrules", "so your agent is instructed to read history first"] }],
   },
   {
-    name: "run", default: true, flags: [...WINDOW_FLAGS, "--json", "--out"], run: runDigest,
+    name: "run", default: true, flags: [...WINDOW_FLAGS, "--json"], run: runDigest,
     usage: [
       { syntax: "logbook [path]", help: "analyze repo → LOGBOOK.md, events.jsonl" },
       { syntax: "logbook [path] --json", help: "structured events to stdout (writes nothing)" },
     ],
-  },
-  {
-    name: "journey", flags: WINDOW_FLAGS, run: runDigest,
-    usage: [{ syntax: "logbook journey [path]", help: "the repo's story, in color (writes nothing)" }],
   },
   {
     name: "audit", flags: [...WINDOW_FLAGS, "--json", "--file", "--ref"], run: runAudit,
@@ -2565,11 +2486,6 @@ export const COMMANDS = [
     usage: [{ syntax: ["logbook annotate SHA \"WHY\" [--span \"exact quote\" --side message|diff]",
       "              [--evidence-file P] [--by WHO] [path]"],
       help: ["persist an immediately visible UNREVIEWED digest note;", "grounded spans are optional and raw-verified"] }],
-  },
-  {
-    name: "refine", flags: [...WINDOW_FLAGS, "--limit"], run: runRefine,
-    usage: [{ syntax: "logbook refine [path] [--limit N]",
-      help: ["on-demand worklist: un-annotated notable decisions", "(reverts/suppressions) to investigate + annotate"] }],
   },
 ];
 const COMMAND_WORDS = new Map();
@@ -2600,7 +2516,6 @@ ${usageRows(COMMANDS)}
   options:
     -n, --max N        commits to analyze (default ${DEFAULT_MAX})
     --since / --until  era-scoped archaeology (git date formats)
-    --out DIR          output directory for the history artifacts
     -q, --quiet        suppress the summary
     -v, --version      print version
 
@@ -2609,7 +2524,7 @@ ${usageRows(COMMANDS)}
 }
 
 export function parseArgs(argv) {
-  const o = { cmd: "run", repo: ".", max: DEFAULT_MAX, since: null, until: null, json: false, quiet: false, out: null, _given: [] };
+  const o = { cmd: "run", repo: ".", max: DEFAULT_MAX, since: null, until: null, json: false, quiet: false, _given: [] };
   const rest = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -2728,36 +2643,6 @@ function runAnnotate(o, { repo }) {
   if (!o.quiet) console.log(`  annotate: ${note.idempotent ? "kept" : "saved"} unreviewed note ${note.sha.slice(0, 8)} in annotations.jsonl + LOGBOOK.md (by ${sanitizeContextText(note.by, 128, { markdown: false })})`);
 }
 
-function runRefine(o, { repo }) {
-  const { events, capped, scanOk } = readLedger(o, repo);
-  // On-demand indexing: the un-annotated notable-decision worklist across the
-  // repo. The CLI is deterministic/offline; it names WHAT warrants a "why";
-  // the agent then investigates each and writes cite-or-abstain notes. This
-  // is the lazy loop run deliberately, not blind bulk generation.
-  refuseUnmeasured(scanOk, "suppression/weakening rows are unmeasured; refusing a partial worklist");
-  const digestNotes = loadDigestNotes(repo);
-  if (digestNotes.error) {
-    console.error("logbook: note index is unreadable or malformed; refusing a partial refinement worklist");
-    process.exit(1);
-  }
-  const represented = new Set(digestNotes.notes.map((note) => note.sha));
-  const notable = events.filter((e) =>
-    (e.revert || (e.suppressions && e.suppressions.length) || (e.del_asserts - e.add_asserts > 2)) &&
-    !represented.has(e.fullSha));
-  notable.sort((a, b) => Number(b.revert) - Number(a.revert)); // do-not-retry first; events already newest-first
-  const limit = o.limit ?? 50;
-  console.log(`  ${C.bold}${notable.length}${C.r} un-annotated notable decision${notable.length === 1 ? "" : "s"} in the last ${fmt(o.max)} commits ${C.dim}(investigate each with git show before annotating - never annotate a guess)${C.r}\n`);
-  for (const e of notable.slice(0, limit)) {
-    const kind = e.revert ? "revert" : (e.suppressions?.length ? "suppression" : "weakening");
-    const f = (e.files || [])[0] || "";
-    console.log(`  ${e.sha}  ${C.dim}[${kind}]${C.r}  ${sanitizeContextText(e.subject || "", 120, { markdown: false })}`);
-    console.log(`    ${C.dim}${sanitizeContextText(f, 200, { markdown: false })} - verify: git show ${e.fullSha}${C.r}`);
-    console.log(`    ${C.dim}then preserve: logbook annotate ${e.fullSha} "verified why" --span "exact quote" --side diff --evidence-file ${sanitizeContextText(f, 200, { markdown: false })} --by MODEL${C.r}`);
-  }
-  if (notable.length > limit) console.log(`\n  ${C.dim}… and ${notable.length - limit} more (raise with --limit)${C.r}`);
-  if (capped) console.error(`  analysis capped at ${fmt(o.max)} commits - use -n for a larger window`);
-}
-
 function runAudit(o, { repo, name }) {
   const { events } = readLedger(o, repo);
   if (o.json) {
@@ -2829,7 +2714,7 @@ function runContext(o, { repo }) {
   process.stdout.write(page.text);
 }
 
-// The default run, init, and journey: the digest aggregates need an additional
+// The default run and init: the digest aggregates need an additional
 // name-only history pass that the precision reads above never pay for.
 function runDigest(o, { repo, name, shallow }) {
   const { events, capped, scanOk } = readLedger(o, repo);
@@ -2844,14 +2729,6 @@ function runDigest(o, { repo, name, shallow }) {
   const touched = hotspots(repo, o);
   const A = analyze(events, touched);
   if (!scanOk) A.degraded = true;
-  if (o.cmd === "journey") return console.log(renderJourneyAnsi(name, A));
-
-  if (o.cmd === "init" && o.out) {
-    console.error(`  init ignores --out: the wiring points agents at the repo root`);
-    o.out = null;
-  }
-  const outDir = o.out ? resolve(o.out) : repo;
-  mkdirSync(outDir, { recursive: true });
   // Digest notes remain a separate, explicitly unreviewed recall channel.
   const headSha = git(repo, ["rev-parse", "HEAD"]).trim();
   const ledgerText = events.map((event) => JSON.stringify(event)).join("\n") + "\n";
@@ -2865,7 +2742,7 @@ function runDigest(o, { repo, name, shallow }) {
   // A failed scan may render its explicit warning, but must not persist the
   // partial ledger: the next run could otherwise accept it as clean.
   const written = withStableNoteSnapshot(repo, (notes) => {
-    writeArtifactBundle(outDir, {
+    writeArtifactBundle(repo, {
       name, A, shallow, capped, notes, headSha, record,
       ledgerText: scanOk ? ledgerText : null,
     });
@@ -2874,7 +2751,7 @@ function runDigest(o, { repo, name, shallow }) {
   if (written.error) throw new Error(`digest artifacts could not be replaced safely: ${written.error}`);
   // A normal refresh updates exact released wiring too; otherwise LOGBOOK.md
   // would move on while AGENTS.md kept describing a workflow it no longer has.
-  if (!o.out) refreshReleasedWiring(repo, o.quiet);
+  refreshReleasedWiring(repo, o.quiet);
 
   if (o.cmd === "init") wireAgentFiles(repo, o.quiet);
   if (!o.quiet) {
@@ -2890,7 +2767,6 @@ function runDigest(o, { repo, name, shallow }) {
       console.log(`  ${C.bad}⚠${C.r} did not write ${C.bold}events.jsonl${C.r}   ${C.dim}diff scan incomplete; any existing ledger was left untouched${C.r}`);
     console.log("");
     if (shallow) console.log(`  ${C.bad}⚠${C.r} ${C.dim}shallow clone - run git fetch --unshallow for the full record${C.r}\n`);
-    console.log(`  ${C.dim}next:${C.r} logbook journey   ${C.dim}(see it in color)${C.r}\n`);
   }
   if (!scanOk) process.exitCode = 1;
 }
