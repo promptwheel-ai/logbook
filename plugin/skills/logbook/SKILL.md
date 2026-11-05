@@ -21,7 +21,7 @@ They are the same engine as the commands below and need no shell; the commands a
 without the tools.
 
 ```bash
-npx -y @promptwheel/logbook@0.11.0              # analyze current repo → 3 files
+npx -y @promptwheel/logbook@0.11.0              # analyze current repo → 2 files (LOGBOOK.md, events.jsonl)
 npx -y @promptwheel/logbook@0.11.0 --json       # events to stdout (writes nothing)
 ```
 

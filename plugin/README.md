@@ -25,8 +25,7 @@ Most people want the Sawbuck plugin instead: `/plugin marketplace add sawbuck-ai
   to read the history before planning, diagnosing, or editing, and how to treat its entries as leads
   to verify, not conclusions. It tells Claude to use the tools above first.
 
-The same engine powers the memory half of [Sawbuck](https://sawbuck.ai/memory) and the `logbook`
-skill inside the `promptwheel` plugin. Install this one when you want the tools, not only the skill.
+The same engine is behind `sawbuck context` and `sawbuck debt` in [Sawbuck](https://sawbuck.ai).
 
 ## What this plugin runs, writes, and sends (the full list)
 

@@ -1,7 +1,7 @@
 {
   "name": "logbook",
   "displayName": "Logbook",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Git-history memory for coding agents, as tools and a skill: hot spots, do-not-retry reverts, weakened tests, live suppression debt, and the unreviewed notes you file, read from the repo's own git log. The MCP server is the pinned @promptwheel/logbook-mcp@0.8.0, confined to the session's repository; nothing leaves the machine.",
   "keywords": [
     "memory",
@@ -11,11 +11,11 @@
     "mcp",
     "promptwheel"
   ],
-  "homepage": "https://sawbuck.ai/memory",
+  "homepage": "https://sawbuck.ai",
   "repository": "https://github.com/promptwheel-ai/logbook",
   "documentationUrl": "https://github.com/promptwheel-ai/logbook#readme",
   "supportUrl": "https://github.com/promptwheel-ai/logbook/issues",
-  "privacyPolicyUrl": "https://promptwheel.com/privacy",
+  "privacyPolicyUrl": "https://sawbuck.ai/privacy",
   "license": "Apache-2.0",
   "author": {
     "name": "Matthew Owens"
