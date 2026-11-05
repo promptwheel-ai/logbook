@@ -21,9 +21,9 @@ They are the same engine as the commands below and need no shell; the commands a
 without the tools.
 
 ```bash
-npx -y @promptwheel/logbook@0.9.10              # analyze current repo → 3 files
-npx -y @promptwheel/logbook@0.9.10 journey      # the story, in color (writes nothing)
-npx -y @promptwheel/logbook@0.9.10 --json       # events to stdout (writes nothing)
+npx -y @promptwheel/logbook@0.10.0              # analyze current repo → 3 files
+npx -y @promptwheel/logbook@0.10.0 journey      # the story, in color (writes nothing)
+npx -y @promptwheel/logbook@0.10.0 --json       # events to stdout (writes nothing)
 ```
 
 Never touches source or git history. It writes its generated artifacts; after
@@ -41,10 +41,10 @@ When `LOGBOOK.md` exists:
    `$(git rev-parse --show-toplevel)/LOGBOOK.md`; do not load the full digest by
    default.
 3. Query each task path with
-   `npx -y @promptwheel/logbook@0.9.10 query --file path/to/file --revert`. Do not
+   `npx -y @promptwheel/logbook@0.10.0 query --file path/to/file --revert`. Do not
    replace this with a broad keyword search.
-4. Follow the brief's Action line. LOW is normally a hotspot map, but reviewed
-   annotations are explicit rationale and still require reading their keyed
+4. Follow the brief's Action line. LOW is normally a hotspot map, but unreviewed
+   notes are recorded rationale and still require reading their keyed
    LOGBOOK.md entries. For MEDIUM/HIGH, inspect only the task-relevant sections
    the Action line names.
 5. TRIAGE, don't parrot: the logbook is the recall layer; you are the precision
@@ -70,7 +70,7 @@ WHY something happened (a revert's failure mode, a suppression's cause),
 save it so the next session gets it free instead of re-investigating:
 
 ```bash
-npx -y @promptwheel/logbook@0.9.10 annotate SHA "one specific sentence" --by MODEL
+npx -y @promptwheel/logbook@0.10.0 annotate SHA "one specific sentence" --by MODEL
 ```
 
 Annotations are sha-keyed, attributed, dated, and merged into LOGBOOK.md as
@@ -88,11 +88,11 @@ context window). Start with task paths and event type before broad terms:
 
 ```bash
 # every revert touching a file
-npx -y @promptwheel/logbook@0.9.10 query --file lib/response.js --revert
+npx -y @promptwheel/logbook@0.10.0 query --file lib/response.js --revert
 # all assertion-weakening events (3+ net) since a date
-npx -y @promptwheel/logbook@0.9.10 query --weaken 3 --since 2024-01-01
+npx -y @promptwheel/logbook@0.10.0 query --weaken 3 --since 2024-01-01
 # all suppression events, era-scoped
-npx -y @promptwheel/logbook@0.9.10 query --suppress --since 2024-01-01
+npx -y @promptwheel/logbook@0.10.0 query --suppress --since 2024-01-01
 ```
 
 Use broad `--grep` only after path/event filters. If output says `TRUNCATED`,

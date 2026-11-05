@@ -137,15 +137,15 @@ test("multi-file schemas reject empty or oversized combined filters", async () =
   assert.equal(oversizedArrayItem.result.isError, true, "array items use the CLI's UTF-8 byte cap");
 });
 
-test("release metadata requires the plane-native core", () => {
+test("release metadata requires the matching core", () => {
   const mcpRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
   const pkg = JSON.parse(readFileSync(join(mcpRoot, "package.json"), "utf8"));
   const corePkg = JSON.parse(readFileSync(join(mcpRoot, "..", "package.json"), "utf8"));
   const lock = JSON.parse(readFileSync(join(mcpRoot, "package-lock.json"), "utf8"));
   const listing = JSON.parse(readFileSync(join(mcpRoot, "server.json"), "utf8"));
-  assert.equal(pkg.version, "0.6.4");
-  assert.equal(pkg.dependencies["@promptwheel/logbook"], "^0.9.10");   // sampled ledger reuse and the write refusal (core 0.9.9+); executable bins (0.9.10)
-  assert.equal(lock.packages[""].dependencies["@promptwheel/logbook"], "^0.9.10");
+  assert.equal(pkg.version, "0.7.0");
+  assert.equal(pkg.dependencies["@promptwheel/logbook"], "^0.10.0");   // the 0.10 core, with the reviewed-decision layer removed
+  assert.equal(lock.packages[""].dependencies["@promptwheel/logbook"], "^0.10.0");
   assert.equal(lock.packages[".."].version, corePkg.version,
     "the development lock's linked core metadata follows the root package");
   assert.equal(listing.version, pkg.version);

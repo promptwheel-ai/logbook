@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 // @promptwheel/logbook-mcp: the logbook over MCP, for clients without a shell.
 // Five tools wrapping the zero-dep core: digest, unreviewed annotation,
-// audit, query, and bounded context pages. The opt-in reviewed-decision
-// layer (drafts, leads, check --diff) stays CLI-only.
+// audit, query, and bounded context pages.
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -140,7 +139,7 @@ server.registerTool(
 server.registerTool(
   "logbook_annotate",
   {
-    description: "Persist a machine-authored, explicitly unreviewed note after investigating a commit. It appears immediately in the repo digest but never enters check --diff authority. Optional quoted evidence is raw-object verified.",
+    description: "Persist a machine-authored, explicitly unreviewed note after investigating a commit. It appears immediately in the repo digest. Optional quoted evidence is raw-object verified.",
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
     inputSchema: {
     repo: REPO_ARG,
@@ -163,7 +162,7 @@ server.registerTool(
     const refreshed = refreshDigestNotes(repo, DEFAULTS);
     if (refreshed.error) return { content: [{ type: "text", text: `saved unreviewed note ${note.sha.slice(0, 8)}, but digest refresh failed: ${sanitizeContextText(refreshed.error, 700)}` }], isError: true };
     if (note.cleanupWarning) return { content: [{ type: "text", text: `saved unreviewed note ${note.sha.slice(0, 8)} and refreshed LOGBOOK.md, but ${sanitizeContextText(note.cleanupWarning, 700)}` }], isError: true };
-    return { content: [{ type: "text", text: `saved unreviewed note ${note.sha.slice(0, 8)} (recorded by ${sanitizeContextText(by || "agent", 512)}) - visible in LOGBOOK.md; never accepted or consumed by check --diff` }] };
+    return { content: [{ type: "text", text: `saved unreviewed note ${note.sha.slice(0, 8)} (recorded by ${sanitizeContextText(by || "agent", 512)}) - visible in LOGBOOK.md` }] };
   }
 );
 

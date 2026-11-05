@@ -24,11 +24,11 @@ npx - npm prefers the same-name local package and shadows the registry.
 5. `init` writes the lean deterministic workflow only: read LOGBOOK.md →
    bounded `context --file` pages per task path to END complete → verify with
    `git show` → refresh, `audit`, and `annotate` with neutral `--by MODEL`
-   attribution; it creates the CLAUDE.md `@AGENTS.md` bridge. The opt-in
-   reviewed-decision commands (`annotate-draft`, `pending`, `accept*`,
-   `check --diff`) are never wired; `doctor` requires exactly the lean lines.
-   Exact released blocks migrate (every plane-template pin is in
-   `LEGACY_BLOCKS`), user-edited blocks are never touched.
+   attribution; it creates the CLAUDE.md `@AGENTS.md` bridge. `doctor` requires
+   exactly the lean lines. Exact released blocks migrate (every plane-template
+   pin stays in `LEGACY_BLOCKS`, naming commands that no longer exist, so old
+   wiring is rewritten rather than stranded), user-edited blocks are never
+   touched.
 6. `DEFAULT_MAX` is the single source for the commit window - the ledger
    cache gate in `loadEvents` depends on it.
 7. Never turn "unmeasurable" into clean: a failed diff scan sets
@@ -40,32 +40,18 @@ npx - npm prefers the same-name local package and shadows the registry.
 9. Generated artifacts use atomic per-file replacement and one shared stamped
    record. `logbook doctor` is read-only and must fail stale/tampered bundles or
    shadowing wiring without repairing them while it checks.
-10. The decision system is plane-only: local inert `.logbook/drafts/`,
-    policy-published `.logbook/leads/`, human-reviewed
-    `.logbook/decisions/`, and byte-bound `.logbook/reviews/`. Keep one
-    authority/read path. Root `annotations.jsonl` is a separate unreviewed
-    recall channel: render it in the digest, never consume it as authority.
-11. In range mode, `check --diff` reads authority from the pinned base commit;
-    local mode pins `HEAD`. A PR must never approve its own card. Malformed,
-    missing, non-ancestral, or unverifiable trust data is unmeasurable, not
-    clean, and exits nonzero.
-12. Grounding proves evidence bytes exist at the named commit side/path. It
-    never proves the model's interpretation, causality, or current
-    applicability. Policy publication creates a labeled machine lead, never a
-    human-reviewed decision.
-13. Review authority comes from the trusted Git commit/branch protection.
-    `--by` is attribution only. Human-reviewed rendering requires an exact
-    matching review record for the canonical decision bytes.
-14. `check --diff` is bounded before expensive per-card validation (20 rows /
-    8 KiB with an opaque cursor), and metrics are aggregate-only. Do not add
-    semantic confidence routing to the release path.
+10. Root `annotations.jsonl` is an unreviewed recall channel: render it in the
+    digest, never present it as verified. Grounding proves evidence bytes exist
+    at the named commit side/path. It never proves the model's interpretation,
+    causality, or current applicability.
+11. Files left by the removed decision layer (`.logbook/`,
+    `decision-cards.jsonl`, `annotation-reviews.jsonl`) are ignored, never read
+    and never an error. `GEN_PAT` keeps them classified as generated.
 
 ## Release policy
 
 Changes are caused by evidence, not comment velocity. Blockers ship
-immediately; noncritical fixes batch; features remain demand-gated. The 0.9
-decision layer is an instrumented alpha, not a lifecycle-complete platform:
-first-class revise/retire commands for accepted decisions remain deferred.
+immediately; noncritical fixes batch; features remain demand-gated.
 
 ## Release gate
 
@@ -79,8 +65,8 @@ a clone of this repo resolves the local package).
 Before planning or editing:
 1. Read LOGBOOK.md at the repo root completely before any history query.
 2. Use the raw history inventory as orientation, not a task-level risk score.
-   Inspect task-relevant do-not-retry, test-trust, and decision-lead entries
-   regardless of repo-wide totals.
+   Inspect task-relevant do-not-retry and test-trust entries regardless of
+   repo-wide totals.
 3. For complete do-not-retry coverage, inspect all relevant paths:
    node bin/logbook.mjs context --file path/to/file --revert
    Repeat --file for each other relevant path. If output says NEXT, repeat the
@@ -94,6 +80,3 @@ When you investigate WHY a listed commit happened and verify it in the diffs,
 persist it immediately as an unreviewed digest note (replace placeholders;
 never annotate guesses):
 node bin/logbook.mjs annotate SHA "one specific sentence" --by MODEL
-The reviewed-decision layer (`annotate-draft`, `pending`, `accept*`,
-`check --diff`) is opt-in and documented in docs/reviewed-decisions.md; never
-run the `accept*` or `reject-lead` commands for the human.

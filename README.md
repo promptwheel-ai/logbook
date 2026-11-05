@@ -113,26 +113,6 @@ The paired check engine, [promptwheel](https://github.com/promptwheel-ai/promptw
 matching surface. Both are described in its
 [INTEGRATE.md](https://github.com/promptwheel-ai/promptwheel/blob/main/INTEGRATE.md).
 
-## Experimental: reviewed decisions and OKF export
-
-Separate from the history layer, and opt-in, Logbook can hold reviewed
-decision cards attached to code paths and surface them when a later diff
-touches those paths. Cards start as local inert drafts (`annotate-draft`,
-`pending`), become authoritative only through an explicit human promotion
-recorded on the trusted Git ref (`accept-draft`, `accept-lead`,
-`reject-lead`), and are checked against a diff with `check --diff`. A
-committed policy can publish lower-authority machine leads (`publish`,
-`outcomes`), and the reviewed plane can be projected one-way into an Open
-Knowledge Format bundle (`export`).
-
-Nothing in this layer runs unless you call it, and it never converts model
-confidence into authority. It is an instrumented alpha: the trust boundary is
-hardened and regression-tested, but review adoption and token return are still
-being measured, and there are no first-class commands yet to revise or retire
-an accepted decision. The workflow, authority tiers, trust model, and evidence
-status are documented in [docs/reviewed-decisions.md](docs/reviewed-decisions.md);
-the export format in [docs/okf-export.md](docs/okf-export.md).
-
 ## Evidence status
 
 An internal six-task planning experiment on history-dense repos found that
@@ -153,8 +133,7 @@ history-dense tasks; not universally better. Details and limits are in
   history erased by squash/rebase and anything never committed.
 - Shallow clones starve historical analysis; fetch the missing history before
   treating absence as evidence.
-- Code maps explain where code is. Logbook focuses on what happened over time
-  and, if you opt in, what a reviewed team decision says about a touched scope.
+- Code maps explain where code is. Logbook focuses on what happened over time.
 
 ## Command reference
 
@@ -170,19 +149,24 @@ logbook annotate SHA "WHY" [optional evidence] [--by WHO]
 logbook refine [path] [--limit N]
 ```
 
-Experimental (opt-in reviewed decisions):
+## Upgrading to 0.10.0
 
-```text
-logbook annotate-draft SHA "WHY" [evidence options] [--by WHO]
-logbook pending [path]
-logbook accept|accept-draft CARDID --by WHO [--file P ...] [--dir P/]
-logbook check --diff [--base SHA --head SHA] [--cursor TOKEN]
-logbook publish [--candidates FILE]
-logbook accept-lead CARDID --by WHO [--claim "corrected text"]
-logbook reject-lead CARDID --by WHO
-logbook outcomes [path]
-logbook export [path] --format okf --out NEW_DIR [--ref REF]
-```
+- The experimental reviewed-decision layer and the OKF export are gone:
+  `annotate-draft`, `pending`, `accept`/`accept-draft`, `accept-lead`,
+  `reject-lead`, `check`, `publish`, `outcomes`, and `export`. Nothing read them
+  by default, and they saw no use.
+- Files that layer left behind (`.logbook/`, `decision-cards.jsonl`,
+  `annotation-reviews.jsonl`) are ignored and can be deleted by hand. They stay
+  classified as generated, so they do not appear as hot spots.
+- `refine` now skips only commits that have a note in `annotations.jsonl`, and
+  `doctor` no longer looks at `.logbook/drafts`.
+- A normal refresh re-pins a `## Repo memory` block written by any earlier
+  release, including the plane template that named the removed commands, so
+  `doctor` passes again after an upgrade. User-edited blocks are never touched.
+- `init`, the digest, `events.jsonl`, `query`, `audit`, `annotate`, `context`,
+  `journey`, `doctor`, and the five MCP tools are otherwise unchanged. The event
+  and `--json` shapes did not change.
+- MCP server 0.7.0 requires this core. Its tools are the same five.
 
 ## Upgrading to 0.9.10
 
@@ -212,8 +196,7 @@ logbook export [path] --format okf --out NEW_DIR [--ref REF]
   workflow only: read `LOGBOOK.md`, bounded `context --file` pages per task
   path, verify with `git show`, refresh, `audit`, and `annotate` verified
   why-notes. The `annotate-draft`, `pending`, `accept-draft`, and
-  `check --diff` lines left the block; that layer is opt-in and documented in
-  `docs/reviewed-decisions.md`. `doctor` requires exactly the lean lines.
+  `check --diff` lines left the block. `doctor` requires exactly the lean lines.
 - A normal refresh re-pins and reshapes a `## Repo memory` block written by
   any earlier 0.9.x release (0.9.7 included), so `doctor` passes again after
   an upgrade. User-edited blocks are never touched.
@@ -231,30 +214,25 @@ logbook export [path] --format okf --out NEW_DIR [--ref REF]
   the rest). It used to print the whole unfiltered ledger. `logbook --json`
   is still the full ledger; `--json` is rejected on commands that have no
   JSON output.
-- The reviewed-decision commands are grouped as experimental in `--help` and
-  documented in `docs/reviewed-decisions.md`. Nothing about them changed.
 - `JOURNEY.md` is no longer written by the default run, and `doctor` no
   longer requires it. `logbook journey` still prints the story; `--compare`
   and its bundled percentile table are gone.
 - The npm tarball ships `bin/` only; the research memos under `docs/` stay in
   the repository. Developer-only smoke scripts were removed.
 - MCP server 0.6.0 (publishes separately from the core): the
-  `logbook_annotate_draft` tool was removed (use the CLI's `annotate-draft`),
-  and the server reports its `package.json` version.
+  `logbook_annotate_draft` tool was removed, and the server reports its `package.json` version.
 
 ## Upgrading from 0.8 or 0.9.0
 
 Existing `annotations.jsonl` rows remain unreviewed digest notes and render
-again; `init` does not turn them into a review backlog. Existing 0.9.0 drafts
-remain local and inert. In 0.9.1, `annotate` once again means immediate digest
-enrichment. A 0.9.0 script that expects `annotate` to return a card ID must use
-the explicit `annotate-draft` command instead. If 0.8 wrote annotations to a
+again. In 0.9.1, `annotate` once again means immediate digest enrichment. If
+0.8 wrote annotations to a
 custom `--out` directory, move that `annotations.jsonl` to the repository root;
 0.9.1 intentionally keeps the note store at one unambiguous location.
 
 ## The logbook records what happened; the check verifies what holds
 
-Logbook tells you what history and reviewed decisions say. [promptwheel](https://github.com/promptwheel-ai/promptwheel)
+Logbook tells you what history says. [promptwheel](https://github.com/promptwheel-ai/promptwheel)
 is the check that verifies whether today's claimed improvement came from the
 code rather than moving the goalposts.
 

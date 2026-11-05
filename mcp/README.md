@@ -19,7 +19,7 @@ Cursor, and any MCP client).
   Pass `files` for a multi-path OR query; remaining filters stay AND constraints.
 - **logbook_annotate** - persist an immediately visible, explicitly unreviewed
   digest note after an agent investigates a change. Optional exact evidence is
-  raw-object verified. Notes never become reviewed-decision authority.
+  raw-object verified.
 
 ## Workspace
 
@@ -32,15 +32,11 @@ does: the root is derived from git, never taken from the caller. A scratch folde
 inside some repository without being tracked by it is not widened; the tools work on the folder
 itself.
 
-The reviewed-decision layer (drafts, leads, `check --diff`, OKF export) is
-experimental, opt-in, and CLI-only; see the core package's
-`docs/reviewed-decisions.md`. Nothing requires an agent to run `check --diff`
-before finishing work.
-
 ## Upgrading
 
-- From 0.5.x: `logbook_annotate_draft` is gone. A caller that needs an inert
-  review card runs the CLI: `logbook annotate-draft SHA "WHY" ...`.
+- From 0.6.x: requires core 0.10, which removed the CLI-only reviewed-decision
+  layer. The five tools are unchanged.
+- From 0.5.x: `logbook_annotate_draft` is gone.
 - From 0.5.0: `logbook_annotate` writes an unreviewed digest note and does not
   return a card ID.
 
