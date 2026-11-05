@@ -6,6 +6,8 @@ against the repository you opened. Nothing leaves it.
 
 ## Install
 
+Most people want the Sawbuck plugin instead: `/plugin marketplace add sawbuck-ai/reins`, which includes this history. This plugin is for Logbook on its own.
+
 ```
 /plugin marketplace add promptwheel-ai/logbook
 /plugin install logbook@logbook
