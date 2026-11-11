@@ -34,6 +34,7 @@
     "access": "public"
   },
   "license": "Apache-2.0",
+  "author": "CodeWheel",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/promptwheel-ai/logbook.git",

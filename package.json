@@ -43,6 +43,7 @@
     "access": "public"
   },
   "license": "Apache-2.0",
+  "author": "CodeWheel",
   "main": "bin/logbook.mjs",
   "exports": "./bin/logbook.mjs"
 }
