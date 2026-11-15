@@ -2434,3 +2434,41 @@ test("both bins are tracked executable (100755), so a direct tarball extraction 
     assert.match(stage, /^100755 /, `${f} is tracked as ${stage.slice(0, 6) || "untracked"}; run: git update-index --chmod=+x ${f}`);
   }
 });
+
+// ---------- a person's own git settings (found 2026-11-15) ----------
+// Every test above runs under whatever git config the machine has, and the release runs them under a blank one. A
+// person's ~/.gitconfig can force colour on, drop the a/ b/ prefixes, name an outside diff tool, or ask for the
+// signature of every commit a log shows (one gpg start for each commit, in each of three passes over the history).
+// A setting in the repo's own config reads the same to git.
+test("own git: the history reads the same under a person's diff, colour and signature settings, and asks gpg nothing", { skip: process.platform === "win32" }, () => {
+  const { d, g } = tmpGitRepo("logbook-own-git-");
+  const tools = mkdtempSync(join(tmpdir(), "logbook-own-tools-"));
+  const gpg = join(tools, "gpg");
+  writeFileSync(gpg, `#!/bin/sh\ncase " $* " in *" --verify "*) echo verify >> "${tools}/gpg.log"; cat > /dev/null; printf '[GNUPG:] GOODSIG 0000000000000000 a\\n'; printf 'gpg: Good signature from "a"\\n' >&2; exit 0 ;; esac\ncat > /dev/null; printf '[GNUPG:] BEGIN_SIGNING H8\\n[GNUPG:] SIG_CREATED D 1 8 00 1700000000 0000000000000000000000000000000000000000\\n' >&2\nprintf -- '-----BEGIN PGP SIGNATURE-----\\n\\nc3RhbmQtaW4=\\n-----END PGP SIGNATURE-----\\n'\n`);
+  chmodSync(gpg, 0o755);
+  g("init", "-q"); g("config", "gpg.program", gpg); g("config", "commit.gpgsign", "true");   // a signed history, as some teams require
+  const put = (f, c) => { mkdirSync(dirname(join(d, f)), { recursive: true }); writeFileSync(join(d, f), c); };
+  const commit = (m) => { g("add", "-A"); g("commit", "-qm", m); };
+  put("src/core.js", "export const add = (a, b) => a + b;\n"); put("src/añadir.js", "export const one = 1;\n"); commit("first light");
+  put("test/core.test.js", "import assert from 'assert';\nassert.equal(add(1,1), 2);\nassert.equal(add(2,2), 4);\nassert.equal(add(3,3), 6);\n"); commit("add tests for core math");
+  put("src/core.js", "export const add = (a, b) => Number(a) + Number(b);\n"); put("src/añadir.js", "export const one = 1; // touched\n"); commit("fix overflow in currency rounding logic");
+  put("src/core.js", "/* eslint-disable no-unused-vars */\nexport const add = (a, b) => Number(a) + Number(b);\n"); commit("tidy module header");
+  put("test/core.test.js", "// TODO: restore\n"); commit("simplify test harness");
+  g("revert", "--no-edit", "HEAD"); 
+  const read = () => {
+    const opts = { max: 5000, since: null, until: null };
+    const events = collectEvents(d, opts); diffScan(d, events, opts);
+    return JSON.stringify({ events, hot: hotspots(d, opts) });
+  };
+  const plain = read();
+  assert.match(plain, /añadir\.js/, "a file name with a byte above 127 is read as it is on disk");
+  assert.doesNotMatch(plain, /\\\\303/, "not as git quotes it");
+  rmSync(join(tools, "gpg.log"), { force: true });
+  for (const [k, v] of [["log.showSignature", "true"], ["color.ui", "always"], ["diff.noprefix", "true"], ["diff.mnemonicPrefix", "true"], ["diff.external", "no-such-diff-tool"], ["diff.context", "0"], ["diff.renames", "copies"], ["core.abbrev", "4"], ["log.date", "relative"], ["format.pretty", "oneline"]]) {
+    g("config", k, v);
+    assert.equal(read(), plain, `the same history with ${k}=${v}`);
+    g("config", "--unset", k);
+  }
+  assert.ok(!existsSync(join(tools, "gpg.log")), "gpg was not asked to verify a signature");
+  rmSync(d, { recursive: true, force: true }); rmSync(tools, { recursive: true, force: true });
+});

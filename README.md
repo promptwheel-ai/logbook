@@ -151,6 +151,11 @@ logbook annotate SHA "WHY" [optional evidence] [--by WHO]
 
 ## Upgrading
 
+0.11.1 reads the same history under your own git settings. Before it, colour forced on
+(`color.ui=always`) changed what was read, a file name with a byte above 127 came back
+quoted and escaped, and `log.showSignature` on a signed history started gpg three times
+for each commit. Nothing to change on your side.
+
 0.11.0 removes `logbook refine`, `logbook journey`, and `--out`. Both commands
 now fail with `not a git repository`, and `--out` is an unknown option.
 Artifacts always go to the repository root. The `analyze` result no longer

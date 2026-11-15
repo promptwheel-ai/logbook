@@ -23,13 +23,18 @@ import { devNull } from "node:os";
 const RAW_GIT_ENV = { GIT_NO_LAZY_FETCH: "1", GIT_GRAFT_FILE: devNull };
 // Suppress only Git's known warning about intentionally setting GIT_GRAFT_FILE.
 const RAW_GIT_PREFIX = ["-c", "advice.graftFileDeprecated=false", "-C"];
+// A person's own git settings must not change what the history reads as. Their ~/.gitconfig can force colour on,
+// drop the a/ b/ prefixes, print a file name with a byte above 127 quoted and escaped, or ask for the signature of
+// every commit a log shows: one gpg start for each commit, in each of the three passes over the history. Given
+// with -c, which wins over every config file. (An outside diff tool is already kept out with --no-ext-diff.)
+const OWN_GIT = ["-c", "log.showSignature=false", "-c", "color.ui=false", "-c", "color.diff=false", "-c", "core.quotePath=false", "-c", "diff.noprefix=false", "-c", "diff.mnemonicPrefix=false"];
 function gitRaw(repo, args) {
-  const r = spawnSync("git", [...RAW_GIT_PREFIX, repo, "--no-replace-objects", ...args], { encoding: "utf8", maxBuffer: 1 << 30, env: { ...process.env, ...RAW_GIT_ENV } });
+  const r = spawnSync("git", [...RAW_GIT_PREFIX, repo, "--no-replace-objects", ...OWN_GIT, ...args], { encoding: "utf8", maxBuffer: 1 << 30, env: { ...process.env, ...RAW_GIT_ENV } });
   if (r.status !== 0) throw new Error((r.stderr || "").trim() || `git ${args[0]} failed`);
   return r.stdout;
 }
 function rawGitStatus(repo, args) { // raw, no-throw; returns {status, stdout}
-  return spawnSync("git", [...RAW_GIT_PREFIX, repo, "--no-replace-objects", ...args], { encoding: "utf8", maxBuffer: 1 << 30, env: { ...process.env, ...RAW_GIT_ENV } });
+  return spawnSync("git", [...RAW_GIT_PREFIX, repo, "--no-replace-objects", ...OWN_GIT, ...args], { encoding: "utf8", maxBuffer: 1 << 30, env: { ...process.env, ...RAW_GIT_ENV } });
 }
 import {
   writeFileSync, existsSync, realpathSync, readFileSync, mkdirSync, lstatSync,
@@ -298,7 +303,7 @@ export function classifyFile(f) {
 
 // ---------- git plumbing (read-only) ----------
 function git(repo, args) {
-  const r = spawnSync("git", ["-C", repo, ...args], {
+  const r = spawnSync("git", ["-C", repo, ...OWN_GIT, ...args], {
     encoding: "utf8",
     maxBuffer: 1 << 30,
   });
@@ -320,7 +325,7 @@ function git(repo, args) {
 // events come out, so it is env-configurable with no cache-coherence impact. Default 2 GiB.
 const SCAN_MAX_BYTES = (() => { const e = Math.floor(Number(process.env.LOGBOOK_SCAN_MAX_BYTES)); return e >= (1 << 20) ? e : 2 * (1 << 30); })();
 function gitPatchBuf(repo, args) {
-  const r = spawnSync("git", ["-C", repo, ...args], { maxBuffer: SCAN_MAX_BYTES });
+  const r = spawnSync("git", ["-C", repo, ...OWN_GIT, ...args], { maxBuffer: SCAN_MAX_BYTES });
   if (r.error) throw r.error;
   if (r.status !== 0) {
     const err = new Error((r.stderr ? r.stderr.toString() : "").trim() || `git ${args[0]} failed`);
@@ -1524,7 +1529,7 @@ const CARRY_BUDGET_BYTES = 64 << 20; // aggregate cap for the carry scan; exceed
 // GIT_NO_LAZY_FETCH=1 (a partial/blob:none clone must NOT silently fetch a
 // missing blob over the network; it must fail, i.e. be treated as unmeasurable).
 function gitBuf(repo, args, opts = {}) {
-  return spawnSync("git", [...RAW_GIT_PREFIX, repo, "--no-replace-objects", ...args],
+  return spawnSync("git", [...RAW_GIT_PREFIX, repo, "--no-replace-objects", ...OWN_GIT, ...args],
     { maxBuffer: MAX_GROUND_BYTES + (1 << 20), env: { ...process.env, ...RAW_GIT_ENV }, ...opts }); // Buffer stdout (no encoding)
 }
 function gitObj(repo, args, opts = {}) { return gitBuf(repo, args, { encoding: "utf8", ...opts }); }
@@ -2313,7 +2318,7 @@ export const REPO_MEMORY_BLOCK = UNPINNED_REPO_MEMORY_BLOCK.replaceAll(
 // block a release writes is never its own migration source.
 // Add each release that shipped the LEAN block here when the next version is cut;
 // the test suite refuses a version bump that leaves the previous release unlisted.
-export const LEAN_TEMPLATE_RELEASES = ["0.9.7", "0.9.8", "0.9.9", "0.9.10", "0.10.0", "0.11.0"];
+export const LEAN_TEMPLATE_RELEASES = ["0.9.7", "0.9.8", "0.9.9", "0.9.10", "0.10.0", "0.11.0", "0.11.1"];
 const PINNED_LEAN_REPO_MEMORY_BLOCKS = LEAN_TEMPLATE_RELEASES
   .filter((version) => version !== PACKAGE_VERSION)
   .map((version) => UNPINNED_REPO_MEMORY_BLOCK.replaceAll(

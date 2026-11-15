@@ -31,8 +31,8 @@ The same engine is behind `sawbuck context` and `sawbuck debt` in [Sawbuck](http
 
 **Programs it runs.** Two, both from npm, both pinned, no shell. The MCP server
 `npx -y @promptwheel/logbook-mcp@0.8.0` is started by Claude Code at session start from `.mcp.json`
-and runs the `@promptwheel/logbook@0.11.0` engine in process. The skill may also tell Claude to run
-`npx -y @promptwheel/logbook@0.11.0 ...` through its Bash tool for the commands the tools do not
+and runs the `@promptwheel/logbook@0.11.1` engine in process. The skill may also tell Claude to run
+`npx -y @promptwheel/logbook@0.11.1 ...` through its Bash tool for the commands the tools do not
 cover, under Claude Code's normal permission prompt. Both need Node 18 or newer and npm on your PATH.
 On Windows outside WSL, Claude Code starts MCP servers through `cmd /c`; edit the plugin's
 `.mcp.json` to `"command": "cmd", "args": ["/c", "npx", ...]` if the server does not start.
