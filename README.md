@@ -1,5 +1,7 @@
 # logbook
 
+Logbook is the git-history part of Sawbuck. The tool is at [github.com/sawbuck-ai/sawbuck](https://github.com/sawbuck-ai/sawbuck).
+
 [![ci](https://github.com/promptwheel-ai/logbook/actions/workflows/ci.yml/badge.svg)](https://github.com/promptwheel-ai/logbook/actions/workflows/ci.yml) [![npm](https://img.shields.io/npm/v/%40promptwheel%2Flogbook?label=npm)](https://www.npmjs.com/package/@promptwheel/logbook)
 
 **Git history is large. When coding agents do not inspect it, they can
